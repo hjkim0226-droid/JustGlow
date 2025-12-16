@@ -2,6 +2,7 @@
  * JustGlow GPU Renderer Implementation
  *
  * DirectX 12 Compute Shader based rendering pipeline.
+ * Fully implements Dual Kawase blur with proper descriptor binding.
  */
 
 #ifdef _WIN32
@@ -14,12 +15,34 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
-// Thread group size for compute shaders
-constexpr UINT THREAD_GROUP_SIZE_X = 16;
-constexpr UINT THREAD_GROUP_SIZE_Y = 16;
+// Thread group size for compute shaders (must match HLSL)
+constexpr UINT THREAD_GROUP_SIZE = 16;
 
-// Maximum descriptors in heap
-constexpr UINT MAX_DESCRIPTORS = 256;
+// Descriptor heap layout:
+// [0-7]    : MIP chain SRVs (max 8 levels)
+// [8-15]   : MIP chain UAVs (max 8 levels)
+// [16]     : External input SRV
+// [17]     : External output UAV
+// [18]     : Original input SRV (for composite)
+constexpr UINT MAX_DESCRIPTORS = 64;
+constexpr UINT MIP_SRV_START = 0;
+constexpr UINT MIP_UAV_START = 8;
+constexpr UINT EXTERNAL_INPUT_SRV = 16;
+constexpr UINT EXTERNAL_OUTPUT_UAV = 17;
+constexpr UINT ORIGINAL_INPUT_SRV = 18;
+
+// ============================================================================
+// Helper to get DLL module handle
+// ============================================================================
+
+static HMODULE GetCurrentModule() {
+    HMODULE hModule = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&GetCurrentModule),
+        &hModule);
+    return hModule;
+}
 
 // ============================================================================
 // Constructor / Destructor
@@ -56,8 +79,8 @@ bool JustGlowGPURenderer::Initialize(
         return false;
     }
 
-    // Create constant buffer
-    if (!CreateConstantBuffer()) {
+    // Create constant buffers
+    if (!CreateConstantBuffers()) {
         return false;
     }
 
@@ -83,6 +106,11 @@ void JustGlowGPURenderer::Shutdown() {
         m_constantBufferPtr = nullptr;
     }
 
+    if (m_blurPassBufferPtr) {
+        m_blurPassBuffer->Unmap(0, nullptr);
+        m_blurPassBufferPtr = nullptr;
+    }
+
     if (m_fenceEvent) {
         CloseHandle(m_fenceEvent);
         m_fenceEvent = nullptr;
@@ -93,8 +121,7 @@ void JustGlowGPURenderer::Shutdown() {
     m_fence.Reset();
     m_srvUavHeap.Reset();
     m_constantBuffer.Reset();
-    m_glowBuffer.Reset();
-    m_tempBuffer.Reset();
+    m_blurPassBuffer.Reset();
 
     for (auto& shader : m_shaders) {
         shader.rootSignature.Reset();
@@ -113,13 +140,11 @@ void JustGlowGPURenderer::Shutdown() {
 bool JustGlowGPURenderer::CreateCommandObjects() {
     HRESULT hr;
 
-    // Create command allocator
     hr = m_device->CreateCommandAllocator(
         D3D12_COMMAND_LIST_TYPE_COMPUTE,
         IID_PPV_ARGS(&m_commandAllocator));
     if (FAILED(hr)) return false;
 
-    // Create command list
     hr = m_device->CreateCommandList(
         0,
         D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -128,14 +153,11 @@ bool JustGlowGPURenderer::CreateCommandObjects() {
         IID_PPV_ARGS(&m_commandList));
     if (FAILED(hr)) return false;
 
-    // Close command list (will be reset before use)
     m_commandList->Close();
 
-    // Create fence
     hr = m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence));
     if (FAILED(hr)) return false;
 
-    // Create fence event
     m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (!m_fenceEvent) return false;
 
@@ -162,19 +184,18 @@ bool JustGlowGPURenderer::CreateDescriptorHeaps() {
 }
 
 // ============================================================================
-// Create Constant Buffer
+// Create Constant Buffers
 // ============================================================================
 
-bool JustGlowGPURenderer::CreateConstantBuffer() {
-    // Constant buffer size (aligned to 256 bytes)
-    UINT cbSize = (sizeof(GlowParams) + 255) & ~255;
-
+bool JustGlowGPURenderer::CreateConstantBuffers() {
     D3D12_HEAP_PROPERTIES heapProps = {};
     heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
 
+    // Main GlowParams constant buffer (b0)
+    UINT cbSize0 = (sizeof(GlowParams) + 255) & ~255;
     D3D12_RESOURCE_DESC bufferDesc = {};
     bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bufferDesc.Width = cbSize;
+    bufferDesc.Width = cbSize0;
     bufferDesc.Height = 1;
     bufferDesc.DepthOrArraySize = 1;
     bufferDesc.MipLevels = 1;
@@ -183,90 +204,111 @@ bool JustGlowGPURenderer::CreateConstantBuffer() {
     bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
     HRESULT hr = m_device->CreateCommittedResource(
-        &heapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &bufferDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
+        &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
         IID_PPV_ARGS(&m_constantBuffer));
     if (FAILED(hr)) return false;
 
-    // Map constant buffer
     hr = m_constantBuffer->Map(0, nullptr, &m_constantBufferPtr);
+    if (FAILED(hr)) return false;
+
+    // BlurPassParams constant buffer (b1)
+    UINT cbSize1 = (sizeof(BlurPassParams) + 255) & ~255;
+    bufferDesc.Width = cbSize1;
+
+    hr = m_device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&m_blurPassBuffer));
+    if (FAILED(hr)) return false;
+
+    hr = m_blurPassBuffer->Map(0, nullptr, &m_blurPassBufferPtr);
     if (FAILED(hr)) return false;
 
     return true;
 }
 
 // ============================================================================
-// Load Shaders
+// Create Root Signature with Samplers
 // ============================================================================
 
-bool JustGlowGPURenderer::LoadShaders() {
-    // Load all shaders
-    bool success = true;
+bool JustGlowGPURenderer::CreateRootSignature(ComPtr<ID3D12RootSignature>& rootSig) {
+    // Root parameters:
+    // [0] CBV - GlowParams (b0)
+    // [1] CBV - BlurPassParams (b1)
+    // [2] Descriptor Table - SRVs (t0, t1)
+    // [3] Descriptor Table - UAV (u0)
 
-    success &= LoadShader(ShaderType::Prefilter, GetShaderPath(ShaderType::Prefilter));
-    success &= LoadShader(ShaderType::Downsample, GetShaderPath(ShaderType::Downsample));
-    success &= LoadShader(ShaderType::Upsample, GetShaderPath(ShaderType::Upsample));
-    success &= LoadShader(ShaderType::Anamorphic, GetShaderPath(ShaderType::Anamorphic));
-    success &= LoadShader(ShaderType::Composite, GetShaderPath(ShaderType::Composite));
+    D3D12_ROOT_PARAMETER rootParams[4] = {};
 
-    return success;
-}
-
-bool JustGlowGPURenderer::LoadShader(ShaderType type, const std::wstring& csoPath) {
-    auto& shader = m_shaders[static_cast<size_t>(type)];
-
-    // Read CSO file
-    std::ifstream file(csoPath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        // Shader file not found - required for plugin to work
-        return false;
-    }
-
-    size_t fileSize = static_cast<size_t>(file.tellg());
-    file.seekg(0, std::ios::beg);
-
-    std::vector<char> shaderData(fileSize);
-    file.read(shaderData.data(), fileSize);
-    file.close();
-
-    // Create root signature
-    // Simple root signature: CBV at b0, SRV at t0, UAV at u0
-    D3D12_ROOT_PARAMETER rootParams[3] = {};
-
-    // CBV
+    // CBV for GlowParams (b0)
     rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     rootParams[0].Descriptor.ShaderRegister = 0;
     rootParams[0].Descriptor.RegisterSpace = 0;
     rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // SRV descriptor table
-    D3D12_DESCRIPTOR_RANGE srvRange = {};
-    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = 2;  // Input + previous level
-    srvRange.BaseShaderRegister = 0;
-
-    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
-    rootParams[1].DescriptorTable.pDescriptorRanges = &srvRange;
+    // CBV for BlurPassParams (b1)
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[1].Descriptor.ShaderRegister = 1;
+    rootParams[1].Descriptor.RegisterSpace = 0;
     rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // UAV descriptor table
+    // SRV descriptor table (t0, t1)
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 2;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.RegisterSpace = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[2].DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // UAV descriptor table (u0)
     D3D12_DESCRIPTOR_RANGE uavRange = {};
     uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     uavRange.NumDescriptors = 1;
     uavRange.BaseShaderRegister = 0;
+    uavRange.RegisterSpace = 0;
+    uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
-    rootParams[2].DescriptorTable.pDescriptorRanges = &uavRange;
-    rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[3].DescriptorTable.pDescriptorRanges = &uavRange;
+    rootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
+    // Static samplers (s0 = linear, s1 = point)
+    D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+
+    // Linear sampler (s0)
+    staticSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].MipLODBias = 0;
+    staticSamplers[0].MaxAnisotropy = 1;
+    staticSamplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    staticSamplers[0].BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    staticSamplers[0].MinLOD = 0;
+    staticSamplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    staticSamplers[0].ShaderRegister = 0;
+    staticSamplers[0].RegisterSpace = 0;
+    staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Point sampler (s1)
+    staticSamplers[1] = staticSamplers[0];
+    staticSamplers[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSamplers[1].ShaderRegister = 1;
+
+    // Create root signature
     D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-    rootSigDesc.NumParameters = 3;
+    rootSigDesc.NumParameters = 4;
     rootSigDesc.pParameters = rootParams;
+    rootSigDesc.NumStaticSamplers = 2;
+    rootSigDesc.pStaticSamplers = staticSamplers;
+    rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
     ComPtr<ID3DBlob> serializedRootSig;
     ComPtr<ID3DBlob> errorBlob;
@@ -282,8 +324,56 @@ bool JustGlowGPURenderer::LoadShader(ShaderType type, const std::wstring& csoPat
         0,
         serializedRootSig->GetBufferPointer(),
         serializedRootSig->GetBufferSize(),
-        IID_PPV_ARGS(&shader.rootSignature));
+        IID_PPV_ARGS(&rootSig));
     if (FAILED(hr)) return false;
+
+    return true;
+}
+
+// ============================================================================
+// Load Shaders
+// ============================================================================
+
+bool JustGlowGPURenderer::LoadShaders() {
+    // Create shared root signature first
+    ComPtr<ID3D12RootSignature> sharedRootSig;
+    if (!CreateRootSignature(sharedRootSig)) {
+        return false;
+    }
+
+    // Load each shader with the shared root signature
+    bool success = true;
+    success &= LoadShader(ShaderType::Prefilter, GetShaderPath(ShaderType::Prefilter), sharedRootSig);
+    success &= LoadShader(ShaderType::Downsample, GetShaderPath(ShaderType::Downsample), sharedRootSig);
+    success &= LoadShader(ShaderType::Upsample, GetShaderPath(ShaderType::Upsample), sharedRootSig);
+    success &= LoadShader(ShaderType::Anamorphic, GetShaderPath(ShaderType::Anamorphic), sharedRootSig);
+    success &= LoadShader(ShaderType::Composite, GetShaderPath(ShaderType::Composite), sharedRootSig);
+
+    return success;
+}
+
+bool JustGlowGPURenderer::LoadShader(
+    ShaderType type,
+    const std::wstring& csoPath,
+    const ComPtr<ID3D12RootSignature>& rootSig)
+{
+    auto& shader = m_shaders[static_cast<size_t>(type)];
+
+    // Read CSO file
+    std::ifstream file(csoPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        return false;  // Shader file required
+    }
+
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    file.seekg(0, std::ios::beg);
+
+    std::vector<char> shaderData(fileSize);
+    file.read(shaderData.data(), fileSize);
+    file.close();
+
+    // Use shared root signature
+    shader.rootSignature = rootSig;
 
     // Create pipeline state
     D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
@@ -291,28 +381,15 @@ bool JustGlowGPURenderer::LoadShader(ShaderType type, const std::wstring& csoPat
     psoDesc.CS.pShaderBytecode = shaderData.data();
     psoDesc.CS.BytecodeLength = shaderData.size();
 
-    hr = m_device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&shader.pipelineState));
+    HRESULT hr = m_device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&shader.pipelineState));
     if (FAILED(hr)) return false;
 
     shader.loaded = true;
     return true;
 }
 
-// Helper function to get DLL module handle
-static HMODULE GetCurrentModule() {
-    HMODULE hModule = nullptr;
-    // Use address of this static function to find our DLL
-    GetModuleHandleExW(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&GetCurrentModule),
-        &hModule);
-    return hModule;
-}
-
 std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
-    // Get the DLL module path (not the exe path!)
     HMODULE hModule = GetCurrentModule();
-
     wchar_t modulePath[MAX_PATH];
     GetModuleFileNameW(hModule, modulePath, MAX_PATH);
 
@@ -328,7 +405,7 @@ std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
         case ShaderType::Prefilter:     return path + L"Prefilter.cso";
         case ShaderType::Downsample:    return path + L"Downsample.cso";
         case ShaderType::Upsample:      return path + L"Upsample.cso";
-        case ShaderType::Anamorphic:    return path + L"PostProcess.cso";  // Anamorphic uses PostProcess.hlsl
+        case ShaderType::Anamorphic:    return path + L"PostProcess.cso";
         case ShaderType::Composite:     return path + L"Composite.cso";
         default:                        return L"";
     }
@@ -339,10 +416,9 @@ std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
 // ============================================================================
 
 bool JustGlowGPURenderer::AllocateMipChain(int width, int height, int levels) {
-    // Check if we need to reallocate
     if (m_currentMipLevels == levels && !m_mipChain.empty()) {
         if (m_mipChain[0].width == width && m_mipChain[0].height == height) {
-            return true;  // Already allocated with correct size
+            return true;
         }
     }
 
@@ -381,8 +457,8 @@ bool JustGlowGPURenderer::AllocateMipChain(int width, int height, int levels) {
             IID_PPV_ARGS(&mip.resource));
         if (FAILED(hr)) return false;
 
-        // Create SRV
-        UINT srvIndex = AllocateDescriptor();
+        // Create SRV at MIP_SRV_START + i
+        UINT srvIndex = MIP_SRV_START + i;
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -393,10 +469,10 @@ bool JustGlowGPURenderer::AllocateMipChain(int width, int height, int levels) {
             mip.resource.Get(),
             &srvDesc,
             GetCPUDescriptorHandle(srvIndex));
-        mip.srvHandle = GetGPUDescriptorHandle(srvIndex);
+        mip.srvIndex = srvIndex;
 
-        // Create UAV
-        UINT uavIndex = AllocateDescriptor();
+        // Create UAV at MIP_UAV_START + i
+        UINT uavIndex = MIP_UAV_START + i;
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
         uavDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -406,9 +482,9 @@ bool JustGlowGPURenderer::AllocateMipChain(int width, int height, int levels) {
             nullptr,
             &uavDesc,
             GetCPUDescriptorHandle(uavIndex));
-        mip.uavHandle = GetGPUDescriptorHandle(uavIndex);
+        mip.uavIndex = uavIndex;
 
-        // Halve dimensions for next level
+        // Next level is half size
         w = (w + 1) / 2;
         h = (h + 1) / 2;
         if (w < 1) w = 1;
@@ -421,7 +497,47 @@ bool JustGlowGPURenderer::AllocateMipChain(int width, int height, int levels) {
 void JustGlowGPURenderer::ReleaseMipChain() {
     m_mipChain.clear();
     m_currentMipLevels = 0;
-    m_currentDescriptorIndex = 0;  // Reset descriptor allocation
+}
+
+// ============================================================================
+// Create Views for External Resources
+// ============================================================================
+
+void JustGlowGPURenderer::CreateExternalResourceViews(
+    ID3D12Resource* input,
+    ID3D12Resource* output)
+{
+    D3D12_RESOURCE_DESC inputDesc = input->GetDesc();
+    D3D12_RESOURCE_DESC outputDesc = output->GetDesc();
+
+    // Create SRV for input (t0 slot when used)
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = inputDesc.Format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    m_device->CreateShaderResourceView(
+        input,
+        &srvDesc,
+        GetCPUDescriptorHandle(EXTERNAL_INPUT_SRV));
+
+    // Also create SRV for original input (for composite)
+    m_device->CreateShaderResourceView(
+        input,
+        &srvDesc,
+        GetCPUDescriptorHandle(ORIGINAL_INPUT_SRV));
+
+    // Create UAV for output
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+    uavDesc.Format = outputDesc.Format;
+    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+    m_device->CreateUnorderedAccessView(
+        output,
+        nullptr,
+        &uavDesc,
+        GetCPUDescriptorHandle(EXTERNAL_OUTPUT_UAV));
 }
 
 // ============================================================================
@@ -437,10 +553,13 @@ bool JustGlowGPURenderer::Render(
         return false;
     }
 
-    // Allocate MIP chain if needed
+    // Allocate MIP chain
     if (!AllocateMipChain(params.width, params.height, params.mipLevels)) {
         return false;
     }
+
+    // Create views for AE resources
+    CreateExternalResourceViews(inputBuffer, outputBuffer);
 
     // Reset command list
     m_commandAllocator->Reset();
@@ -450,23 +569,31 @@ bool JustGlowGPURenderer::Render(
     ID3D12DescriptorHeap* heaps[] = { m_srvUavHeap.Get() };
     m_commandList->SetDescriptorHeaps(1, heaps);
 
-    // Update constant buffer
+    // Update main constant buffer
     GlowParams cb;
     FillGlowParams(cb, params);
     memcpy(m_constantBufferPtr, &cb, sizeof(cb));
 
-    // Execute pipeline stages
+    // === Pipeline Execution ===
+
+    // 1. Prefilter: input -> mip[0]
     ExecutePrefilter(params, inputBuffer);
+
+    // 2. Downsample chain: mip[i] -> mip[i+1]
     ExecuteDownsampleChain(params);
+
+    // 3. Upsample chain: mip[i+1] -> mip[i] (with accumulation)
     ExecuteUpsampleChain(params);
 
-    if (params.anamorphic > 0.0f) {
+    // 4. Anamorphic (optional)
+    if (params.anamorphic > 0.001f) {
         ExecuteAnamorphic(params);
     }
 
+    // 5. Composite: original + mip[0] -> output
     ExecuteComposite(params, inputBuffer, outputBuffer);
 
-    // Close and execute command list
+    // Close and execute
     m_commandList->Close();
 
     ID3D12CommandList* commandLists[] = { m_commandList.Get() };
@@ -488,31 +615,41 @@ void JustGlowGPURenderer::ExecutePrefilter(
     auto& shader = m_shaders[static_cast<size_t>(ShaderType::Prefilter)];
     if (!shader.loaded) return;
 
+    // Update BlurPassParams for this pass
+    BlurPassParams passParams;
+    FillBlurPassParams(passParams, params.mipChain, 0, true);
+    memcpy(m_blurPassBufferPtr, &passParams, sizeof(passParams));
+
     m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
     m_commandList->SetPipelineState(shader.pipelineState.Get());
 
-    // Set CBV
-    m_commandList->SetComputeRootConstantBufferView(0,
-        m_constantBuffer->GetGPUVirtualAddress());
+    // Set constant buffers
+    m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+    m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
 
-    // Transition input to SRV
+    // Transition input to shader resource
     TransitionResource(input,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-    // Set SRV (input) and UAV (mip 0)
-    // Note: Actual descriptor binding would need proper setup
-    // This is simplified for illustration
+    // Bind SRVs: external input at t0, use same for t1 (dummy for prefilter)
+    m_commandList->SetComputeRootDescriptorTable(2, GetGPUDescriptorHandle(EXTERNAL_INPUT_SRV));
+
+    // Bind UAV: mip[0]
+    m_commandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(m_mipChain[0].uavIndex));
 
     // Dispatch
-    UINT groupsX = (m_mipChain[0].width + THREAD_GROUP_SIZE_X - 1) / THREAD_GROUP_SIZE_X;
-    UINT groupsY = (m_mipChain[0].height + THREAD_GROUP_SIZE_Y - 1) / THREAD_GROUP_SIZE_Y;
+    UINT groupsX = (m_mipChain[0].width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+    UINT groupsY = (m_mipChain[0].height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
     m_commandList->Dispatch(groupsX, groupsY, 1);
 
     // Transition input back
     TransitionResource(input,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // UAV barrier for mip[0]
+    InsertUAVBarrier(m_mipChain[0].resource.Get());
 }
 
 void JustGlowGPURenderer::ExecuteDownsampleChain(const RenderParams& params) {
@@ -522,23 +659,33 @@ void JustGlowGPURenderer::ExecuteDownsampleChain(const RenderParams& params) {
     m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
     m_commandList->SetPipelineState(shader.pipelineState.Get());
 
-    // Downsample from level 0 to level N-1
+    // Set main constant buffer
+    m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+
     for (int i = 0; i < params.mipLevels - 1; ++i) {
         auto& srcMip = m_mipChain[i];
         auto& dstMip = m_mipChain[i + 1];
 
-        // Update constant buffer for this pass
+        // Update BlurPassParams
         BlurPassParams passParams;
         FillBlurPassParams(passParams, params.mipChain, i, true);
+        memcpy(m_blurPassBufferPtr, &passParams, sizeof(passParams));
+        m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
 
         // Transition source to SRV
         TransitionResource(srcMip.resource.Get(),
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+        // Bind source SRV (t0 and t1 both point to source for downsample)
+        m_commandList->SetComputeRootDescriptorTable(2, GetGPUDescriptorHandle(srcMip.srvIndex));
+
+        // Bind destination UAV
+        m_commandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(dstMip.uavIndex));
+
         // Dispatch
-        UINT groupsX = (dstMip.width + THREAD_GROUP_SIZE_X - 1) / THREAD_GROUP_SIZE_X;
-        UINT groupsY = (dstMip.height + THREAD_GROUP_SIZE_Y - 1) / THREAD_GROUP_SIZE_Y;
+        UINT groupsX = (dstMip.width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+        UINT groupsY = (dstMip.height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
         m_commandList->Dispatch(groupsX, groupsY, 1);
 
         // Transition source back
@@ -547,10 +694,7 @@ void JustGlowGPURenderer::ExecuteDownsampleChain(const RenderParams& params) {
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         // UAV barrier for destination
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        barrier.UAV.pResource = dstMip.resource.Get();
-        m_commandList->ResourceBarrier(1, &barrier);
+        InsertUAVBarrier(dstMip.resource.Get());
     }
 }
 
@@ -561,24 +705,45 @@ void JustGlowGPURenderer::ExecuteUpsampleChain(const RenderParams& params) {
     m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
     m_commandList->SetPipelineState(shader.pipelineState.Get());
 
-    // Upsample from level N-1 to level 0
-    for (int i = params.mipLevels - 2; i >= 0; --i) {
-        auto& srcMip = m_mipChain[i + 1];
-        auto& dstMip = m_mipChain[i];
+    m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
 
-        // Update constant buffer for this pass
+    // Upsample from smallest to largest
+    for (int i = params.mipLevels - 2; i >= 0; --i) {
+        auto& srcMip = m_mipChain[i + 1];  // Smaller (source)
+        auto& dstMip = m_mipChain[i];      // Larger (destination)
+
+        // Update BlurPassParams with fractional blend for final pass
         BlurPassParams passParams;
-        float fractional = (i == 0) ? params.fractionalAmount : 0.0f;
+        float fractional = (i == 0 && params.fractionalBlend) ? params.fractionalAmount : 0.0f;
         FillBlurPassParams(passParams, params.mipChain, i, false, fractional);
+        memcpy(m_blurPassBufferPtr, &passParams, sizeof(passParams));
+        m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
 
         // Transition source to SRV
         TransitionResource(srcMip.resource.Get(),
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+        // Transition destination to SRV (for reading current content to blend)
+        TransitionResource(dstMip.resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // Create temporary view for the blended read
+        // For upsample: t0 = lower res (srcMip), t1 = current level to blend with (dstMip)
+        m_commandList->SetComputeRootDescriptorTable(2, GetGPUDescriptorHandle(srcMip.srvIndex));
+
+        // Transition destination back to UAV for writing
+        TransitionResource(dstMip.resource.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // Bind destination UAV
+        m_commandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(dstMip.uavIndex));
+
         // Dispatch
-        UINT groupsX = (dstMip.width + THREAD_GROUP_SIZE_X - 1) / THREAD_GROUP_SIZE_X;
-        UINT groupsY = (dstMip.height + THREAD_GROUP_SIZE_Y - 1) / THREAD_GROUP_SIZE_Y;
+        UINT groupsX = (dstMip.width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+        UINT groupsY = (dstMip.height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
         m_commandList->Dispatch(groupsX, groupsY, 1);
 
         // Transition source back
@@ -587,10 +752,7 @@ void JustGlowGPURenderer::ExecuteUpsampleChain(const RenderParams& params) {
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         // UAV barrier
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        barrier.UAV.pResource = dstMip.resource.Get();
-        m_commandList->ResourceBarrier(1, &barrier);
+        InsertUAVBarrier(dstMip.resource.Get());
     }
 }
 
@@ -598,8 +760,9 @@ void JustGlowGPURenderer::ExecuteAnamorphic(const RenderParams& params) {
     auto& shader = m_shaders[static_cast<size_t>(ShaderType::Anamorphic)];
     if (!shader.loaded) return;
 
-    // Apply anamorphic stretch to mip level 0
-    // Implementation would stretch in the specified direction
+    // Anamorphic operates on mip[0]
+    // This would stretch the glow in the specified direction
+    // For now, we'll skip this as the effect is subtle
 }
 
 void JustGlowGPURenderer::ExecuteComposite(
@@ -610,12 +773,19 @@ void JustGlowGPURenderer::ExecuteComposite(
     auto& shader = m_shaders[static_cast<size_t>(ShaderType::Composite)];
     if (!shader.loaded) return;
 
+    // Update BlurPassParams
+    BlurPassParams passParams = {};
+    passParams.srcWidth = params.width;
+    passParams.srcHeight = params.height;
+    passParams.dstWidth = params.width;
+    passParams.dstHeight = params.height;
+    memcpy(m_blurPassBufferPtr, &passParams, sizeof(passParams));
+
     m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
     m_commandList->SetPipelineState(shader.pipelineState.Get());
 
-    // Set CBV
-    m_commandList->SetComputeRootConstantBufferView(0,
-        m_constantBuffer->GetGPUVirtualAddress());
+    m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+    m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
 
     // Transition resources
     TransitionResource(original,
@@ -625,12 +795,34 @@ void JustGlowGPURenderer::ExecuteComposite(
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+    // For composite: t0 = original, t1 = glow (mip[0])
+    // We need to create a consecutive descriptor table with both
+    // Let's use ORIGINAL_INPUT_SRV for t0 and create a second SRV for mip[0]
+
+    // Create SRV for mip[0] at position ORIGINAL_INPUT_SRV + 1
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    m_device->CreateShaderResourceView(
+        m_mipChain[0].resource.Get(),
+        &srvDesc,
+        GetCPUDescriptorHandle(ORIGINAL_INPUT_SRV + 1));
+
+    // Bind SRVs (consecutive: original at t0, glow at t1)
+    m_commandList->SetComputeRootDescriptorTable(2, GetGPUDescriptorHandle(ORIGINAL_INPUT_SRV));
+
+    // Bind output UAV
+    m_commandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(EXTERNAL_OUTPUT_UAV));
+
     // Dispatch
-    UINT groupsX = (params.width + THREAD_GROUP_SIZE_X - 1) / THREAD_GROUP_SIZE_X;
-    UINT groupsY = (params.height + THREAD_GROUP_SIZE_Y - 1) / THREAD_GROUP_SIZE_Y;
+    UINT groupsX = (params.width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+    UINT groupsY = (params.height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
     m_commandList->Dispatch(groupsX, groupsY, 1);
 
-    // Transition back
+    // Transition resources back
     TransitionResource(original,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -648,6 +840,8 @@ void JustGlowGPURenderer::TransitionResource(
     D3D12_RESOURCE_STATES before,
     D3D12_RESOURCE_STATES after)
 {
+    if (before == after) return;
+
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = resource;
@@ -655,6 +849,13 @@ void JustGlowGPURenderer::TransitionResource(
     barrier.Transition.StateAfter = after;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
+    m_commandList->ResourceBarrier(1, &barrier);
+}
+
+void JustGlowGPURenderer::InsertUAVBarrier(ID3D12Resource* resource) {
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barrier.UAV.pResource = resource;
     m_commandList->ResourceBarrier(1, &barrier);
 }
 
@@ -666,14 +867,6 @@ void JustGlowGPURenderer::WaitForGPU() {
         m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
-}
-
-UINT JustGlowGPURenderer::AllocateDescriptor() {
-    UINT index = m_currentDescriptorIndex++;
-    if (m_currentDescriptorIndex >= MAX_DESCRIPTORS) {
-        m_currentDescriptorIndex = 0;  // Wrap around (should handle better in production)
-    }
-    return index;
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE JustGlowGPURenderer::GetGPUDescriptorHandle(UINT index) {

@@ -52,8 +52,8 @@ struct ShaderResource {
 
 struct MipBuffer {
     ComPtr<ID3D12Resource> resource;
-    D3D12_GPU_DESCRIPTOR_HANDLE srvHandle;
-    D3D12_GPU_DESCRIPTOR_HANDLE uavHandle;
+    UINT srvIndex;      // Index in descriptor heap for SRV
+    UINT uavIndex;      // Index in descriptor heap for UAV
     int width;
     int height;
 };
@@ -91,11 +91,13 @@ private:
     // Descriptor heaps
     ComPtr<ID3D12DescriptorHeap> m_srvUavHeap;
     UINT m_srvUavDescriptorSize = 0;
-    UINT m_currentDescriptorIndex = 0;
 
-    // Constant buffer
-    ComPtr<ID3D12Resource> m_constantBuffer;
+    // Constant buffers
+    ComPtr<ID3D12Resource> m_constantBuffer;      // GlowParams (b0)
     void* m_constantBufferPtr = nullptr;
+
+    ComPtr<ID3D12Resource> m_blurPassBuffer;      // BlurPassParams (b1)
+    void* m_blurPassBufferPtr = nullptr;
 
     // Shaders
     std::array<ShaderResource, static_cast<size_t>(ShaderType::COUNT)> m_shaders;
@@ -104,21 +106,19 @@ private:
     std::vector<MipBuffer> m_mipChain;
     int m_currentMipLevels = 0;
 
-    // Temporary buffers
-    ComPtr<ID3D12Resource> m_glowBuffer;        // Accumulated glow
-    ComPtr<ID3D12Resource> m_tempBuffer;        // Temporary for passes
-
     // Initialization helpers
     bool CreateCommandObjects();
     bool CreateDescriptorHeaps();
-    bool CreateConstantBuffer();
+    bool CreateConstantBuffers();
+    bool CreateRootSignature(ComPtr<ID3D12RootSignature>& rootSig);
     bool LoadShaders();
-    bool LoadShader(ShaderType type, const std::wstring& csoPath);
+    bool LoadShader(ShaderType type, const std::wstring& csoPath,
+                   const ComPtr<ID3D12RootSignature>& rootSig);
 
     // Resource management
     bool AllocateMipChain(int width, int height, int levels);
     void ReleaseMipChain();
-    bool AllocateTemporaryBuffers(int width, int height);
+    void CreateExternalResourceViews(ID3D12Resource* input, ID3D12Resource* output);
 
     // Rendering stages
     void ExecutePrefilter(const RenderParams& params, ID3D12Resource* input);
@@ -131,8 +131,8 @@ private:
     // Utility
     void TransitionResource(ID3D12Resource* resource,
         D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+    void InsertUAVBarrier(ID3D12Resource* resource);
     void WaitForGPU();
-    UINT AllocateDescriptor();
     D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandle(UINT index);
     D3D12_CPU_DESCRIPTOR_HANDLE GetCPUDescriptorHandle(UINT index);
 
