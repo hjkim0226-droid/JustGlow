@@ -1,0 +1,182 @@
+================================================================================
+JustGlow - After Effects GPU Glow Plugin
+프로젝트 현황 보고서
+================================================================================
+작성일: 2025-12-16
+
+================================================================================
+1. 프로젝트 개요
+================================================================================
+
+목표: Dual Kawase 블러 기반 고품질 GPU 글로우 이펙트 플러그인 개발
+플랫폼: Windows (DirectX 12)
+기술 스택: C++17, HLSL Compute Shader, After Effects SDK
+
+프로젝트 위치: ~/projects/JustGlow
+AE SDK 경로: include/AE_SDK (심볼릭 링크)
+
+================================================================================
+2. 현재 상태
+================================================================================
+
+[완료] 기본 프레임워크
+  - 프로젝트 폴더 구조 생성
+  - CMakeLists.txt 작성
+  - AE SDK 연결
+  - JustGlow.cpp 진입점 구현
+  - UI 파라미터 설정 (ParamsSetup)
+  - PiPL, RC, DEF 파일 생성
+
+[완료] GPU 렌더러 구현
+  - DirectX 12 초기화 코드
+  - Compute Shader 파이프라인
+  - Root Signature 및 Descriptor Heap 관리
+  - MIP 체인 버퍼 관리
+
+[완료] 셰이더 작성
+  - Common.hlsli (공통 유틸리티)
+  - Prefilter.hlsl (Soft Threshold + Karis Average)
+  - Downsample.hlsl (13-Tap 다운샘플)
+  - Upsample.hlsl (9-Tap Tent 업샘플)
+  - PostProcess.hlsl (Anamorphic, Color Temp)
+  - Composite.hlsl (최종 합성)
+
+[완료] 디버깅 인프라
+  - 로그 시스템 추가 (JustGlowGPURenderer.cpp)
+  - 플러그인 로그 추가 (JustGlow.cpp)
+  - 로그 파일 위치: %TEMP%\JustGlow_debug.log
+
+[해결] PiPL GPU 플래그 문제
+  - 문제: GPUDeviceSetup이 호출되지 않음, SmartRender가 항상 isGPU=0
+  - 원인: PiPL 리소스에 GPU 지원 플래그 누락
+  - 해결: JustGlow.rc에 PiPL 바이너리 데이터 직접 임베드
+  - OutFlags2: 0x2A001400 (GPU_RENDER_F32 | DIRECTX | SMART_RENDER 등)
+
+================================================================================
+3. 발견된 문제 및 해결
+================================================================================
+
+문제 1: 플러그인이 AE에서 보이지만 효과가 없음
+-------------------------------------------------
+증상:
+  - 플러그인이 Effects 메뉴에 나타남
+  - 적용해도 아무 변화 없음
+
+디버깅 과정:
+  1. GPU 렌더러에 로그 추가 → 로그 파일 생성 안됨
+  2. 메인 플러그인에 로그 추가 → 로그 확인 가능
+  3. 로그 분석 결과:
+     - GlobalSetup: 호출됨 (flags2=0x2A001400)
+     - PreRender: 호출됨 (GPU_RENDER_POSSIBLE 설정)
+     - SmartRender: 항상 isGPU=0 (CPU 폴백)
+     - GPUDeviceSetup: 호출되지 않음!
+
+원인:
+  - AE는 GlobalSetup 전에 PiPL을 읽어서 GPU 지원 여부 판단
+  - PiPL의 OutFlags2에 GPU 플래그가 없으면 GPUDeviceSetup 호출 안함
+  - 기존 PiPL은 PiPLTool로 컴파일해야 했으나 도구 없음
+
+해결:
+  - JustGlow.rc에 PiPL 바이너리 데이터 직접 임베드
+  - PiPLTool 의존성 제거
+  - CMakeLists.txt 업데이트
+
+================================================================================
+4. 파일 구조
+================================================================================
+
+JustGlow/
+├── src/
+│   ├── JustGlow.cpp              # 플러그인 진입점 (로그 추가됨)
+│   ├── JustGlow.h                # 파라미터 정의
+│   ├── JustGlowParams.h          # 렌더 파라미터 구조체
+│   ├── JustGlowGPURenderer.cpp   # DirectX GPU 렌더러 (로그 추가됨)
+│   └── JustGlowGPURenderer.h
+│
+├── shaders/
+│   ├── Common.hlsli
+│   ├── Prefilter.hlsl
+│   ├── Downsample.hlsl
+│   ├── Upsample.hlsl
+│   ├── PostProcess.hlsl
+│   └── Composite.hlsl
+│
+├── resources/
+│   ├── JustGlowPiPL.r            # PiPL 소스 (참조용)
+│   └── Win/
+│       ├── JustGlow.rc           # PiPL 바이너리 임베드됨
+│       └── JustGlow.def
+│
+├── include/AE_SDK/               # After Effects SDK (심볼릭 링크)
+├── CMakeLists.txt
+├── README.md
+└── PROJECT_STATUS.txt            # 이 파일
+
+================================================================================
+5. 다음 단계
+================================================================================
+
+[필수] 빌드 및 테스트
+  1. Windows 환경에서 프로젝트 빌드
+     - Visual Studio 2022
+     - CMake 3.20+
+     - Windows SDK (DXC 포함)
+
+  2. 플러그인 설치
+     - JustGlow.aex → C:\Program Files\Adobe\Adobe After Effects 2024\Support Files\Plug-ins\Effects
+     - DirectX_Assets/*.cso → 같은 위치의 DirectX_Assets 폴더
+
+  3. 테스트 및 로그 확인
+     - AE 실행 후 플러그인 적용
+     - %TEMP%\JustGlow_debug.log 확인
+     - GPUDeviceSetup 호출 여부 확인
+     - SmartRender의 isGPU 값 확인
+
+[예상 결과]
+  - GPUDeviceSetup 호출됨
+  - SmartRender에서 isGPU=1
+  - GPU 렌더러 로그 기록됨
+
+[문제 발생 시]
+  - 로그 파일 분석
+  - 각 단계별 에러 메시지 확인
+  - 셰이더 컴파일 오류 확인
+
+================================================================================
+6. 주요 기술 참고
+================================================================================
+
+PiPL OutFlags2 플래그:
+  0x20000000 - PF_OutFlag2_SUPPORTS_GPU_RENDER_F32
+  0x08000000 - PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING
+  0x02000000 - PF_OutFlag2_FLOAT_COLOR_AWARE
+  0x00001000 - PF_OutFlag2_SUPPORTS_SMART_RENDER
+  0x00000400 - PF_OutFlag2_SUPPORTS_THREADED_RENDERING
+
+  합계: 0x2A001400
+
+AE 명령 흐름 (GPU 플러그인):
+  1. PiPL 읽기 → GPU 지원 확인
+  2. GlobalSetup
+  3. GPUDeviceSetup → DirectX 초기화, 셰이더 로드
+  4. PreRender → 입력 체크아웃
+  5. SmartRender (isGPU=1) → GPU 렌더링
+  6. GPUDeviceSetdown → 리소스 정리
+
+로그 파일 위치:
+  - Windows: %TEMP%\JustGlow_debug.log
+  - 예: C:\Users\<username>\AppData\Local\Temp\JustGlow_debug.log
+
+================================================================================
+7. Git 정보
+================================================================================
+
+최신 커밋: 2025-12-16
+상태: 모든 변경사항 커밋 및 푸시 완료
+브랜치: main
+
+주요 커밋 메시지:
+  - "PiPL GPU 플래그 수정 - RC 파일에 직접 임베드"
+  - "디버깅 로그 시스템 추가"
+
+================================================================================

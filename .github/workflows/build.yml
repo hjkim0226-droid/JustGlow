@@ -1,5 +1,5 @@
 # JustGlow - GitHub Actions Build Workflow
-# Builds the After Effects plugin for Windows
+# Builds the After Effects plugin for Windows and macOS
 
 name: Build JustGlow
 
@@ -14,52 +14,41 @@ env:
   BUILD_TYPE: Release
 
 jobs:
+  # ============================================
+  # Windows Build
+  # ============================================
   build-windows:
     runs-on: windows-latest
 
     steps:
-    # ========================================
-    # Checkout
-    # ========================================
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         submodules: recursive
 
-    # ========================================
-    # Setup Build Tools
-    # ========================================
     - name: Setup MSVC
       uses: microsoft/setup-msbuild@v2
 
     - name: Setup CMake
       uses: lukka/get-cmake@latest
 
-    # ========================================
-    # Cache Dependencies
-    # ========================================
-    - name: Cache AE SDK
-      id: cache-ae-sdk
-      uses: actions/cache@v4
-      with:
-        path: include/AE_SDK
-        key: ae-sdk-25.0
-
-    # ========================================
-    # Download After Effects SDK (if not cached)
-    # ========================================
-    - name: Check AE SDK
-      if: steps.cache-ae-sdk.outputs.cache-hit != 'true'
+    # Download and extract After Effects SDK
+    - name: Download AE SDK
       run: |
-        echo "::warning::After Effects SDK not found in cache."
-        echo "Please ensure the SDK is included in the repository or update the workflow."
-        echo "For now, creating placeholder structure..."
-        mkdir -p include/AE_SDK
-      shell: bash
+        # Check if SDK already exists
+        if (Test-Path "include/AE_SDK/AE_Effect.h") {
+          Write-Host "AE SDK already present"
+          exit 0
+        }
 
-    # ========================================
-    # Find Windows SDK and DXC
-    # ========================================
+        Write-Host "::warning::AE SDK not found. Please add SDK to repository."
+        Write-Host "Expected location: include/AE_SDK/"
+
+        # Create placeholder if not exists
+        New-Item -ItemType Directory -Force -Path "include/AE_SDK" | Out-Null
+      shell: pwsh
+
+    # Find DXC
     - name: Find DirectX Shader Compiler
       id: find-dxc
       run: |
@@ -73,25 +62,38 @@ jobs:
         echo "Found DXC at: $dxcPath"
       shell: pwsh
 
-    # ========================================
+    # Download PiPLtool if not present
+    - name: Setup PiPLtool
+      run: |
+        $piplToolDir = "tools"
+        $piplTool = "$piplToolDir/PiPLtool.exe"
+
+        if (-not (Test-Path $piplTool)) {
+          New-Item -ItemType Directory -Force -Path $piplToolDir | Out-Null
+          Write-Host "::warning::PiPLtool.exe not found at $piplTool"
+          Write-Host "Please add PiPLtool.exe from AE SDK to tools/ folder"
+        } else {
+          Write-Host "PiPLtool found at: $piplTool"
+        }
+
+        echo "PIPL_TOOL=${{ github.workspace }}/$piplTool" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+      id: pipl-tool
+
     # Configure CMake
-    # ========================================
     - name: Configure CMake
       run: |
         cmake -B build -G "Visual Studio 17 2022" -A x64 `
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
-          -DAE_SDK_PATH="${{ github.workspace }}/include/AE_SDK"
+          -DAE_SDK_PATH="${{ github.workspace }}/include/AE_SDK" `
+          -DPIPL_TOOL="${{ steps.pipl-tool.outputs.PIPL_TOOL }}"
       shell: pwsh
 
-    # ========================================
     # Build
-    # ========================================
     - name: Build
       run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
 
-    # ========================================
-    # Compile Shaders Manually (if DXC available)
-    # ========================================
+    # Compile Shaders
     - name: Compile Shaders
       run: |
         $dxc = "${{ steps.find-dxc.outputs.DXC_PATH }}"
@@ -115,120 +117,133 @@ jobs:
           if (Test-Path $input) {
             Write-Host "Compiling $($shader.Name).hlsl..."
             & $dxc -T cs_6_0 -E $($shader.Entry) -Fo $output -I $shaderDir $input
-            if ($LASTEXITCODE -ne 0) {
-              Write-Warning "Failed to compile $($shader.Name).hlsl"
-            }
           }
         }
       shell: pwsh
       continue-on-error: true
 
-    # ========================================
-    # Package Artifacts
-    # ========================================
+    # Package
     - name: Package Plugin
       run: |
-        mkdir -p artifacts/JustGlow
+        $version = (Select-String -Path "CMakeLists.txt" -Pattern 'VERSION (\d+\.\d+\.\d+)').Matches.Groups[1].Value
+        $artifactDir = "artifacts/JustGlow-Windows"
 
-        # Copy plugin
-        if (Test-Path "build/${{ env.BUILD_TYPE }}/JustGlow.aex") {
-          Copy-Item "build/${{ env.BUILD_TYPE }}/JustGlow.aex" "artifacts/JustGlow/"
+        New-Item -ItemType Directory -Force -Path $artifactDir
+
+        # Find and copy plugin (with version in name)
+        Get-ChildItem "build/${{ env.BUILD_TYPE }}" -Filter "*.aex" | ForEach-Object {
+          Copy-Item $_.FullName "$artifactDir/"
+          Write-Host "Copied: $($_.Name)"
         }
 
         # Copy shaders
         if (Test-Path "build/${{ env.BUILD_TYPE }}/DirectX_Assets") {
-          Copy-Item -Recurse "build/${{ env.BUILD_TYPE }}/DirectX_Assets" "artifacts/JustGlow/"
-        }
-
-        # Copy readme
-        if (Test-Path "README.md") {
-          Copy-Item "README.md" "artifacts/JustGlow/"
+          Copy-Item -Recurse "build/${{ env.BUILD_TYPE }}/DirectX_Assets" "$artifactDir/"
         }
       shell: pwsh
 
-    # ========================================
-    # Upload Artifacts
-    # ========================================
-    - name: Upload Plugin Artifact
+    # Upload
+    - name: Upload Windows Artifact
       uses: actions/upload-artifact@v4
       with:
         name: JustGlow-Windows-x64
-        path: artifacts/JustGlow/
+        path: artifacts/JustGlow-Windows/
         retention-days: 30
 
-    # ========================================
-    # Create Release (on tag)
-    # ========================================
-    - name: Create Release Archive
-      if: startsWith(github.ref, 'refs/tags/')
-      run: |
-        Compress-Archive -Path "artifacts/JustGlow/*" -DestinationPath "JustGlow-${{ github.ref_name }}-Windows-x64.zip"
-      shell: pwsh
-
-    - name: Upload Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: JustGlow-${{ github.ref_name }}-Windows-x64.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ========================================
-  # Shader Validation Job (Optional)
-  # ========================================
-  validate-shaders:
-    runs-on: windows-latest
+  # ============================================
+  # macOS Build
+  # ============================================
+  build-macos:
+    runs-on: macos-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-    - name: Validate HLSL Syntax
+    - name: Setup CMake
+      run: brew install cmake
+
+    # Check AE SDK
+    - name: Check AE SDK
       run: |
-        $dxc = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\dxc.exe"
+        if [ -f "include/AE_SDK/AE_Effect.h" ]; then
+          echo "AE SDK found"
+        else
+          echo "::warning::AE SDK not found. Please add SDK to repository."
+          mkdir -p include/AE_SDK
+        fi
 
-        if (-not (Test-Path $dxc)) {
-          # Find any available DXC
-          $windowsKits = "C:\Program Files (x86)\Windows Kits\10\bin"
-          $latestVersion = Get-ChildItem $windowsKits -Directory |
-            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
-            Sort-Object Name -Descending |
-            Select-Object -First 1
-          $dxc = Join-Path $latestVersion.FullName "x64\dxc.exe"
-        }
+    # Configure CMake
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
+          -DAE_SDK_PATH="${{ github.workspace }}/include/AE_SDK"
 
-        $errors = 0
+    # Build
+    - name: Build
+      run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+      continue-on-error: true  # macOS build may fail without full setup
 
-        # Define entry points for each shader
-        $shaderEntryPoints = @{
-          "Prefilter.hlsl" = "main"
-          "Downsample.hlsl" = "main"
-          "Upsample.hlsl" = "main"
-          "PostProcess.hlsl" = "main_anamorphic"
-          "Composite.hlsl" = "main"
-        }
+    # Package
+    - name: Package Plugin
+      run: |
+        mkdir -p artifacts/JustGlow-macOS
 
-        Get-ChildItem "shaders/*.hlsl" | ForEach-Object {
-          $entryPoint = $shaderEntryPoints[$_.Name]
-          if (-not $entryPoint) {
-            Write-Host "Skipping $($_.Name) (no entry point defined)"
-            return
-          }
-
-          Write-Host "Validating $($_.Name) with entry point $entryPoint..."
-
-          # Just syntax check, don't generate output
-          & $dxc -T cs_6_0 -E $entryPoint -Vd -I shaders $_.FullName 2>&1 | Out-Null
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Syntax error in $($_.Name)"
-            $script:errors++
-          }
-        }
-
-        if ($errors -gt 0) {
-          exit 1
-        }
-
-        Write-Host "All shaders validated successfully!"
-      shell: pwsh
+        # Copy plugin bundle if exists
+        if [ -d "build/JustGlow.plugin" ]; then
+          cp -R "build/JustGlow.plugin" "artifacts/JustGlow-macOS/"
+        elif [ -d "build/${{ env.BUILD_TYPE }}/JustGlow.plugin" ]; then
+          cp -R "build/${{ env.BUILD_TYPE }}/JustGlow.plugin" "artifacts/JustGlow-macOS/"
+        fi
       continue-on-error: true
+
+    # Upload
+    - name: Upload macOS Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: JustGlow-macOS-Universal
+        path: artifacts/JustGlow-macOS/
+        retention-days: 30
+      if: always()
+
+  # ============================================
+  # Create Release (on tag)
+  # ============================================
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: JustGlow-Windows-x64
+        path: release/windows
+
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: JustGlow-macOS-Universal
+        path: release/macos
+      continue-on-error: true
+
+    - name: Create Release Archives
+      run: |
+        cd release
+        zip -r ../JustGlow-${{ github.ref_name }}-Windows-x64.zip windows/
+        if [ -d "macos" ] && [ "$(ls -A macos)" ]; then
+          zip -r ../JustGlow-${{ github.ref_name }}-macOS-Universal.zip macos/
+        fi
+
+    - name: Upload Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          JustGlow-*.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

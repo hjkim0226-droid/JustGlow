@@ -4,7 +4,7 @@
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.20)
-project(JustGlow VERSION 1.0.0 LANGUAGES CXX)
+project(JustGlow VERSION 1.0.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -88,19 +88,30 @@ if(WIN32)
         UNICODE
         _UNICODE
         HAS_DIRECTX=1
+        PLUGIN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+        PLUGIN_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+        PLUGIN_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+        PLUGIN_VERSION_STRING="${PROJECT_VERSION}"
+    )
+
+    # Configure RC file with version info
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/resources/Win/JustGlow.rc.in"
+        "${CMAKE_BINARY_DIR}/JustGlow.rc"
+        @ONLY
     )
 
     # Add resource and module definition files
     target_sources(${PROJECT_NAME} PRIVATE
-        resources/Win/JustGlow.rc
+        "${CMAKE_BINARY_DIR}/JustGlow.rc"
         resources/Win/JustGlow.def
     )
 
-    # Set output extension to .aex
+    # Set output extension to .aex with version in filename
     set_target_properties(${PROJECT_NAME} PROPERTIES
         SUFFIX ".aex"
         PREFIX ""
-        OUTPUT_NAME "JustGlow"
+        OUTPUT_NAME "JustGlow_v${PROJECT_VERSION}"
     )
 
     # Link libraries
@@ -118,11 +129,48 @@ if(WIN32)
     )
 
     # ========================================================================
-    # PiPL Resource
+    # PiPL Resource Generation using PiPLtool.exe
     # ========================================================================
-    # PiPL is now embedded directly in JustGlow.rc, no PiPLTool needed.
-    # The RC file contains the binary PiPL data with GPU support flags.
-    message(STATUS "PiPL resource embedded in JustGlow.rc (no PiPLTool required)")
+
+    # Path to PiPLtool.exe (included in tools/ folder)
+    set(PIPL_TOOL "${CMAKE_SOURCE_DIR}/tools/PiPLtool.exe" CACHE FILEPATH "Path to PiPLtool.exe")
+
+    set(PIPL_R_FILE "${CMAKE_SOURCE_DIR}/resources/JustGlowPiPL.r")
+    set(PIPL_RR_FILE "${CMAKE_BINARY_DIR}/JustGlowPiPL.rr")
+    set(PIPL_RRC_FILE "${CMAKE_BINARY_DIR}/JustGlowPiPL.rrc")
+    set(PIPL_TEMP_RC "${CMAKE_BINARY_DIR}/JustGlowPiPL_temp.rc")
+
+    # Step 1: Preprocess .r file with cl.exe
+    add_custom_command(
+        OUTPUT "${PIPL_RR_FILE}"
+        COMMAND cl.exe /I "${AE_SDK_PATH}" /I "${AE_SDK_PATH}/Util" /D "AE_OS_WIN" /D "AE_PROC_INTELx64" /EP "${PIPL_R_FILE}" > "${PIPL_RR_FILE}"
+        DEPENDS "${PIPL_R_FILE}"
+        COMMENT "Preprocessing PiPL.r"
+        VERBATIM
+    )
+
+    # Step 2: Convert with PiPLtool.exe
+    add_custom_command(
+        OUTPUT "${PIPL_RRC_FILE}"
+        COMMAND "${PIPL_TOOL}" "${PIPL_RR_FILE}" "${PIPL_RRC_FILE}"
+        DEPENDS "${PIPL_RR_FILE}"
+        COMMENT "Running PiPLtool"
+        VERBATIM
+    )
+
+    # Step 3: Final preprocessing
+    add_custom_command(
+        OUTPUT "${PIPL_TEMP_RC}"
+        COMMAND cl.exe /D "MSWindows" /EP "${PIPL_RRC_FILE}" > "${PIPL_TEMP_RC}"
+        DEPENDS "${PIPL_RRC_FILE}"
+        COMMENT "Generating PiPL RC file"
+        VERBATIM
+    )
+
+    add_custom_target(GeneratePiPL DEPENDS "${PIPL_TEMP_RC}")
+    add_dependencies(${PROJECT_NAME} GeneratePiPL)
+
+    message(STATUS "PiPL will be generated using PiPLtool: ${PIPL_TOOL}")
 
     # ========================================================================
     # Shader Compilation
