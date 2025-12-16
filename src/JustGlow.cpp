@@ -6,6 +6,8 @@
 
 #include "JustGlow.h"
 #include "JustGlowParams.h"
+#include <AE_Macros.h>
+#include <Util/Param_Utils.h>
 
 #ifdef HAS_DIRECTX
 #include "JustGlowGPURenderer.h"
@@ -116,10 +118,7 @@ PF_Err About(
     PF_ParamDef*    params[],
     PF_LayerDef*    output)
 {
-    AEGP_SuiteHandler suites(in_data->pica_basicP);
-
-    suites.ANSICallbacksSuite1()->sprintf(
-        out_data->return_msg,
+    PF_SPRINTF(out_data->return_msg,
         "%s v%d.%d.%d\r\n"
         "%s\r\n\r\n"
         "High-quality GPU glow effect using Dual Kawase blur\r\n"
@@ -164,12 +163,12 @@ PF_Err GlobalSetup(
     out_data->out_flags2 =
         PF_OutFlag2_FLOAT_COLOR_AWARE |         // 32bpc float support
         PF_OutFlag2_SUPPORTS_SMART_RENDER |     // SmartFX support
-        PF_OutFlag2_SUPPORTS_THREADED_RENDERING | // Thread-safe
+        PF_OutFlag2_SUPPORTS_THREADED_RENDERING // Thread-safe
 #if HAS_DIRECTX
-        PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 |   // GPU rendering (float32)
-        PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING | // DirectX 12 support
+        | PF_OutFlag2_SUPPORTS_GPU_RENDER_F32   // GPU rendering (float32)
+        | PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING // DirectX 12 support
 #endif
-        PF_OutFlag2_PARAM_UNRESTRICTED_VALUE_RANGE; // Allow wider param ranges
+        ;
 
     return err;
 }
@@ -276,13 +275,12 @@ PF_Err ParamsSetup(
 
     // Fractional Blend
     AEFX_CLR_STRUCT(def);
-    def.param_type = PF_Param_CHECKBOX;
-    PF_STRCPY(def.name, "Smooth Radius");
-    def.u.bd.value = Defaults::FractionalBlend ? 1 : 0;
-    def.u.bd.dephault = Defaults::FractionalBlend ? 1 : 0;
-    def.u.bd.u.nameptr = "Enable smooth radius transitions";
-    err = PF_ADD_PARAM(in_data, -1, &def);
-    if (err) return err;
+    PF_ADD_CHECKBOX(
+        "Smooth Radius",
+        "Enable smooth radius transitions",
+        Defaults::FractionalBlend ? 1 : 0,
+        0,
+        DISK_ID_FRACTIONAL_BLEND);
 
     // ===========================================
     // Color Options
@@ -290,16 +288,12 @@ PF_Err ParamsSetup(
 
     // Glow Color
     AEFX_CLR_STRUCT(def);
-    def.param_type = PF_Param_COLOR;
-    PF_STRCPY(def.name, "Glow Color");
-    def.u.cd.value.red = 255;
-    def.u.cd.value.green = 255;
-    def.u.cd.value.blue = 255;
-    def.u.cd.value.alpha = 255;
-    def.u.cd.dephault = def.u.cd.value;
-    def.uu.id = DISK_ID_GLOW_COLOR;
-    err = PF_ADD_PARAM(in_data, -1, &def);
-    if (err) return err;
+    PF_ADD_COLOR(
+        "Glow Color",
+        255,  // Red
+        255,  // Green
+        255,  // Blue
+        DISK_ID_GLOW_COLOR);
 
     // Color Temperature (-100 to +100)
     AEFX_CLR_STRUCT(def);
@@ -365,14 +359,12 @@ PF_Err ParamsSetup(
 
     // HDR Mode
     AEFX_CLR_STRUCT(def);
-    def.param_type = PF_Param_CHECKBOX;
-    PF_STRCPY(def.name, "HDR Mode");
-    def.u.bd.value = Defaults::HDRMode ? 1 : 0;
-    def.u.bd.dephault = Defaults::HDRMode ? 1 : 0;
-    def.u.bd.u.nameptr = "Anti-firefly (Karis Average)";
-    def.uu.id = DISK_ID_HDR_MODE;
-    err = PF_ADD_PARAM(in_data, -1, &def);
-    if (err) return err;
+    PF_ADD_CHECKBOX(
+        "HDR Mode",
+        "Anti-firefly (Karis Average)",
+        Defaults::HDRMode ? 1 : 0,
+        0,
+        DISK_ID_HDR_MODE);
 
     out_data->num_params = PARAM_COUNT;
 
@@ -403,13 +395,12 @@ PF_Err GPUDeviceSetup(
 
     try {
         // Get device info
-        AEGP_SuiteHandler suites(in_data->pica_basicP);
         PF_GPUDeviceSuite1* gpuSuite = nullptr;
 
-        err = suites.Pica()->AcquireSuite(
+        err = in_data->pica_basicP->AcquireSuite(
             kPFGPUDeviceSuite,
             kPFGPUDeviceSuiteVersion1,
-            reinterpret_cast<const void**>(&gpuSuite));
+            reinterpret_cast<const void**>(const_cast<PF_GPUDeviceSuite1**>(&gpuSuite)));
 
         if (!err && gpuSuite) {
             PF_GPUDeviceInfo deviceInfo;
@@ -436,7 +427,7 @@ PF_Err GPUDeviceSetup(
                 }
             }
 
-            suites.Pica()->ReleaseSuite(kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1);
+            in_data->pica_basicP->ReleaseSuite(kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1);
         }
     }
     catch (...) {
@@ -495,9 +486,6 @@ PF_Err PreRender(
 
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
-
-    // Extract parameters from checkout
-    AEGP_SuiteHandler suites(in_data->pica_basicP);
 
     // Checkout input layer at current time
     err = extra->cb->checkout_layer(
@@ -580,7 +568,7 @@ PF_Err PreRender(
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_ANAMORPHIC_ANGLE, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->anamorphicAngle = PF_FIX_2_FLOAT(param.u.ad.value);
+        preRenderData->anamorphicAngle = FIX_2_FLOAT(param.u.ad.value);
 
         // Composite Mode
         AEFX_CLR_STRUCT(param);
@@ -648,20 +636,19 @@ PF_Err SmartRender(
 #if HAS_DIRECTX
         // GPU Rendering path
         JustGlowGPUData* gpuData =
-            reinterpret_cast<JustGlowGPUData*>(extra->input->gpu_data);
+            reinterpret_cast<JustGlowGPUData*>(const_cast<void*>(extra->input->gpu_data));
 
         if (gpuData && gpuData->initialized && gpuData->renderer) {
             JustGlowGPURenderer* renderer =
                 static_cast<JustGlowGPURenderer*>(gpuData->renderer);
 
             // Get GPU buffer pointers
-            AEGP_SuiteHandler suites(in_data->pica_basicP);
             PF_GPUDeviceSuite1* gpuSuite = nullptr;
 
-            err = suites.Pica()->AcquireSuite(
+            err = in_data->pica_basicP->AcquireSuite(
                 kPFGPUDeviceSuite,
                 kPFGPUDeviceSuiteVersion1,
-                reinterpret_cast<const void**>(&gpuSuite));
+                reinterpret_cast<const void**>(const_cast<PF_GPUDeviceSuite1**>(&gpuSuite)));
 
             if (!err && gpuSuite) {
                 void* inputData = nullptr;
@@ -705,7 +692,7 @@ PF_Err SmartRender(
                     }
                 }
 
-                suites.Pica()->ReleaseSuite(kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1);
+                in_data->pica_basicP->ReleaseSuite(kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1);
             }
         }
         else {
