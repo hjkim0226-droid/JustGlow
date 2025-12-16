@@ -1,0 +1,8 @@
+; JustGlow Module Definition File
+; Exports the plugin entry point function
+
+LIBRARY JustGlow
+
+EXPORTS
+    EffectMain
+    PluginDataEntryFunction

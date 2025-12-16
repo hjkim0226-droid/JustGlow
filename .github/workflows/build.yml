@@ -1,0 +1,219 @@
+# JustGlow - GitHub Actions Build Workflow
+# Builds the After Effects plugin for Windows
+
+name: Build JustGlow
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Manual trigger
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+    # ========================================
+    # Checkout
+    # ========================================
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    # ========================================
+    # Setup Build Tools
+    # ========================================
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Setup CMake
+      uses: lukka/get-cmake@latest
+
+    # ========================================
+    # Cache Dependencies
+    # ========================================
+    - name: Cache AE SDK
+      id: cache-ae-sdk
+      uses: actions/cache@v4
+      with:
+        path: include/AE_SDK
+        key: ae-sdk-25.0
+
+    # ========================================
+    # Download After Effects SDK (if not cached)
+    # ========================================
+    - name: Check AE SDK
+      if: steps.cache-ae-sdk.outputs.cache-hit != 'true'
+      run: |
+        echo "::warning::After Effects SDK not found in cache."
+        echo "Please ensure the SDK is included in the repository or update the workflow."
+        echo "For now, creating placeholder structure..."
+        mkdir -p include/AE_SDK
+      shell: bash
+
+    # ========================================
+    # Find Windows SDK and DXC
+    # ========================================
+    - name: Find DirectX Shader Compiler
+      id: find-dxc
+      run: |
+        $windowsKits = "C:\Program Files (x86)\Windows Kits\10\bin"
+        $latestVersion = Get-ChildItem $windowsKits -Directory |
+          Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+          Sort-Object Name -Descending |
+          Select-Object -First 1
+        $dxcPath = Join-Path $latestVersion.FullName "x64\dxc.exe"
+        echo "DXC_PATH=$dxcPath" >> $env:GITHUB_OUTPUT
+        echo "Found DXC at: $dxcPath"
+      shell: pwsh
+
+    # ========================================
+    # Configure CMake
+    # ========================================
+    - name: Configure CMake
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+          -DAE_SDK_PATH="${{ github.workspace }}/include/AE_SDK"
+      shell: pwsh
+
+    # ========================================
+    # Build
+    # ========================================
+    - name: Build
+      run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+
+    # ========================================
+    # Compile Shaders Manually (if DXC available)
+    # ========================================
+    - name: Compile Shaders
+      run: |
+        $dxc = "${{ steps.find-dxc.outputs.DXC_PATH }}"
+        $shaderDir = "shaders"
+        $outputDir = "build/${{ env.BUILD_TYPE }}/DirectX_Assets"
+
+        New-Item -ItemType Directory -Force -Path $outputDir
+
+        $shaders = @(
+          @{Name="Prefilter"; Entry="main"},
+          @{Name="Downsample"; Entry="main"},
+          @{Name="Upsample"; Entry="main"},
+          @{Name="PostProcess"; Entry="main_anamorphic"},
+          @{Name="Composite"; Entry="main"}
+        )
+
+        foreach ($shader in $shaders) {
+          $input = "$shaderDir/$($shader.Name).hlsl"
+          $output = "$outputDir/$($shader.Name).cso"
+
+          if (Test-Path $input) {
+            Write-Host "Compiling $($shader.Name).hlsl..."
+            & $dxc -T cs_6_0 -E $($shader.Entry) -Fo $output -I $shaderDir $input
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Failed to compile $($shader.Name).hlsl"
+            }
+          }
+        }
+      shell: pwsh
+      continue-on-error: true
+
+    # ========================================
+    # Package Artifacts
+    # ========================================
+    - name: Package Plugin
+      run: |
+        mkdir -p artifacts/JustGlow
+
+        # Copy plugin
+        if (Test-Path "build/${{ env.BUILD_TYPE }}/JustGlow.aex") {
+          Copy-Item "build/${{ env.BUILD_TYPE }}/JustGlow.aex" "artifacts/JustGlow/"
+        }
+
+        # Copy shaders
+        if (Test-Path "build/${{ env.BUILD_TYPE }}/DirectX_Assets") {
+          Copy-Item -Recurse "build/${{ env.BUILD_TYPE }}/DirectX_Assets" "artifacts/JustGlow/"
+        }
+
+        # Copy readme
+        if (Test-Path "README.md") {
+          Copy-Item "README.md" "artifacts/JustGlow/"
+        }
+      shell: pwsh
+
+    # ========================================
+    # Upload Artifacts
+    # ========================================
+    - name: Upload Plugin Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: JustGlow-Windows-x64
+        path: artifacts/JustGlow/
+        retention-days: 30
+
+    # ========================================
+    # Create Release (on tag)
+    # ========================================
+    - name: Create Release Archive
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        Compress-Archive -Path "artifacts/JustGlow/*" -DestinationPath "JustGlow-${{ github.ref_name }}-Windows-x64.zip"
+      shell: pwsh
+
+    - name: Upload Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: JustGlow-${{ github.ref_name }}-Windows-x64.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ========================================
+  # Shader Validation Job (Optional)
+  # ========================================
+  validate-shaders:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Validate HLSL Syntax
+      run: |
+        $dxc = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\dxc.exe"
+
+        if (-not (Test-Path $dxc)) {
+          # Find any available DXC
+          $windowsKits = "C:\Program Files (x86)\Windows Kits\10\bin"
+          $latestVersion = Get-ChildItem $windowsKits -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+          $dxc = Join-Path $latestVersion.FullName "x64\dxc.exe"
+        }
+
+        $errors = 0
+
+        Get-ChildItem "shaders/*.hlsl" | ForEach-Object {
+          Write-Host "Validating $($_.Name)..."
+
+          # Just syntax check, don't generate output
+          & $dxc -T cs_6_0 -E main -Vd -I shaders $_.FullName 2>&1 | Out-Null
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Syntax error in $($_.Name)"
+            $errors++
+          }
+        }
+
+        if ($errors -gt 0) {
+          exit 1
+        }
+
+        Write-Host "All shaders validated successfully!"
+      shell: pwsh
+      continue-on-error: true

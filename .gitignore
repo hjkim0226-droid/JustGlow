@@ -1,0 +1,33 @@
+# Build outputs
+build/
+out/
+cmake-build-*/
+*.aex
+*.cso
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.ncb
+*.sln.docstates
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled shaders
+DirectX_Assets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies (if not committed)
+# include/AE_SDK/
+
+# Logs
+*.log
