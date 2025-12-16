@@ -198,15 +198,30 @@ jobs:
 
         $errors = 0
 
+        # Define entry points for each shader
+        $shaderEntryPoints = @{
+          "Prefilter.hlsl" = "main"
+          "Downsample.hlsl" = "main"
+          "Upsample.hlsl" = "main"
+          "PostProcess.hlsl" = "main_anamorphic"
+          "Composite.hlsl" = "main"
+        }
+
         Get-ChildItem "shaders/*.hlsl" | ForEach-Object {
-          Write-Host "Validating $($_.Name)..."
+          $entryPoint = $shaderEntryPoints[$_.Name]
+          if (-not $entryPoint) {
+            Write-Host "Skipping $($_.Name) (no entry point defined)"
+            return
+          }
+
+          Write-Host "Validating $($_.Name) with entry point $entryPoint..."
 
           # Just syntax check, don't generate output
-          & $dxc -T cs_6_0 -E main -Vd -I shaders $_.FullName 2>&1 | Out-Null
+          & $dxc -T cs_6_0 -E $entryPoint -Vd -I shaders $_.FullName 2>&1 | Out-Null
 
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Syntax error in $($_.Name)"
-            $errors++
+            $script:errors++
           }
         }
 
