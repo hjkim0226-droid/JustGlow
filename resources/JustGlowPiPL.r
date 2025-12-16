@@ -65,9 +65,11 @@ resource 'PiPL' (16000) {
         },
 
         AE_Effect_Global_OutFlags_2 {
-            0x2A000000  /* PF_OutFlag2_FLOAT_COLOR_AWARE |
-                          PF_OutFlag2_SUPPORTS_SMART_RENDER |
-                          PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 */
+            0x2A001400  /* PF_OutFlag2_FLOAT_COLOR_AWARE (0x02000000) |
+                          PF_OutFlag2_SUPPORTS_SMART_RENDER (0x00001000) |
+                          PF_OutFlag2_SUPPORTS_THREADED_RENDERING (0x00000400) |
+                          PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 (0x20000000) |
+                          PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING (0x08000000) */
         },
 
         AE_Effect_Match_Name {

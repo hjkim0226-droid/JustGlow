@@ -118,34 +118,11 @@ if(WIN32)
     )
 
     # ========================================================================
-    # PiPL Resource Compilation
+    # PiPL Resource
     # ========================================================================
-
-    # Find cl.exe for preprocessing
-    find_program(CL_EXECUTABLE cl)
-
-    # PiPL tool path (should be in SDK)
-    set(PIPL_TOOL "${AE_SDK_PATH}/../Resources/PiPLTool.exe" CACHE FILEPATH "Path to PiPLTool")
-
-    if(EXISTS "${PIPL_TOOL}")
-        set(PIPL_SOURCE "${CMAKE_SOURCE_DIR}/resources/JustGlowPiPL.r")
-        set(PIPL_TEMP_RC "${CMAKE_BINARY_DIR}/JustGlowPiPL_temp.rc")
-
-        add_custom_command(
-            OUTPUT "${PIPL_TEMP_RC}"
-            COMMAND ${CL_EXECUTABLE} /I"${AE_SDK_PATH}" /EP "${PIPL_SOURCE}" > "${CMAKE_BINARY_DIR}/JustGlowPiPL.rr"
-            COMMAND "${PIPL_TOOL}" "${CMAKE_BINARY_DIR}/JustGlowPiPL.rr" "${CMAKE_BINARY_DIR}/JustGlowPiPL.rrc"
-            COMMAND ${CL_EXECUTABLE} /D "MSWindows" /EP "${CMAKE_BINARY_DIR}/JustGlowPiPL.rrc" > "${PIPL_TEMP_RC}"
-            DEPENDS "${PIPL_SOURCE}"
-            COMMENT "Compiling PiPL resource"
-            VERBATIM
-        )
-
-        add_custom_target(CompilePiPL DEPENDS "${PIPL_TEMP_RC}")
-        add_dependencies(${PROJECT_NAME} CompilePiPL)
-    else()
-        message(WARNING "PiPLTool not found. PiPL resource will not be compiled automatically.")
-    endif()
+    # PiPL is now embedded directly in JustGlow.rc, no PiPLTool needed.
+    # The RC file contains the binary PiPL data with GPU support flags.
+    message(STATUS "PiPL resource embedded in JustGlow.rc (no PiPLTool required)")
 
     # ========================================================================
     # Shader Compilation
