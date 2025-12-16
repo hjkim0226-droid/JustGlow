@@ -11,6 +11,54 @@
 
 #ifdef HAS_DIRECTX
 #include "JustGlowGPURenderer.h"
+#include <fstream>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+#include <cstdarg>
+
+// ============================================================================
+// Debug Logging (shared with GPU renderer)
+// ============================================================================
+
+static std::wstring GetLogFilePath() {
+    wchar_t tempPath[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+    return std::wstring(tempPath) + L"JustGlow_debug.log";
+}
+
+static void LogMsg(const char* format, ...) {
+    static std::ofstream logFile;
+    static bool initialized = false;
+
+    if (!initialized) {
+        logFile.open(GetLogFilePath(), std::ios::out | std::ios::app);
+        initialized = true;
+        if (logFile.is_open()) {
+            logFile << "\n========== JustGlow Plugin Loaded ==========\n";
+            logFile.flush();
+        }
+    }
+
+    if (logFile.is_open()) {
+        auto now = std::time(nullptr);
+        auto tm = *std::localtime(&now);
+        logFile << std::put_time(&tm, "[%H:%M:%S] ");
+
+        char buffer[1024];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+
+        logFile << buffer << std::endl;
+        logFile.flush();
+    }
+}
+
+#define PLUGIN_LOG(fmt, ...) LogMsg(fmt, ##__VA_ARGS__)
+#else
+#define PLUGIN_LOG(fmt, ...) ((void)0)
 #endif
 
 // ============================================================================
@@ -144,6 +192,8 @@ PF_Err GlobalSetup(
 {
     PF_Err err = PF_Err_NONE;
 
+    PLUGIN_LOG("=== GlobalSetup ===");
+
     // Set plugin version
     out_data->my_version = PF_VERSION(
         MAJOR_VERSION,
@@ -169,6 +219,8 @@ PF_Err GlobalSetup(
         | PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING // DirectX 12 support
 #endif
         ;
+
+    PLUGIN_LOG("GlobalSetup complete, flags2=0x%X", out_data->out_flags2);
 
     return err;
 }
@@ -382,9 +434,15 @@ PF_Err GPUDeviceSetup(
 {
     PF_Err err = PF_Err_NONE;
 
+    PLUGIN_LOG("=== GPUDeviceSetup ===");
+
 #if HAS_DIRECTX
+    PLUGIN_LOG("HAS_DIRECTX is defined");
+    PLUGIN_LOG("Requested GPU framework: %d (DIRECTX=%d)", extra->input->what_gpu, PF_GPU_Framework_DIRECTX);
+
     // Check if DirectX is the requested framework
     if (extra->input->what_gpu != PF_GPU_Framework_DIRECTX) {
+        PLUGIN_LOG("ERROR: Not DirectX framework, returning error");
         return PF_Err_UNRECOGNIZED_PARAM_TYPE;
     }
 
@@ -392,6 +450,7 @@ PF_Err GPUDeviceSetup(
     JustGlowGPUData* gpuData = new JustGlowGPUData();
     gpuData->initialized = false;
     gpuData->renderer = nullptr;
+    PLUGIN_LOG("GPU data allocated");
 
     try {
         // Get device info
@@ -403,6 +462,8 @@ PF_Err GPUDeviceSetup(
             kPFGPUDeviceSuiteVersion1,
             &suiteP);
 
+        PLUGIN_LOG("AcquireSuite result: err=%d, suiteP=%p", err, suiteP);
+
         if (!err && suiteP) {
             gpuSuite = const_cast<PF_GPUDeviceSuite1*>(
                 static_cast<const PF_GPUDeviceSuite1*>(suiteP));
@@ -412,19 +473,26 @@ PF_Err GPUDeviceSetup(
                 extra->input->device_index,
                 &deviceInfo);
 
+            PLUGIN_LOG("GetDeviceInfo: err=%d, framework=%d, device=%p, queue=%p",
+                err, deviceInfo.device_framework, deviceInfo.devicePV, deviceInfo.command_queuePV);
+
             if (!err && deviceInfo.device_framework == PF_GPU_Framework_DIRECTX) {
                 // Create renderer
+                PLUGIN_LOG("Creating JustGlowGPURenderer...");
                 JustGlowGPURenderer* renderer = new JustGlowGPURenderer();
 
                 // Initialize with DirectX device and command queue
+                PLUGIN_LOG("Initializing renderer...");
                 if (renderer->Initialize(
                     static_cast<ID3D12Device*>(deviceInfo.devicePV),
                     static_cast<ID3D12CommandQueue*>(deviceInfo.command_queuePV)))
                 {
                     gpuData->renderer = renderer;
                     gpuData->initialized = true;
+                    PLUGIN_LOG("Renderer initialized successfully!");
                 }
                 else {
+                    PLUGIN_LOG("ERROR: Renderer initialization failed!");
                     delete renderer;
                     err = PF_Err_OUT_OF_MEMORY;
                 }
@@ -434,12 +502,15 @@ PF_Err GPUDeviceSetup(
         }
     }
     catch (...) {
+        PLUGIN_LOG("EXCEPTION in GPUDeviceSetup!");
         err = PF_Err_INTERNAL_STRUCT_DAMAGED;
     }
 
     // Store GPU data
     extra->output->gpu_data = gpuData;
+    PLUGIN_LOG("GPUDeviceSetup complete, err=%d, initialized=%d", err, gpuData->initialized);
 #else
+    PLUGIN_LOG("ERROR: HAS_DIRECTX not defined!");
     err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
 #endif
 
@@ -486,6 +557,8 @@ PF_Err PreRender(
     PF_Err err = PF_Err_NONE;
     PF_RenderRequest req = extra->input->output_request;
     PF_CheckoutResult in_result;
+
+    PLUGIN_LOG("=== PreRender ===");
 
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
@@ -601,8 +674,10 @@ PF_Err PreRender(
     // Flag GPU rendering as possible
 #if HAS_DIRECTX
     extra->output->flags = PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+    PLUGIN_LOG("PreRender: GPU_RENDER_POSSIBLE flag set");
 #endif
 
+    PLUGIN_LOG("PreRender complete, mipLevels=%d", preRenderData->mipLevels);
     return err;
 }
 
@@ -618,10 +693,13 @@ PF_Err SmartRender(
 {
     PF_Err err = PF_Err_NONE;
 
+    PLUGIN_LOG("=== SmartRender (isGPU=%d) ===", isGPU);
+
     JustGlowPreRenderData* preRenderData =
         reinterpret_cast<JustGlowPreRenderData*>(extra->input->pre_render_data);
 
     if (!preRenderData) {
+        PLUGIN_LOG("ERROR: No preRenderData!");
         return PF_Err_INTERNAL_STRUCT_DAMAGED;
     }
 
@@ -637,9 +715,15 @@ PF_Err SmartRender(
 
     if (isGPU) {
 #if HAS_DIRECTX
+        PLUGIN_LOG("GPU Rendering path");
         // GPU Rendering path
         JustGlowGPUData* gpuData =
             reinterpret_cast<JustGlowGPUData*>(const_cast<void*>(extra->input->gpu_data));
+
+        PLUGIN_LOG("gpuData=%p", gpuData);
+        if (gpuData) {
+            PLUGIN_LOG("gpuData->initialized=%d, gpuData->renderer=%p", gpuData->initialized, gpuData->renderer);
+        }
 
         if (gpuData && gpuData->initialized && gpuData->renderer) {
             JustGlowGPURenderer* renderer =
@@ -654,6 +738,8 @@ PF_Err SmartRender(
                 kPFGPUDeviceSuiteVersion1,
                 &suiteP);
 
+            PLUGIN_LOG("AcquireSuite in SmartRender: err=%d, suiteP=%p", err, suiteP);
+
             if (!err && suiteP) {
                 gpuSuite = const_cast<PF_GPUDeviceSuite1*>(
                     static_cast<const PF_GPUDeviceSuite1*>(suiteP));
@@ -662,6 +748,8 @@ PF_Err SmartRender(
 
                 gpuSuite->GetGPUWorldData(in_data->effect_ref, input_worldP, &inputData);
                 gpuSuite->GetGPUWorldData(in_data->effect_ref, output_worldP, &outputData);
+
+                PLUGIN_LOG("GetGPUWorldData: input=%p, output=%p", inputData, outputData);
 
                 if (inputData && outputData) {
                     // Build render parameters
@@ -690,25 +778,36 @@ PF_Err SmartRender(
                     rp.mipChain = CalculateMipChain(rp.width, rp.height, rp.mipLevels);
 
                     // Execute GPU rendering
+                    PLUGIN_LOG("Calling renderer->Render...");
                     if (!renderer->Render(rp,
                         static_cast<ID3D12Resource*>(inputData),
                         static_cast<ID3D12Resource*>(outputData)))
                     {
+                        PLUGIN_LOG("ERROR: Render failed!");
                         err = PF_Err_INTERNAL_STRUCT_DAMAGED;
                     }
+                    else {
+                        PLUGIN_LOG("Render succeeded!");
+                    }
+                }
+                else {
+                    PLUGIN_LOG("ERROR: inputData or outputData is null!");
                 }
 
                 in_data->pica_basicP->ReleaseSuite(kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1);
             }
         }
         else {
+            PLUGIN_LOG("ERROR: GPU data not initialized!");
             err = PF_Err_INTERNAL_STRUCT_DAMAGED;
         }
 #else
+        PLUGIN_LOG("ERROR: HAS_DIRECTX not defined in SmartRender!");
         err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
 #endif
     }
     else {
+        PLUGIN_LOG("CPU Fallback path");
         // CPU Fallback - simple copy for now
         // TODO: Implement CPU-based glow if needed
         PF_COPY(input_worldP, output_worldP, nullptr, nullptr);
