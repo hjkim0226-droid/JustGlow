@@ -395,14 +395,17 @@ PF_Err GPUDeviceSetup(
 
     try {
         // Get device info
+        const void* suiteP = nullptr;
         PF_GPUDeviceSuite1* gpuSuite = nullptr;
 
         err = in_data->pica_basicP->AcquireSuite(
             kPFGPUDeviceSuite,
             kPFGPUDeviceSuiteVersion1,
-            reinterpret_cast<const void**>(const_cast<PF_GPUDeviceSuite1**>(&gpuSuite)));
+            &suiteP);
 
-        if (!err && gpuSuite) {
+        if (!err && suiteP) {
+            gpuSuite = const_cast<PF_GPUDeviceSuite1*>(
+                static_cast<const PF_GPUDeviceSuite1*>(suiteP));
             PF_GPUDeviceInfo deviceInfo;
             err = gpuSuite->GetDeviceInfo(
                 in_data->effect_ref,
@@ -643,14 +646,17 @@ PF_Err SmartRender(
                 static_cast<JustGlowGPURenderer*>(gpuData->renderer);
 
             // Get GPU buffer pointers
+            const void* suiteP = nullptr;
             PF_GPUDeviceSuite1* gpuSuite = nullptr;
 
             err = in_data->pica_basicP->AcquireSuite(
                 kPFGPUDeviceSuite,
                 kPFGPUDeviceSuiteVersion1,
-                reinterpret_cast<const void**>(const_cast<PF_GPUDeviceSuite1**>(&gpuSuite)));
+                &suiteP);
 
-            if (!err && gpuSuite) {
+            if (!err && suiteP) {
+                gpuSuite = const_cast<PF_GPUDeviceSuite1*>(
+                    static_cast<const PF_GPUDeviceSuite1*>(suiteP));
                 void* inputData = nullptr;
                 void* outputData = nullptr;
 
