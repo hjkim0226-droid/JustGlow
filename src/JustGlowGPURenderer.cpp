@@ -221,8 +221,8 @@ bool JustGlowGPURenderer::LoadShader(ShaderType type, const std::wstring& csoPat
     // Read CSO file
     std::ifstream file(csoPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        // Shader file not found - this is OK during development
-        return true;  // Return true to allow partial loading
+        // Shader file not found - required for plugin to work
+        return false;
     }
 
     size_t fileSize = static_cast<size_t>(file.tellg());
@@ -299,9 +299,17 @@ bool JustGlowGPURenderer::LoadShader(ShaderType type, const std::wstring& csoPat
 }
 
 std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
-    // Get module path
+    // Get the DLL module path (not the exe path!)
+    HMODULE hModule = nullptr;
+
+    // Get handle to this DLL by using address of a function in this module
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&JustGlowGPURenderer::GetShaderPath),
+        &hModule);
+
     wchar_t modulePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+    GetModuleFileNameW(hModule, modulePath, MAX_PATH);
 
     std::wstring path(modulePath);
     size_t lastSlash = path.find_last_of(L"\\/");
@@ -315,7 +323,7 @@ std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
         case ShaderType::Prefilter:     return path + L"Prefilter.cso";
         case ShaderType::Downsample:    return path + L"Downsample.cso";
         case ShaderType::Upsample:      return path + L"Upsample.cso";
-        case ShaderType::Anamorphic:    return path + L"Anamorphic.cso";
+        case ShaderType::Anamorphic:    return path + L"PostProcess.cso";  // Anamorphic uses PostProcess.hlsl
         case ShaderType::Composite:     return path + L"Composite.cso";
         default:                        return L"";
     }
