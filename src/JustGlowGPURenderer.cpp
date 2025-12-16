@@ -298,15 +298,20 @@ bool JustGlowGPURenderer::LoadShader(ShaderType type, const std::wstring& csoPat
     return true;
 }
 
-std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
-    // Get the DLL module path (not the exe path!)
+// Helper function to get DLL module handle
+static HMODULE GetCurrentModule() {
     HMODULE hModule = nullptr;
-
-    // Get handle to this DLL by using address of a function in this module
+    // Use address of this static function to find our DLL
     GetModuleHandleExW(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&JustGlowGPURenderer::GetShaderPath),
+        reinterpret_cast<LPCWSTR>(&GetCurrentModule),
         &hModule);
+    return hModule;
+}
+
+std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
+    // Get the DLL module path (not the exe path!)
+    HMODULE hModule = GetCurrentModule();
 
     wchar_t modulePath[MAX_PATH];
     GetModuleFileNameW(hModule, modulePath, MAX_PATH);
