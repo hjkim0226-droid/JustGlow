@@ -58,9 +58,9 @@ void main_anamorphic(uint3 dispatchID : SV_DispatchThreadID)
         // Calculate sample offset
         float2 offset = stretchDir * t * spread * texelSize * scale;
 
-        float3 sample = g_inputTex.SampleLevel(g_linearSampler, uv + offset, 0).rgb;
+        float3 sampleColor = g_inputTex.SampleLevel(g_linearSampler, uv + offset, 0).rgb;
 
-        result += sample * weight;
+        result += sampleColor * weight;
         totalWeight += weight;
     }
 
