@@ -1,13 +1,11 @@
 /**
  * JustGlow Windows Resource File
  *
- * Contains version info and includes compiled PiPL resource.
+ * Contains version info.
+ * Note: PiPL resource is generated separately by PiPLTool when available.
  */
 
 #include <windows.h>
-
-/* Include compiled PiPL resource */
-#include "JustGlowPiPL_temp.rc"
 
 /* Version Information */
 VS_VERSION_INFO VERSIONINFO
