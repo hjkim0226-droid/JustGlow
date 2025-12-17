@@ -401,7 +401,8 @@ extern "C" __global__ void UpsampleKernel(
         float fadeWeight = 1.0f - smoothstepf(activeLimit, activeLimit + 1.0f, (float)levelIndex);
 
         // C. Final weight combines physical decay with distance cutoff
-        float finalWeight = physicalWeight * fadeWeight * exposure;
+        // NOTE: exposure is applied in CompositeKernel, not here
+        float finalWeight = physicalWeight * fadeWeight;
 
         // Accumulate: upsampled glow + weighted current level contribution
         resR = resR + prevR * finalWeight;

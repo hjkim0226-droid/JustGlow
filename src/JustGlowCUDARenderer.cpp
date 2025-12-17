@@ -564,9 +564,8 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     CUdeviceptr glow = m_mipChain[0].devicePtr;
     int glowPitch = m_mipChain[0].width;  // Pitch in pixels, not floats
 
-    // Intensity is now applied in UpsampleKernel as exposure
-    // CompositeKernel just needs 1.0 to preserve the already-scaled glow
-    float intensity = 1.0f;
+    // Apply exposure (pow(2, intensity)) to boost final glow
+    float intensity = params.exposure;
 
     void* kernelParams[] = {
         &original,
