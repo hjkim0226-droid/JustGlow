@@ -495,21 +495,17 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
 
         float blurOffset = params.mipChain.blurOffsets[i + 1];
 
-        // Calculate level weight using falloff parameter
-        // levelWeight = pow(falloff, level) for physical light decay
-        // First pass (deepest level): no blend, just upsample
-        // Subsequent passes: blend with falloff-weighted contribution
-        float levelWeight;
-        if (i == params.mipLevels - 2) {
-            levelWeight = 0.0f;  // First pass: no blend (starting from deepest)
-        } else {
-            // Weight decreases with level depth based on falloff
-            // Higher falloff = light spreads further
-            levelWeight = powf(params.falloff, static_cast<float>(params.mipLevels - 2 - i));
-        }
+        // Calculate level weight using falloff parameter (Deep Glow style)
+        // Core (i=0) should be strongest, atmosphere (i=max) should be weakest
+        // Formula: weight = pow(falloff, i)
+        //   i=0: falloff^0 = 1.0 (core is bright)
+        //   i=1: falloff^1 = 0.7
+        //   i=6: falloff^6 = 0.11 (atmosphere is subtle but NOT zero)
+        float levelWeight = powf(params.falloff, static_cast<float>(i));
 
-        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d, levelWeight=%.3f",
-            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, levelWeight);
+        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d, levelWeight=%.3f (falloff=%.2f)",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
+            levelWeight, params.falloff);
 
         int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
         int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
