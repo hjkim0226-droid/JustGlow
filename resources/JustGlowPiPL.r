@@ -73,6 +73,7 @@ resource 'PiPL' (16000) {
                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING (0x00000400) |
                           PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 (0x20000000) |
                           PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING (0x08000000) */
+            /* CUDA + DirectX support - CUDA via GPU_RENDER_F32 flag */
         },
 
         AE_Effect_Match_Name {

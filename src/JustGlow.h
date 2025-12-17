@@ -29,9 +29,11 @@
 
 #ifdef _WIN32
     #define HAS_DIRECTX 1
+    #define HAS_CUDA 1
     #define HAS_METAL 0
 #else
     #define HAS_DIRECTX 0
+    #define HAS_CUDA 0
     #define HAS_METAL 1
 #endif
 
@@ -173,9 +175,17 @@ namespace Ranges {
 // GPU Data Structures
 // ============================================================================
 
+// GPU framework type
+enum class GPUFrameworkType {
+    None = 0,
+    DirectX = 1,
+    CUDA = 2
+};
+
 // GPU-specific data stored per device
 struct JustGlowGPUData {
-    void* renderer;             // Pointer to JustGlowGPURenderer
+    void* renderer;             // Pointer to renderer (DirectX or CUDA)
+    GPUFrameworkType framework;
     bool initialized;
 };
 

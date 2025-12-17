@@ -9,8 +9,16 @@
 #include <AE_Macros.h>
 #include <Util/Param_Utils.h>
 
-#ifdef HAS_DIRECTX
+#if HAS_DIRECTX
 #include "JustGlowGPURenderer.h"
+#endif
+
+#if HAS_CUDA
+#include "JustGlowCUDARenderer.h"
+#include <cuda.h>
+#endif
+
+#if HAS_DIRECTX || HAS_CUDA
 #include <fstream>
 #include <ctime>
 #include <iomanip>
@@ -59,7 +67,7 @@ static void LogMsg(const char* format, ...) {
 #define PLUGIN_LOG(fmt, ...) LogMsg(fmt, ##__VA_ARGS__)
 #else
 #define PLUGIN_LOG(fmt, ...) ((void)0)
-#endif
+#endif // HAS_DIRECTX || HAS_CUDA
 
 // ============================================================================
 // Plugin Data Entry
@@ -214,8 +222,10 @@ PF_Err GlobalSetup(
         PF_OutFlag2_FLOAT_COLOR_AWARE |         // 32bpc float support
         PF_OutFlag2_SUPPORTS_SMART_RENDER |     // SmartFX support
         PF_OutFlag2_SUPPORTS_THREADED_RENDERING // Thread-safe
-#if HAS_DIRECTX
+#if HAS_CUDA || HAS_DIRECTX
         | PF_OutFlag2_SUPPORTS_GPU_RENDER_F32   // GPU rendering (float32)
+#endif
+#if HAS_DIRECTX
         | PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING // DirectX 12 support
 #endif
         ;
@@ -435,21 +445,15 @@ PF_Err GPUDeviceSetup(
     PF_Err err = PF_Err_NONE;
 
     PLUGIN_LOG("=== GPUDeviceSetup ===");
+    PLUGIN_LOG("Requested GPU framework: %d (CUDA=%d, DIRECTX=%d)",
+        extra->input->what_gpu, PF_GPU_Framework_CUDA, PF_GPU_Framework_DIRECTX);
 
-#if HAS_DIRECTX
-    PLUGIN_LOG("HAS_DIRECTX is defined");
-    PLUGIN_LOG("Requested GPU framework: %d (DIRECTX=%d)", extra->input->what_gpu, PF_GPU_Framework_DIRECTX);
-
-    // Check if DirectX is the requested framework
-    if (extra->input->what_gpu != PF_GPU_Framework_DIRECTX) {
-        PLUGIN_LOG("ERROR: Not DirectX framework, returning error");
-        return PF_Err_UNRECOGNIZED_PARAM_TYPE;
-    }
-
+#if HAS_CUDA || HAS_DIRECTX
     // Allocate GPU data
     JustGlowGPUData* gpuData = new JustGlowGPUData();
     gpuData->initialized = false;
     gpuData->renderer = nullptr;
+    gpuData->framework = GPUFrameworkType::None;
     PLUGIN_LOG("GPU data allocated");
 
     try {
@@ -473,29 +477,67 @@ PF_Err GPUDeviceSetup(
                 extra->input->device_index,
                 &deviceInfo);
 
-            PLUGIN_LOG("GetDeviceInfo: err=%d, framework=%d, device=%p, queue=%p",
-                err, deviceInfo.device_framework, deviceInfo.devicePV, deviceInfo.command_queuePV);
+            PLUGIN_LOG("GetDeviceInfo: err=%d, framework=%d, device=%p, context=%p, queue=%p",
+                err, deviceInfo.device_framework, deviceInfo.devicePV,
+                deviceInfo.contextPV, deviceInfo.command_queuePV);
 
-            if (!err && deviceInfo.device_framework == PF_GPU_Framework_DIRECTX) {
-                // Create renderer
-                PLUGIN_LOG("Creating JustGlowGPURenderer...");
+#if HAS_CUDA
+            // Try CUDA first
+            if (!err && extra->input->what_gpu == PF_GPU_Framework_CUDA) {
+                PLUGIN_LOG("Creating JustGlowCUDARenderer...");
+                JustGlowCUDARenderer* renderer = new JustGlowCUDARenderer();
+
+                // Initialize with CUDA context and stream
+                PLUGIN_LOG("Initializing CUDA renderer with context=%p, stream=%p",
+                    deviceInfo.contextPV, deviceInfo.command_queuePV);
+
+                if (renderer->Initialize(
+                    static_cast<CUcontext>(deviceInfo.contextPV),
+                    static_cast<CUstream>(deviceInfo.command_queuePV)))
+                {
+                    gpuData->renderer = renderer;
+                    gpuData->framework = GPUFrameworkType::CUDA;
+                    gpuData->initialized = true;
+                    PLUGIN_LOG("CUDA Renderer initialized successfully!");
+                }
+                else {
+                    PLUGIN_LOG("ERROR: CUDA Renderer initialization failed!");
+                    delete renderer;
+                    err = PF_Err_OUT_OF_MEMORY;
+                }
+            }
+#endif
+
+#if HAS_DIRECTX
+            // Try DirectX if CUDA not requested or not available
+            if (!gpuData->initialized && !err &&
+                extra->input->what_gpu == PF_GPU_Framework_DIRECTX) {
+                PLUGIN_LOG("Creating JustGlowGPURenderer (DirectX)...");
                 JustGlowGPURenderer* renderer = new JustGlowGPURenderer();
 
                 // Initialize with DirectX device and command queue
-                PLUGIN_LOG("Initializing renderer...");
+                PLUGIN_LOG("Initializing DirectX renderer...");
                 if (renderer->Initialize(
                     static_cast<ID3D12Device*>(deviceInfo.devicePV),
                     static_cast<ID3D12CommandQueue*>(deviceInfo.command_queuePV)))
                 {
                     gpuData->renderer = renderer;
+                    gpuData->framework = GPUFrameworkType::DirectX;
                     gpuData->initialized = true;
-                    PLUGIN_LOG("Renderer initialized successfully!");
+                    PLUGIN_LOG("DirectX Renderer initialized successfully!");
                 }
                 else {
-                    PLUGIN_LOG("ERROR: Renderer initialization failed!");
+                    PLUGIN_LOG("ERROR: DirectX Renderer initialization failed!");
                     delete renderer;
                     err = PF_Err_OUT_OF_MEMORY;
                 }
+            }
+#endif
+
+            // If no renderer was initialized, return error
+            if (!gpuData->initialized) {
+                PLUGIN_LOG("ERROR: No renderer initialized for framework %d", extra->input->what_gpu);
+                err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
             }
 
             in_data->pica_basicP->ReleaseSuite(kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1);
@@ -508,9 +550,10 @@ PF_Err GPUDeviceSetup(
 
     // Store GPU data
     extra->output->gpu_data = gpuData;
-    PLUGIN_LOG("GPUDeviceSetup complete, err=%d, initialized=%d", err, gpuData->initialized);
+    PLUGIN_LOG("GPUDeviceSetup complete, err=%d, initialized=%d, framework=%d",
+        err, gpuData->initialized, static_cast<int>(gpuData->framework));
 #else
-    PLUGIN_LOG("ERROR: HAS_DIRECTX not defined!");
+    PLUGIN_LOG("ERROR: No GPU support compiled!");
     err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
 #endif
 
@@ -528,15 +571,33 @@ PF_Err GPUDeviceSetdown(
 {
     PF_Err err = PF_Err_NONE;
 
-#if HAS_DIRECTX
+#if HAS_CUDA || HAS_DIRECTX
     JustGlowGPUData* gpuData = reinterpret_cast<JustGlowGPUData*>(extra->input->gpu_data);
 
     if (gpuData) {
         if (gpuData->renderer) {
-            JustGlowGPURenderer* renderer =
-                static_cast<JustGlowGPURenderer*>(gpuData->renderer);
-            renderer->Shutdown();
-            delete renderer;
+            switch (gpuData->framework) {
+#if HAS_CUDA
+                case GPUFrameworkType::CUDA: {
+                    JustGlowCUDARenderer* renderer =
+                        static_cast<JustGlowCUDARenderer*>(gpuData->renderer);
+                    renderer->Shutdown();
+                    delete renderer;
+                    break;
+                }
+#endif
+#if HAS_DIRECTX
+                case GPUFrameworkType::DirectX: {
+                    JustGlowGPURenderer* renderer =
+                        static_cast<JustGlowGPURenderer*>(gpuData->renderer);
+                    renderer->Shutdown();
+                    delete renderer;
+                    break;
+                }
+#endif
+                default:
+                    break;
+            }
         }
         delete gpuData;
     }
@@ -672,7 +733,7 @@ PF_Err PreRender(
     extra->output->pre_render_data = preRenderData;
 
     // Flag GPU rendering as possible
-#if HAS_DIRECTX
+#if HAS_CUDA || HAS_DIRECTX
     extra->output->flags = PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
     PLUGIN_LOG("PreRender: GPU_RENDER_POSSIBLE flag set");
 #endif
@@ -714,7 +775,7 @@ PF_Err SmartRender(
     if (err) return err;
 
     if (isGPU) {
-#if HAS_DIRECTX
+#if HAS_CUDA || HAS_DIRECTX
         PLUGIN_LOG("GPU Rendering path");
         // GPU Rendering path
         JustGlowGPUData* gpuData =
@@ -722,13 +783,11 @@ PF_Err SmartRender(
 
         PLUGIN_LOG("gpuData=%p", gpuData);
         if (gpuData) {
-            PLUGIN_LOG("gpuData->initialized=%d, gpuData->renderer=%p", gpuData->initialized, gpuData->renderer);
+            PLUGIN_LOG("gpuData->initialized=%d, gpuData->renderer=%p, framework=%d",
+                gpuData->initialized, gpuData->renderer, static_cast<int>(gpuData->framework));
         }
 
         if (gpuData && gpuData->initialized && gpuData->renderer) {
-            JustGlowGPURenderer* renderer =
-                static_cast<JustGlowGPURenderer*>(gpuData->renderer);
-
             // Get GPU buffer pointers
             const void* suiteP = nullptr;
             PF_GPUDeviceSuite1* gpuSuite = nullptr;
@@ -777,12 +836,38 @@ PF_Err SmartRender(
                     rp.fractionalAmount = preRenderData->fractionalAmount;
                     rp.mipChain = CalculateMipChain(rp.width, rp.height, rp.mipLevels);
 
-                    // Execute GPU rendering
-                    PLUGIN_LOG("Calling renderer->Render...");
-                    if (!renderer->Render(rp,
-                        static_cast<ID3D12Resource*>(inputData),
-                        static_cast<ID3D12Resource*>(outputData)))
-                    {
+                    // Execute GPU rendering based on framework
+                    bool renderSuccess = false;
+
+                    switch (gpuData->framework) {
+#if HAS_CUDA
+                        case GPUFrameworkType::CUDA: {
+                            PLUGIN_LOG("Calling CUDA renderer->Render...");
+                            JustGlowCUDARenderer* renderer =
+                                static_cast<JustGlowCUDARenderer*>(gpuData->renderer);
+                            renderSuccess = renderer->Render(rp,
+                                reinterpret_cast<CUdeviceptr>(inputData),
+                                reinterpret_cast<CUdeviceptr>(outputData));
+                            break;
+                        }
+#endif
+#if HAS_DIRECTX
+                        case GPUFrameworkType::DirectX: {
+                            PLUGIN_LOG("Calling DirectX renderer->Render...");
+                            JustGlowGPURenderer* renderer =
+                                static_cast<JustGlowGPURenderer*>(gpuData->renderer);
+                            renderSuccess = renderer->Render(rp,
+                                static_cast<ID3D12Resource*>(inputData),
+                                static_cast<ID3D12Resource*>(outputData));
+                            break;
+                        }
+#endif
+                        default:
+                            PLUGIN_LOG("ERROR: Unknown framework type!");
+                            break;
+                    }
+
+                    if (!renderSuccess) {
                         PLUGIN_LOG("ERROR: Render failed!");
                         err = PF_Err_INTERNAL_STRUCT_DAMAGED;
                     }
@@ -802,7 +887,7 @@ PF_Err SmartRender(
             err = PF_Err_INTERNAL_STRUCT_DAMAGED;
         }
 #else
-        PLUGIN_LOG("ERROR: HAS_DIRECTX not defined in SmartRender!");
+        PLUGIN_LOG("ERROR: No GPU support in SmartRender!");
         err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
 #endif
     }

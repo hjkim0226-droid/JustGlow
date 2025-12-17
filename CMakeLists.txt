@@ -4,10 +4,12 @@
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.20)
-project(JustGlow VERSION 1.0.3 LANGUAGES CXX)
+project(JustGlow VERSION 1.0.3 LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # ============================================================================
 # Configuration Options
@@ -41,12 +43,18 @@ endif()
 set(PLUGIN_SOURCES
     src/JustGlow.cpp
     src/JustGlowGPURenderer.cpp
+    src/JustGlowCUDARenderer.cpp
 )
 
 set(PLUGIN_HEADERS
     src/JustGlow.h
     src/JustGlowParams.h
     src/JustGlowGPURenderer.h
+    src/JustGlowCUDARenderer.h
+)
+
+set(CUDA_SOURCES
+    src/JustGlowKernels.cu
 )
 
 set(SHADER_FILES
@@ -80,6 +88,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # ============================================================================
 
 if(WIN32)
+    # Find CUDA
+    find_package(CUDAToolkit REQUIRED)
+    message(STATUS "CUDA Toolkit Version: ${CUDAToolkit_VERSION}")
+    message(STATUS "CUDA Include Dirs: ${CUDAToolkit_INCLUDE_DIRS}")
+
     # Preprocessor definitions
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         MSWindows
@@ -88,10 +101,16 @@ if(WIN32)
         UNICODE
         _UNICODE
         HAS_DIRECTX=1
+        HAS_CUDA=1
         PLUGIN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         PLUGIN_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         PLUGIN_VERSION_PATCH=${PROJECT_VERSION_PATCH}
         PLUGIN_VERSION_STRING="${PROJECT_VERSION}"
+    )
+
+    # Add CUDA include directories
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
     )
 
     # Configure RC file with version info
@@ -119,6 +138,7 @@ if(WIN32)
         d3d12.lib
         dxgi.lib
         d3dcompiler.lib
+        CUDA::cuda_driver
     )
 
     # Compiler flags
@@ -235,6 +255,42 @@ if(WIN32)
         message(WARNING "DXC (DirectX Shader Compiler) not found. Shaders will not be compiled.")
     endif()
 
+    # ========================================================================
+    # CUDA PTX Compilation
+    # ========================================================================
+
+    set(CUDA_OUTPUT_DIR "${CMAKE_BINARY_DIR}/CUDA_Assets")
+    file(MAKE_DIRECTORY "${CUDA_OUTPUT_DIR}")
+
+    # Compile CUDA kernel to PTX
+    set(CUDA_KERNEL_SRC "${CMAKE_SOURCE_DIR}/src/JustGlowKernels.cu")
+    set(CUDA_KERNEL_PTX "${CUDA_OUTPUT_DIR}/JustGlowKernels.ptx")
+
+    add_custom_command(
+        OUTPUT "${CUDA_KERNEL_PTX}"
+        COMMAND ${CMAKE_CUDA_COMPILER}
+            -ptx
+            -arch=sm_50
+            -o "${CUDA_KERNEL_PTX}"
+            "${CUDA_KERNEL_SRC}"
+        DEPENDS "${CUDA_KERNEL_SRC}"
+        COMMENT "Compiling CUDA kernel to PTX: JustGlowKernels.cu"
+        VERBATIM
+    )
+
+    add_custom_target(CompileCUDA ALL DEPENDS "${CUDA_KERNEL_PTX}")
+    add_dependencies(${PROJECT_NAME} CompileCUDA)
+
+    # Copy CUDA PTX to output directory after build
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CUDA_OUTPUT_DIR}"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/CUDA_Assets"
+        COMMENT "Copying compiled CUDA PTX to output directory"
+    )
+
+    message(STATUS "CUDA PTX will be compiled: ${CUDA_KERNEL_PTX}")
+
 endif()
 
 # ============================================================================
@@ -288,6 +344,10 @@ if(WIN32)
         DESTINATION "${AE_PLUGIN_DIR}/DirectX_Assets"
         FILES_MATCHING PATTERN "*.cso"
     )
+    install(DIRECTORY "${CUDA_OUTPUT_DIR}/"
+        DESTINATION "${AE_PLUGIN_DIR}/CUDA_Assets"
+        FILES_MATCHING PATTERN "*.ptx"
+    )
 endif()
 
 # ============================================================================
@@ -301,6 +361,8 @@ message(STATUS "AE SDK Path: ${AE_SDK_PATH}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 if(WIN32)
     message(STATUS "DXC Compiler: ${DXC_EXECUTABLE}")
+    message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION}")
+    message(STATUS "NVCC: ${CMAKE_CUDA_COMPILER}")
     message(STATUS "PiPL Tool: ${PIPL_TOOL}")
 endif()
 message(STATUS "Install Path: ${AE_PLUGIN_DIR}")
