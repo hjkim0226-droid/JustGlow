@@ -396,6 +396,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
     }
 
     // Kernel parameters
+    int dstPitchPixels = dstMip.width;  // Pitch in pixels, not bytes
     void* kernelParams[] = {
         &input,
         &dstMip.devicePtr,
@@ -404,7 +405,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
         (void*)&params.srcPitch,
         (void*)&dstMip.width,
         (void*)&dstMip.height,
-        (void*)&dstMip.pitch,
+        (void*)&dstPitchPixels,  // Fixed: was dstMip.pitch (bytes), now pixels
         (void*)&params.threshold,
         (void*)&params.softKnee,
         (void*)&params.intensity,
@@ -443,8 +444,8 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d", i, srcMip.width, srcMip.height, dstMip.width, dstMip.height);
 
         float blurOffset = params.mipChain.blurOffsets[i];
-        int srcPitchPixels = srcMip.width * 4;
-        int dstPitchPixels = dstMip.width * 4;
+        int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
+        int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
 
         void* kernelParams[] = {
             &srcMip.devicePtr,
@@ -489,8 +490,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
 
         float blurOffset = params.mipChain.blurOffsets[i + 1];
         float blendFactor = (i == params.mipLevels - 2) ? 0.0f : 0.5f;  // First pass: no blend
-        int srcPitchPixels = srcMip.width * 4;
-        int dstPitchPixels = dstMip.width * 4;
+        int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
+        int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
 
         // For upsample, prevLevel is the current destination (for blending)
         CUdeviceptr prevLevel = dstMip.devicePtr;
@@ -539,7 +540,7 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     CUDA_LOG("Composite: %dx%d, grid: %dx%d", params.width, params.height, gridX, gridY);
 
     CUdeviceptr glow = m_mipChain[0].devicePtr;
-    int glowPitch = m_mipChain[0].width * 4;
+    int glowPitch = m_mipChain[0].width;  // Pitch in pixels, not floats
 
     void* kernelParams[] = {
         &original,
