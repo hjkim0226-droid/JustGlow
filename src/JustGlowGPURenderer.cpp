@@ -648,8 +648,8 @@ bool JustGlowGPURenderer::Render(
     ID3D12Resource* outputBuffer)
 {
     LOG("=== Render Begin ===");
-    LOG("Size: %dx%d, MipLevels: %d, Intensity: %.2f, Threshold: %.2f",
-        params.width, params.height, params.mipLevels, params.intensity, params.threshold);
+    LOG("Size: %dx%d, MipLevels: %d, Exposure: %.2f, Threshold: %.2f",
+        params.width, params.height, params.mipLevels, params.exposure, params.threshold);
 
     if (!inputBuffer || !outputBuffer) {
         LOG("ERROR: Invalid input/output buffers");
@@ -757,8 +757,8 @@ void JustGlowGPURenderer::ExecutePrefilter(
     BlurPassParams passParams = {};
     passParams.srcWidth = params.width;
     passParams.srcHeight = params.height;
-    passParams.dstWidth = params.mipChain.widths[0];
-    passParams.dstHeight = params.mipChain.heights[0];
+    passParams.dstWidth = m_mipChain[0].width;
+    passParams.dstHeight = m_mipChain[0].height;
     passParams.srcTexelX = 1.0f / static_cast<float>(params.width);
     passParams.srcTexelY = 1.0f / static_cast<float>(params.height);
     passParams.dstTexelX = 1.0f / static_cast<float>(passParams.dstWidth);
@@ -812,9 +812,22 @@ void JustGlowGPURenderer::ExecuteDownsampleChain(const RenderParams& params) {
         LOG("Downsample pass %d: mip[%d](%dx%d) -> mip[%d](%dx%d)",
             i, i, srcMip.width, srcMip.height, i+1, dstMip.width, dstMip.height);
 
-        // Update BlurPassParams
-        BlurPassParams passParams;
-        FillBlurPassParams(passParams, params.mipChain, i, true);
+        // Update BlurPassParams manually (params.mipChain removed in v1.2.0)
+        BlurPassParams passParams = {};
+        passParams.srcWidth = srcMip.width;
+        passParams.srcHeight = srcMip.height;
+        passParams.dstWidth = dstMip.width;
+        passParams.dstHeight = dstMip.height;
+        passParams.srcPitch = srcMip.width;
+        passParams.dstPitch = dstMip.width;
+        passParams.srcTexelX = 1.0f / static_cast<float>(srcMip.width);
+        passParams.srcTexelY = 1.0f / static_cast<float>(srcMip.height);
+        passParams.dstTexelX = 1.0f / static_cast<float>(dstMip.width);
+        passParams.dstTexelY = 1.0f / static_cast<float>(dstMip.height);
+        passParams.blurOffset = params.blurOffset;  // Fixed offset from Spread parameter
+        passParams.fractionalBlend = 0.0f;
+        passParams.passIndex = i;
+        passParams.totalPasses = params.mipLevels;
         memcpy(m_blurPassBufferPtr, &passParams, sizeof(passParams));
         m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
 
@@ -890,7 +903,7 @@ void JustGlowGPURenderer::ExecuteUpsampleChain(const RenderParams& params) {
         passParams.srcTexelY = 1.0f / static_cast<float>(srcMip.height);
         passParams.dstTexelX = 1.0f / static_cast<float>(dstMip.width);
         passParams.dstTexelY = 1.0f / static_cast<float>(dstMip.height);
-        passParams.blurOffset = params.mipChain.blurOffsets[i + 1];
+        passParams.blurOffset = params.blurOffset;  // Fixed offset from Spread parameter
         passParams.fractionalBlend = 0.0f;  // Disable to avoid reading from destination
         passParams.passIndex = 0;  // Always 0 to skip blend with prevLevel
         passParams.totalPasses = params.mipLevels;
