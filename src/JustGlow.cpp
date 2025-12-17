@@ -230,7 +230,11 @@ PF_Err GlobalSetup(
 #endif
         ;
 
-    PLUGIN_LOG("GlobalSetup complete, flags2=0x%X", out_data->out_flags2);
+    PLUGIN_LOG("GlobalSetup complete, flags=0x%X, flags2=0x%X", out_data->out_flags, out_data->out_flags2);
+    PLUGIN_LOG("  HAS_CUDA=%d, HAS_DIRECTX=%d", HAS_CUDA, HAS_DIRECTX);
+    PLUGIN_LOG("  GPU_RENDER_F32=%d, DIRECTX_RENDERING=%d",
+        (out_data->out_flags2 & PF_OutFlag2_SUPPORTS_GPU_RENDER_F32) ? 1 : 0,
+        (out_data->out_flags2 & PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING) ? 1 : 0);
 
     return err;
 }
@@ -607,6 +611,18 @@ PF_Err GPUDeviceSetdown(
 }
 
 // ============================================================================
+// Pre Render Data Cleanup
+// ============================================================================
+
+static void DeletePreRenderData(void* pre_render_data)
+{
+    PLUGIN_LOG("DeletePreRenderData called");
+    if (pre_render_data) {
+        delete reinterpret_cast<JustGlowPreRenderData*>(pre_render_data);
+    }
+}
+
+// ============================================================================
 // Pre Render
 // ============================================================================
 
@@ -731,14 +747,17 @@ PF_Err PreRender(
     extra->output->max_result_rect = in_result.max_result_rect;
     extra->output->solid = FALSE;
     extra->output->pre_render_data = preRenderData;
+    extra->output->delete_pre_render_data_func = DeletePreRenderData;
 
     // Flag GPU rendering as possible
 #if HAS_CUDA || HAS_DIRECTX
     extra->output->flags = PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
-    PLUGIN_LOG("PreRender: GPU_RENDER_POSSIBLE flag set");
+    PLUGIN_LOG("PreRender: GPU_RENDER_POSSIBLE flag set (0x%X)", extra->output->flags);
+#else
+    PLUGIN_LOG("PreRender: GPU support not compiled in (HAS_CUDA=%d, HAS_DIRECTX=%d)", HAS_CUDA, HAS_DIRECTX);
 #endif
 
-    PLUGIN_LOG("PreRender complete, mipLevels=%d", preRenderData->mipLevels);
+    PLUGIN_LOG("PreRender complete, mipLevels=%d, err=%d", preRenderData->mipLevels, err);
     return err;
 }
 
