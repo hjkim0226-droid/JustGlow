@@ -267,10 +267,52 @@ PF_Err ParamsSetup(
     PF_ParamDef def;
 
     // ===========================================
-    // Basic Parameters
+    // Core 4 Parameters (The Big Four)
     // ===========================================
 
-    // Intensity (0-200%)
+    // Radius (0-100) - Controls how far glow reaches (active MIP levels)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Radius",
+        Ranges::RadiusMin,
+        Ranges::RadiusMax,
+        Ranges::RadiusMin,
+        Ranges::RadiusMax,
+        Defaults::Radius,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_RADIUS);
+
+    // Spread (0-100) - Controls blur softness (offset 1.0-3.5px)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Spread",
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Defaults::Spread,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_SPREAD);
+
+    // Falloff (0-100) - Controls decay slope (k=0.2-3.0, higher = faster decay)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Falloff",
+        Ranges::FalloffMin,
+        Ranges::FalloffMax,
+        Ranges::FalloffMin,
+        Ranges::FalloffMax,
+        Defaults::Falloff,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_FALLOFF);
+
+    // Intensity (0-10) - HDR exposure pow(2, intensity)
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
         "Intensity",
@@ -284,19 +326,9 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_INTENSITY);
 
-    // Radius (0-500 pixels)
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX(
-        "Radius",
-        Ranges::RadiusMin,
-        Ranges::RadiusMax,
-        Ranges::RadiusMin,
-        Ranges::RadiusMax,
-        Defaults::Radius,
-        PF_Precision_TENTHS,
-        0,
-        0,
-        DISK_ID_RADIUS);
+    // ===========================================
+    // Threshold
+    // ===========================================
 
     // Threshold (0-100%)
     AEFX_CLR_STRUCT(def);
@@ -330,23 +362,23 @@ PF_Err ParamsSetup(
     // Blur Options
     // ===========================================
 
-    // Quality
+    // Quality (determines max MIP levels)
     AEFX_CLR_STRUCT(def);
     PF_ADD_POPUP(
         "Quality",
         4,  // Number of choices
         Defaults::Quality,
-        "Low|Medium|High|Ultra",
+        "Low (4)|Medium (6)|High (8)|Ultra (12)",
         DISK_ID_QUALITY);
 
-    // Fractional Blend
+    // Falloff Type (decay curve shape)
     AEFX_CLR_STRUCT(def);
-    PF_ADD_CHECKBOX(
-        "Smooth Radius",
-        "Enable smooth radius transitions",
-        Defaults::FractionalBlend ? 1 : 0,
-        0,
-        DISK_ID_FRACTIONAL_BLEND);
+    PF_ADD_POPUP(
+        "Falloff Type",
+        3,  // Number of choices
+        Defaults::FalloffType,
+        "Exponential|Inverse Square|Linear",
+        DISK_ID_FALLOFF_TYPE);
 
     // ===========================================
     // Color Options
@@ -431,20 +463,6 @@ PF_Err ParamsSetup(
         Defaults::HDRMode ? 1 : 0,
         0,
         DISK_ID_HDR_MODE);
-
-    // Falloff (light decay with distance)
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX(
-        "Falloff",
-        Ranges::FalloffMin,
-        Ranges::FalloffMax,
-        Ranges::FalloffMin,
-        Ranges::FalloffMax,
-        Defaults::Falloff,
-        PF_Precision_TENTHS,
-        0,
-        0,
-        DISK_ID_FALLOFF);
 
     out_data->num_params = PARAM_COUNT;
 
@@ -685,17 +703,37 @@ PF_Err PreRender(
         // Get parameter values
         PF_ParamDef param;
 
-        // Intensity
+        // ===========================================
+        // Core 4 Parameters
+        // ===========================================
+
+        // Radius (0-100)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_RADIUS, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->radius = param.u.fs_d.value;
+
+        // Spread (0-100)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->spread = param.u.fs_d.value;
+
+        // Falloff (0-100)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_FALLOFF, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->falloff = param.u.fs_d.value;
+
+        // Intensity (0-10)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_INTENSITY, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->intensity = param.u.fs_d.value;
 
-        // Radius
-        AEFX_CLR_STRUCT(param);
-        PF_CHECKOUT_PARAM(in_data, PARAM_RADIUS, in_data->current_time,
-            in_data->time_step, in_data->time_scale, &param);
-        preRenderData->radius = param.u.fs_d.value;
+        // ===========================================
+        // Threshold
+        // ===========================================
 
         // Threshold
         AEFX_CLR_STRUCT(param);
@@ -709,17 +747,25 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->softKnee = param.u.fs_d.value;
 
+        // ===========================================
+        // Blur Options
+        // ===========================================
+
         // Quality
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_QUALITY, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->quality = static_cast<BlurQuality>(param.u.pd.value);
 
-        // Fractional Blend
+        // Falloff Type
         AEFX_CLR_STRUCT(param);
-        PF_CHECKOUT_PARAM(in_data, PARAM_FRACTIONAL_BLEND, in_data->current_time,
+        PF_CHECKOUT_PARAM(in_data, PARAM_FALLOFF_TYPE, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->fractionalBlend = (param.u.bd.value != 0);
+        preRenderData->falloffType = static_cast<FalloffType>(param.u.pd.value);
+
+        // ===========================================
+        // Color Options
+        // ===========================================
 
         // Glow Color
         AEFX_CLR_STRUCT(param);
@@ -740,6 +786,10 @@ PF_Err PreRender(
         PF_CHECKOUT_PARAM(in_data, PARAM_PRESERVE_COLOR, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->preserveColor = param.u.fs_d.value;
+
+        // ===========================================
+        // Advanced Options
+        // ===========================================
 
         // Anamorphic
         AEFX_CLR_STRUCT(param);
@@ -765,17 +815,26 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->hdrMode = (param.u.bd.value != 0);
 
-        // Falloff
-        AEFX_CLR_STRUCT(param);
-        PF_CHECKOUT_PARAM(in_data, PARAM_FALLOFF, in_data->current_time,
-            in_data->time_step, in_data->time_scale, &param);
-        preRenderData->falloff = param.u.fs_d.value;
+        // ===========================================
+        // Computed Values (The Secret Sauce)
+        // ===========================================
 
-        // Calculate MIP levels (dynamic based on resolution and quality)
-        preRenderData->mipLevels = CalculateMipLevels(
-            preRenderData->radius, preRenderData->quality);
-        preRenderData->fractionalAmount = CalculateFractionalAmount(
-            preRenderData->radius, preRenderData->mipLevels);
+        // MIP levels from quality setting
+        preRenderData->mipLevels = GetQualityLevelCount(preRenderData->quality);
+
+        // activeLimit: Radius -> active MIP level limit
+        // Radius 100 = all levels, Radius 0 = only level 0
+        preRenderData->activeLimit = (preRenderData->radius / 100.0f) *
+                                      static_cast<float>(preRenderData->mipLevels);
+
+        // blurOffset: Spread -> pixel offset (1.0-3.5px, prevents ghosting)
+        preRenderData->blurOffset = 1.0f + (preRenderData->spread / 100.0f) * 2.5f;
+
+        // decayK: Falloff -> decay constant (0.2-3.0, higher = steeper)
+        preRenderData->decayK = 0.2f + (preRenderData->falloff / 100.0f) * 2.8f;
+
+        // exposure: Intensity -> HDR exposure pow(2, intensity)
+        preRenderData->exposure = powf(2.0f, preRenderData->intensity);
     }
 
     // Set up output
@@ -877,29 +936,40 @@ PF_Err SmartRender(
                 if (inputData && outputData) {
                     // Build render parameters
                     RenderParams rp = {};
-                    rp.intensity = preRenderData->intensity;
-                    rp.radius = preRenderData->radius;
+
+                    // Core 4 computed values
+                    rp.activeLimit = preRenderData->activeLimit;
+                    rp.blurOffset = preRenderData->blurOffset;
+                    rp.decayK = preRenderData->decayK;
+                    rp.exposure = preRenderData->exposure;
+                    rp.falloffType = static_cast<int>(preRenderData->falloffType);
+
+                    // Threshold
                     rp.threshold = preRenderData->threshold;
                     rp.softKnee = preRenderData->softKnee;
+
+                    // Quality
                     rp.quality = static_cast<int>(preRenderData->quality);
-                    rp.fractionalBlend = preRenderData->fractionalBlend;
+
+                    // Color
                     rp.glowColor[0] = preRenderData->glowColorR;
                     rp.glowColor[1] = preRenderData->glowColorG;
                     rp.glowColor[2] = preRenderData->glowColorB;
                     rp.colorTemp = preRenderData->colorTemp;
                     rp.preserveColor = preRenderData->preserveColor;
+
+                    // Advanced
                     rp.anamorphic = preRenderData->anamorphic;
                     rp.anamorphicAngle = preRenderData->anamorphicAngle;
                     rp.compositeMode = static_cast<int>(preRenderData->compositeMode);
                     rp.hdrMode = preRenderData->hdrMode;
-                    rp.falloff = preRenderData->falloff / 100.0f;  // Convert to 0-1 range
+
+                    // Image info
                     rp.width = output_worldP->width;
                     rp.height = output_worldP->height;
                     rp.srcPitch = input_worldP->rowbytes / sizeof(float) / 4;
                     rp.dstPitch = output_worldP->rowbytes / sizeof(float) / 4;
                     rp.mipLevels = preRenderData->mipLevels;
-                    rp.fractionalAmount = preRenderData->fractionalAmount;
-                    rp.mipChain = CalculateMipChain(rp.width, rp.height, rp.mipLevels, rp.radius);
 
                     // Execute GPU rendering based on framework
                     bool renderSuccess = false;
@@ -973,51 +1043,8 @@ PF_Err SmartRender(
 // Utility Functions
 // ============================================================================
 
-int CalculateMipLevels(float radius, BlurQuality quality) {
-    // Quality setting determines maximum depth
-    // Low: 4 levels (fast, tight glow)
-    // Medium: 6 levels (balanced)
-    // High: 8 levels (good quality)
-    // Ultra: 12 levels (Deep Glow-like depth, until ~16px)
-    int maxLevelsByQuality;
-    switch (quality) {
-        case BlurQuality::Low:    maxLevelsByQuality = 4;  break;
-        case BlurQuality::Medium: maxLevelsByQuality = 6;  break;
-        case BlurQuality::High:   maxLevelsByQuality = 8;  break;
-        case BlurQuality::Ultra:  maxLevelsByQuality = 12; break;  // Deep Glow-like
-        default:                  maxLevelsByQuality = 8;  break;
-    }
-
-    // Calculate required levels from radius
-    // Each level doubles the effective blur radius
-    int requiredLevels = 1;
-    float currentRadius = 2.0f;  // Base radius at level 1
-
-    while (currentRadius < radius && requiredLevels < maxLevelsByQuality) {
-        currentRadius *= 2.0f;
-        requiredLevels++;
-    }
-
-    // For Ultra quality, ensure we go deep enough for atmosphere
-    if (quality == BlurQuality::Ultra && requiredLevels < 8) {
-        requiredLevels = 8;  // Minimum 8 levels for Ultra (atmosphere/global illumination)
-    }
-
-    return requiredLevels;
-}
-
-float CalculateFractionalAmount(float radius, int mipLevels) {
-    if (mipLevels <= 1) return 0.0f;
-
-    // Calculate the fractional part for smooth transitions
-    float baseRadius = 2.0f * static_cast<float>(1 << (mipLevels - 1));
-    float prevRadius = baseRadius / 2.0f;
-
-    if (radius <= prevRadius) return 0.0f;
-    if (radius >= baseRadius) return 1.0f;
-
-    return (radius - prevRadius) / (baseRadius - prevRadius);
-}
+// Note: CalculateMipLevels is now handled by GetQualityLevelCount() in the header
+// The new system uses Quality to determine MIP depth, not Radius
 
 void ColorTempToRGB(float temp, float& rMult, float& gMult, float& bMult) {
     // Approximate Planckian locus for color temperature

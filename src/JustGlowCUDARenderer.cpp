@@ -445,11 +445,13 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         // This breaks up boxy artifacts -> rounder glow
         int rotationMode = i % 2;  // 0=X, 1=+
 
-        CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d, rotation=%s",
-            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
-            rotationMode == 0 ? "X" : "+");
+        // Use fixed blurOffset from Spread parameter (1.0-3.5px, prevents ghosting)
+        float blurOffset = params.blurOffset;
 
-        float blurOffset = params.mipChain.blurOffsets[i];
+        CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d, rotation=%s, blurOffset=%.2f",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
+            rotationMode == 0 ? "X" : "+", blurOffset);
+
         int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
         int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
 
@@ -493,19 +495,15 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        float blurOffset = params.mipChain.blurOffsets[i + 1];
+        // Use fixed blurOffset from Spread parameter (1.0-3.5px, prevents ghosting)
+        float blurOffset = params.blurOffset;
 
-        // Calculate level weight using falloff parameter (Deep Glow style)
-        // Core (i=0) should be strongest, atmosphere (i=max) should be weakest
-        // Formula: weight = pow(falloff, i)
-        //   i=0: falloff^0 = 1.0 (core is bright)
-        //   i=1: falloff^1 = 0.7
-        //   i=6: falloff^6 = 0.11 (atmosphere is subtle but NOT zero)
-        float levelWeight = powf(params.falloff, static_cast<float>(i));
+        // Level index for weight calculation (inverted: deepest level first)
+        int levelIndex = i;
 
-        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d, levelWeight=%.3f (falloff=%.2f)",
+        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d, activeLimit=%.2f, decayK=%.2f, exposure=%.2f, falloffType=%d",
             i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
-            levelWeight, params.falloff);
+            params.activeLimit, params.decayK, params.exposure, params.falloffType);
 
         int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
         int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
@@ -513,6 +511,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         // For upsample, prevLevel is the current destination (for blending)
         CUdeviceptr prevLevel = dstMip.devicePtr;
 
+        // New kernel parameters for advanced falloff system
         void* kernelParams[] = {
             &srcMip.devicePtr,
             &prevLevel,
@@ -524,7 +523,11 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             (void*)&dstMip.height,
             (void*)&dstPitchPixels,
             (void*)&blurOffset,
-            (void*)&levelWeight
+            (void*)&levelIndex,
+            (void*)&params.activeLimit,
+            (void*)&params.decayK,
+            (void*)&params.exposure,
+            (void*)&params.falloffType
         };
 
         CUresult err = cuLaunchKernel(
@@ -559,6 +562,10 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     CUdeviceptr glow = m_mipChain[0].devicePtr;
     int glowPitch = m_mipChain[0].width;  // Pitch in pixels, not floats
 
+    // Intensity is now applied in UpsampleKernel as exposure
+    // CompositeKernel just needs 1.0 to preserve the already-scaled glow
+    float intensity = 1.0f;
+
     void* kernelParams[] = {
         &original,
         &glow,
@@ -568,7 +575,7 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&params.srcPitch,
         (void*)&glowPitch,
         (void*)&params.dstPitch,
-        (void*)&params.intensity,
+        (void*)&intensity,
         (void*)&params.compositeMode
     };
 

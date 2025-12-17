@@ -72,15 +72,19 @@
 enum ParamID {
     PARAM_INPUT = 0,
 
-    // === Basic Parameters ===
-    PARAM_INTENSITY,            // Glow intensity (0-200%)
-    PARAM_RADIUS,               // Blur radius in pixels (0-500)
+    // === Core 4 Parameters (The Big Four) ===
+    PARAM_RADIUS,               // Glow reach distance (0-100) → controls active MIP levels
+    PARAM_SPREAD,               // Blur softness (0-100) → controls blur offset (max 3.5px)
+    PARAM_FALLOFF,              // Decay slope (0-100) → controls exponential decay k
+    PARAM_INTENSITY,            // Glow power (0-10) → HDR exposure pow(2, intensity)
+
+    // === Threshold ===
     PARAM_THRESHOLD,            // Brightness threshold (0-100%)
     PARAM_SOFT_KNEE,            // Soft knee width (0-100%)
 
     // === Blur Options ===
     PARAM_QUALITY,              // Quality level (Low/Medium/High/Ultra)
-    PARAM_FRACTIONAL_BLEND,     // Enable fractional pass interpolation
+    PARAM_FALLOFF_TYPE,         // Decay curve type (Exponential/InverseSquare/Linear)
 
     // === Color Options ===
     PARAM_GLOW_COLOR,           // Glow tint color
@@ -92,27 +96,27 @@ enum ParamID {
     PARAM_ANAMORPHIC_ANGLE,     // Anamorphic direction angle
     PARAM_COMPOSITE_MODE,       // Composite mode (Add/Screen/Overlay)
     PARAM_HDR_MODE,             // Enable Karis Average for HDR
-    PARAM_FALLOFF,              // Light falloff (0-100%, controls distance decay)
 
     PARAM_COUNT
 };
 
 // Parameter disk IDs (for saving/loading)
 enum ParamDiskID {
-    DISK_ID_INTENSITY = 1,
-    DISK_ID_RADIUS,
+    DISK_ID_RADIUS = 1,
+    DISK_ID_SPREAD,
+    DISK_ID_FALLOFF,
+    DISK_ID_INTENSITY,
     DISK_ID_THRESHOLD,
     DISK_ID_SOFT_KNEE,
     DISK_ID_QUALITY,
-    DISK_ID_FRACTIONAL_BLEND,
+    DISK_ID_FALLOFF_TYPE,
     DISK_ID_GLOW_COLOR,
     DISK_ID_COLOR_TEMP,
     DISK_ID_PRESERVE_COLOR,
     DISK_ID_ANAMORPHIC,
     DISK_ID_ANAMORPHIC_ANGLE,
     DISK_ID_COMPOSITE_MODE,
-    DISK_ID_HDR_MODE,
-    DISK_ID_FALLOFF
+    DISK_ID_HDR_MODE
 };
 
 // ============================================================================
@@ -121,10 +125,17 @@ enum ParamDiskID {
 
 // Blur quality levels (determines MIP chain depth)
 enum class BlurQuality : int {
-    Low = 1,        // 3 levels - fastest, lower quality
-    Medium = 2,     // 4 levels - balanced
-    High = 3,       // 5 levels - high quality (default)
-    Ultra = 4       // 6 levels - maximum quality
+    Low = 1,        // 4 levels - fastest
+    Medium = 2,     // 6 levels - balanced
+    High = 3,       // 8 levels - high quality (default)
+    Ultra = 4       // 12 levels - maximum quality (Deep Glow feel)
+};
+
+// Falloff curve types (decay models)
+enum class FalloffType : int {
+    Exponential = 1,    // pow(0.5, i*k) - Deep Glow standard, balanced
+    InverseSquare = 2,  // 1/(x^2+1) - Realistic VFX, sharp core + long tail
+    Linear = 3          // 1-x*0.1 - Soft/foggy, dreamy feel
 };
 
 // Composite blend modes
@@ -139,15 +150,19 @@ enum class CompositeMode : int {
 // ============================================================================
 
 namespace Defaults {
-    // Basic
-    constexpr float Intensity       = 100.0f;   // 100%
-    constexpr float Radius          = 50.0f;    // 50 pixels
+    // Core 4 Parameters
+    constexpr float Radius          = 100.0f;   // 100% = all MIP levels active
+    constexpr float Spread          = 50.0f;    // 50% = 2.25px blur offset (balanced)
+    constexpr float Falloff         = 50.0f;    // 50% = k=1.6 (balanced decay)
+    constexpr float Intensity       = 1.0f;     // 1.0 = 2x brightness (pow(2,1))
+
+    // Threshold
     constexpr float Threshold       = 50.0f;    // 50%
     constexpr float SoftKnee        = 50.0f;    // 50%
 
-    // Blur
+    // Blur Options
     constexpr int   Quality         = static_cast<int>(BlurQuality::High);
-    constexpr bool  FractionalBlend = true;
+    constexpr int   FalloffType     = static_cast<int>(FalloffType::Exponential);
 
     // Color
     constexpr float ColorTemp       = 0.0f;     // Neutral
@@ -158,17 +173,21 @@ namespace Defaults {
     constexpr float AnamorphicAngle = 0.0f;     // Horizontal
     constexpr int   CompositeMode   = static_cast<int>(CompositeMode::Add);
     constexpr bool  HDRMode         = true;
-    constexpr float Falloff         = 70.0f;    // 70% (balanced Deep Glow feel)
 }
 
 namespace Ranges {
-    // Intensity
-    constexpr float IntensityMin    = 0.0f;
-    constexpr float IntensityMax    = 200.0f;
-
-    // Radius
+    // Core 4 Parameters
     constexpr float RadiusMin       = 0.0f;
-    constexpr float RadiusMax       = 500.0f;
+    constexpr float RadiusMax       = 100.0f;   // 0-100% of MIP levels
+
+    constexpr float SpreadMin       = 0.0f;
+    constexpr float SpreadMax       = 100.0f;   // Maps to 1.0-3.5px offset
+
+    constexpr float FalloffMin      = 0.0f;
+    constexpr float FalloffMax      = 100.0f;   // Maps to k=0.2-3.0
+
+    constexpr float IntensityMin    = 0.0f;
+    constexpr float IntensityMax    = 10.0f;    // pow(2, 10) = 1024x max
 
     // Threshold & Soft Knee
     constexpr float ThresholdMin    = 0.0f;
@@ -185,10 +204,6 @@ namespace Ranges {
     // Anamorphic Angle
     constexpr float AngleMin        = -90.0f;
     constexpr float AngleMax        = 90.0f;
-
-    // Falloff
-    constexpr float FalloffMin      = 0.0f;
-    constexpr float FalloffMax      = 100.0f;
 }
 
 // ============================================================================
@@ -211,28 +226,37 @@ struct JustGlowGPUData {
 
 // Pre-render data passed to SmartRender
 struct JustGlowPreRenderData {
-    // Extracted parameters
-    float intensity;
-    float radius;
+    // Core 4 Parameters
+    float radius;       // 0-100: controls active MIP levels
+    float spread;       // 0-100: controls blur offset (1.0-3.5px)
+    float falloff;      // 0-100: controls decay k (0.2-3.0)
+    float intensity;    // 0-10: HDR exposure pow(2, intensity)
+
+    // Threshold
     float threshold;
     float softKnee;
 
+    // Blur Options
     BlurQuality quality;
-    bool fractionalBlend;
+    FalloffType falloffType;
 
+    // Color
     float glowColorR, glowColorG, glowColorB;
     float colorTemp;
     float preserveColor;
 
+    // Advanced
     float anamorphic;
     float anamorphicAngle;
     CompositeMode compositeMode;
     bool hdrMode;
-    float falloff;
 
     // Computed values
-    int mipLevels;
-    float fractionalAmount;
+    int mipLevels;          // Based on quality setting
+    float activeLimit;      // Radius mapped to MIP level limit
+    float blurOffset;       // Spread mapped to pixel offset (1.0-3.5)
+    float decayK;           // Falloff mapped to decay constant (0.2-3.0)
+    float exposure;         // Intensity mapped to pow(2, intensity)
 };
 
 // ============================================================================
@@ -309,15 +333,16 @@ PF_Err SmartRender(
 // Utility Functions
 // ============================================================================
 
-// Calculate MIP levels from radius and quality
-int CalculateMipLevels(float radius, BlurQuality quality);
-
-// Calculate fractional blend amount for smooth radius transitions
-float CalculateFractionalAmount(float radius, int mipLevels);
-
 // Get quality level count (number of MIP levels)
+// New system: Quality determines MIP depth, not Radius
 inline int GetQualityLevelCount(BlurQuality quality) {
-    return static_cast<int>(quality) + 2; // Low=3, Medium=4, High=5, Ultra=6
+    switch (quality) {
+        case BlurQuality::Low:    return 4;   // Fast
+        case BlurQuality::Medium: return 6;   // Balanced
+        case BlurQuality::High:   return 8;   // High quality
+        case BlurQuality::Ultra:  return 12;  // Deep Glow feel
+        default:                  return 8;
+    }
 }
 
 // Color temperature to RGB multipliers

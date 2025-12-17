@@ -36,6 +36,35 @@ __device__ __forceinline__ float karisWeight(float r, float g, float b) {
     return 1.0f / (1.0f + luminance(r, g, b));
 }
 
+// Smooth step function for fade transitions
+__device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) {
+    float t = clampf((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// Calculate physical weight based on falloff type
+// falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
+__device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType) {
+    float x = level * decayK;
+
+    switch (falloffType) {
+        case 0:  // Exponential - Deep Glow Standard
+            // pow(0.5, x) - balanced, natural decay
+            return powf(0.5f, x);
+
+        case 1:  // Inverse Square - Realistic VFX
+            // 1 / (x^2 + 1) - sharp core, long tail
+            return 1.0f / (x * x + 1.0f);
+
+        case 2:  // Linear - Soft/Foggy
+            // max(0, 1 - x * 0.1) - uniform decay, dreamy
+            return fmaxf(0.0f, 1.0f - x * 0.1f);
+
+        default:
+            return powf(0.5f, x);
+    }
+}
+
 // ============================================================================
 // Bilinear Sampling
 // ============================================================================
@@ -288,8 +317,13 @@ extern "C" __global__ void DownsampleKernel(
 }
 
 // ============================================================================
-// Upsample Kernel (9-Tap Tent Filter with Falloff)
-// levelWeight: pow(falloff, level) - controls light decay with distance
+// Upsample Kernel (9-Tap Tent Filter with Advanced Falloff)
+// New parameters:
+// - levelIndex: current MIP level (0 = core, higher = atmosphere)
+// - activeLimit: Radius-controlled level limit (fade out beyond this)
+// - decayK: Falloff decay constant (0.2-3.0, higher = steeper)
+// - exposure: HDR exposure multiplier pow(2, intensity)
+// - falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
 // ============================================================================
 
 extern "C" __global__ void UpsampleKernel(
@@ -298,7 +332,12 @@ extern "C" __global__ void UpsampleKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float blurOffset, float levelWeight)
+    float blurOffset,
+    int levelIndex,
+    float activeLimit,
+    float decayK,
+    float exposure,
+    int falloffType)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -345,14 +384,29 @@ extern "C" __global__ void UpsampleKernel(
     resB /= 16.0f;
 
     // Add weighted contribution from previous (larger) level
-    // levelWeight = pow(falloff, level) for physical light decay
-    if (levelWeight > 0.0f && prevLevel != nullptr) {
+    if (prevLevel != nullptr) {
         float prevR, prevG, prevB, prevA;
         sampleBilinear(prevLevel, u, v, dstWidth, dstHeight, dstPitch, prevR, prevG, prevB, prevA);
+
+        // =========================================================
+        // THE SECRET SAUCE - Advanced Weight Calculation
+        // =========================================================
+
+        // A. Physical decay weight (The Shape)
+        // Based on falloff type: Exponential, InverseSquare, or Linear
+        float physicalWeight = calculatePhysicalWeight((float)levelIndex, decayK, falloffType);
+
+        // B. Distance fade weight (The Cutoff)
+        // Smooth fade out for levels beyond activeLimit (controlled by Radius)
+        float fadeWeight = 1.0f - smoothstepf(activeLimit, activeLimit + 1.0f, (float)levelIndex);
+
+        // C. Final weight combines physical decay with distance cutoff
+        float finalWeight = physicalWeight * fadeWeight * exposure;
+
         // Accumulate: upsampled glow + weighted current level contribution
-        resR = resR + prevR * levelWeight;
-        resG = resG + prevG * levelWeight;
-        resB = resB + prevB * levelWeight;
+        resR = resR + prevR * finalWeight;
+        resG = resG + prevG * finalWeight;
+        resB = resB + prevB * finalWeight;
     }
 
     int outIdx = (y * dstPitch + x) * 4;

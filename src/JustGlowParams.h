@@ -137,32 +137,11 @@ inline int CalculateDynamicMipLevels(int width, int height, int minSize = 16, in
 }
 
 // Calculate MIP chain configuration
-// radius: blur radius parameter (default 50.0 as baseline)
-// Dynamic levels: calculates until min dimension < 16px
-inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int levels, float radius = 50.0f) {
+// blurOffset: fixed pixel offset for sampling (1.0-3.5px from Spread parameter)
+// The new system uses fixed offset, not radius-scaled
+inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int levels, float blurOffset = 1.5f) {
     MipChainConfig config = {};
     config.levelCount = levels;
-
-    // Optimal Kawase offsets (fitted to approximate Gaussian distribution)
-    // These values are based on research from ARM's SIGGRAPH 2015 presentation
-    const float kawaseOffsets[] = {
-        0.0f,   // Level 0 (prefilter, not used for blur)
-        1.0f,   // Level 1
-        1.0f,   // Level 2
-        2.0f,   // Level 3
-        2.0f,   // Level 4
-        3.0f,   // Level 5
-        3.0f,   // Level 6
-        3.0f,   // Level 7
-        4.0f,   // Level 8
-        4.0f,   // Level 9
-        4.0f,   // Level 10
-        4.0f    // Level 11
-    };
-
-    // Scale blur offsets by radius (50.0 as baseline)
-    float radiusScale = radius / 50.0f;
-    if (radiusScale < 0.1f) radiusScale = 0.1f;  // Minimum scale
 
     int w = baseWidth;
     int h = baseHeight;
@@ -170,8 +149,8 @@ inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int level
     for (int i = 0; i < levels && i < MAX_MIP_LEVELS; ++i) {
         config.widths[i] = w;
         config.heights[i] = h;
-        float baseOffset = (i < 12) ? kawaseOffsets[i] : 4.0f;
-        config.blurOffsets[i] = baseOffset * radiusScale;
+        // Use fixed blurOffset for all levels (prevents ghosting)
+        config.blurOffsets[i] = blurOffset;
 
         // Halve dimensions for next level
         w = (w + 1) / 2;  // Round up
@@ -187,24 +166,30 @@ inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int level
 
 // Render parameters collected from AE params
 struct RenderParams {
-    // From UI
-    float   intensity;
-    float   radius;
+    // Core 4 computed values (The Secret Sauce)
+    float   activeLimit;        // Radius -> MIP level limit (0 to mipLevels)
+    float   blurOffset;         // Spread -> pixel offset (1.0-3.5px)
+    float   decayK;             // Falloff -> decay constant (0.2-3.0)
+    float   exposure;           // Intensity -> HDR exposure pow(2, intensity)
+    int     falloffType;        // Decay curve type (0=Exponential, 1=InverseSquare, 2=Linear)
+
+    // Threshold
     float   threshold;
     float   softKnee;
 
+    // Quality
     int     quality;            // BlurQuality enum value
-    bool    fractionalBlend;
 
+    // Color
     float   glowColor[3];
     float   colorTemp;
     float   preserveColor;
 
+    // Advanced
     float   anamorphic;
     float   anamorphicAngle;
-    int     compositeMode;      // CompositeMode enum value
+    int     compositeMode;      // CompositeMode enum value (0=Add, 1=Screen, 2=Overlay)
     bool    hdrMode;
-    float   falloff;            // Light falloff (0-1, controls distance decay)
 
     // Image info
     int     width;
@@ -214,8 +199,6 @@ struct RenderParams {
 
     // Computed
     int     mipLevels;
-    float   fractionalAmount;
-    MipChainConfig mipChain;
 };
 
 // Fill GlowParams constant buffer from RenderParams
@@ -227,7 +210,7 @@ inline void FillGlowParams(GlowParams& cb, const RenderParams& rp) {
 
     cb.threshold = rp.threshold / 100.0f;       // Convert from percentage
     cb.softKnee = rp.softKnee / 100.0f;
-    cb.intensity = rp.intensity / 100.0f;
+    cb.intensity = rp.exposure;                 // Already computed as pow(2, intensity)
 
     cb.glowColorR = rp.glowColor[0];
     cb.glowColorG = rp.glowColor[1];
