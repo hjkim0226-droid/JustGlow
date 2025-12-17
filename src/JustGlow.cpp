@@ -554,6 +554,18 @@ PF_Err GPUDeviceSetup(
 
     // Store GPU data
     extra->output->gpu_data = gpuData;
+
+    // Set GPU support flags (required at both GLOBAL_SETUP and GPU_DEVICE_SETUP per SDK)
+    if (gpuData->initialized && !err) {
+        out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_GPU_RENDER_F32;
+#if HAS_DIRECTX
+        if (gpuData->framework == GPUFrameworkType::DirectX) {
+            out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING;
+        }
+#endif
+        PLUGIN_LOG("GPUDeviceSetup: out_flags2 updated to 0x%X", out_data->out_flags2);
+    }
+
     PLUGIN_LOG("GPUDeviceSetup complete, err=%d, initialized=%d, framework=%d",
         err, gpuData->initialized, static_cast<int>(gpuData->framework));
 #else
@@ -636,7 +648,10 @@ PF_Err PreRender(
     PF_CheckoutResult in_result;
 
     PLUGIN_LOG("=== PreRender ===");
-    PLUGIN_LOG("PreRender input: bitdepth=%d", extra->input->bitdepth);
+    PLUGIN_LOG("PreRender input: bitdepth=%d, what_gpu=%d, gpu_data=%p",
+        extra->input->bitdepth,
+        extra->input->what_gpu,
+        extra->input->gpu_data);
 
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
@@ -750,10 +765,19 @@ PF_Err PreRender(
     extra->output->pre_render_data = preRenderData;
     extra->output->delete_pre_render_data_func = DeletePreRenderData;
 
-    // Flag GPU rendering as possible
+    // Flag GPU rendering as possible (only if GPU is actually available)
 #if HAS_CUDA || HAS_DIRECTX
-    extra->output->flags = PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
-    PLUGIN_LOG("PreRender: GPU_RENDER_POSSIBLE flag set (0x%X)", extra->output->flags);
+    bool gpuAvailable = (extra->input->gpu_data != nullptr) &&
+                        (extra->input->what_gpu != PF_GPU_Framework_NONE);
+
+    if (gpuAvailable) {
+        extra->output->flags = PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+        PLUGIN_LOG("PreRender: GPU available (what_gpu=%d), GPU_RENDER_POSSIBLE flag set (0x%X)",
+            extra->input->what_gpu, extra->output->flags);
+    } else {
+        PLUGIN_LOG("PreRender: GPU NOT available (gpu_data=%p, what_gpu=%d) - CPU fallback",
+            extra->input->gpu_data, extra->input->what_gpu);
+    }
 #else
     PLUGIN_LOG("PreRender: GPU support not compiled in (HAS_CUDA=%d, HAS_DIRECTX=%d)", HAS_CUDA, HAS_DIRECTX);
 #endif
