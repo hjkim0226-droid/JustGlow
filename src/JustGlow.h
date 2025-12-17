@@ -27,14 +27,27 @@
 #include "String_Utils.h"
 #include "Param_Utils.h"
 
+// GPU framework availability (can be overridden by CMake)
 #ifdef _WIN32
-    #define HAS_DIRECTX 1
-    #define HAS_CUDA 1
-    #define HAS_METAL 0
+    #ifndef HAS_DIRECTX
+        #define HAS_DIRECTX 1
+    #endif
+    #ifndef HAS_CUDA
+        #define HAS_CUDA 0  // Set by CMake if CUDA toolkit found
+    #endif
+    #ifndef HAS_METAL
+        #define HAS_METAL 0
+    #endif
 #else
-    #define HAS_DIRECTX 0
-    #define HAS_CUDA 0
-    #define HAS_METAL 1
+    #ifndef HAS_DIRECTX
+        #define HAS_DIRECTX 0
+    #endif
+    #ifndef HAS_CUDA
+        #define HAS_CUDA 0
+    #endif
+    #ifndef HAS_METAL
+        #define HAS_METAL 1
+    #endif
 #endif
 
 // ============================================================================
