@@ -164,11 +164,21 @@ inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int level
     return config;
 }
 
+// Calculate optimal blur offset per MIP level
+// Level 0 gets full spreadOffset, deeper levels decay toward 1.5px minimum
+inline float GetLevelBlurOffset(int level, float spreadOffset) {
+    constexpr float minOffset = 1.5f;
+    constexpr float decay = 0.8f;  // Each level is 80% of previous
+
+    float offset = minOffset + (spreadOffset - minOffset) * std::pow(decay, static_cast<float>(level));
+    return offset;
+}
+
 // Render parameters collected from AE params
 struct RenderParams {
     // Core 4 computed values (The Secret Sauce)
     float   activeLimit;        // Radius -> MIP level limit (0 to mipLevels)
-    float   blurOffset;         // Spread -> pixel offset (1.0-3.5px)
+    float   blurOffsets[MAX_MIP_LEVELS]; // Spread -> per-level pixel offset (decays from spread to 1.5px)
     float   decayK;             // Falloff -> decay constant (0.2-3.0)
     float   exposure;           // Intensity -> HDR exposure pow(2, intensity)
     int     falloffType;        // Decay curve type (0=Exponential, 1=InverseSquare, 2=Linear)

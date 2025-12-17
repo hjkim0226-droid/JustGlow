@@ -827,8 +827,12 @@ PF_Err PreRender(
         preRenderData->activeLimit = (preRenderData->radius / 100.0f) *
                                       static_cast<float>(preRenderData->mipLevels);
 
-        // blurOffset: Spread -> pixel offset (1.0-3.5px, prevents ghosting)
-        preRenderData->blurOffset = 1.0f + (preRenderData->spread / 100.0f) * 2.5f;
+        // blurOffsets: Spread -> per-level pixel offset (decays from spread to 1.5px)
+        // Level 0 gets full offset, deeper levels decay toward 1.5px minimum
+        float spreadOffset = 1.5f + (preRenderData->spread / 100.0f) * 2.0f; // 1.5 ~ 3.5px
+        for (int i = 0; i < preRenderData->mipLevels && i < PRERENDER_MAX_MIP_LEVELS; ++i) {
+            preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset);
+        }
 
         // decayK: Falloff -> decay constant (0.2-3.0, higher = steeper)
         preRenderData->decayK = 0.2f + (preRenderData->falloff / 100.0f) * 2.8f;
@@ -939,7 +943,9 @@ PF_Err SmartRender(
 
                     // Core 4 computed values
                     rp.activeLimit = preRenderData->activeLimit;
-                    rp.blurOffset = preRenderData->blurOffset;
+                    for (int i = 0; i < MAX_MIP_LEVELS; ++i) {
+                        rp.blurOffsets[i] = preRenderData->blurOffsets[i];
+                    }
                     rp.decayK = preRenderData->decayK;
                     rp.exposure = preRenderData->exposure;
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);

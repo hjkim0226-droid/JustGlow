@@ -27,6 +27,9 @@
 #include "String_Utils.h"
 #include "Param_Utils.h"
 
+// Forward declaration for MAX_MIP_LEVELS
+constexpr int PRERENDER_MAX_MIP_LEVELS = 12;
+
 // GPU framework availability (can be overridden by CMake)
 #ifdef _WIN32
     #ifndef HAS_DIRECTX
@@ -254,7 +257,7 @@ struct JustGlowPreRenderData {
     // Computed values
     int mipLevels;          // Based on quality setting
     float activeLimit;      // Radius mapped to MIP level limit
-    float blurOffset;       // Spread mapped to pixel offset (1.0-3.5)
+    float blurOffsets[PRERENDER_MAX_MIP_LEVELS]; // Spread -> per-level offset (decays to 1.5px)
     float decayK;           // Falloff mapped to decay constant (0.2-3.0)
     float exposure;         // Intensity mapped to pow(2, intensity)
 };

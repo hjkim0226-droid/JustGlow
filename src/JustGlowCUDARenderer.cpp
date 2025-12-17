@@ -309,8 +309,8 @@ bool JustGlowCUDARenderer::Render(
     CUdeviceptr outputBuffer)
 {
     CUDA_LOG("=== CUDA Render Begin ===");
-    CUDA_LOG("Size: %dx%d, MipLevels: %d, Intensity: %.2f, Threshold: %.2f",
-        params.width, params.height, params.mipLevels, params.intensity, params.threshold);
+    CUDA_LOG("Size: %dx%d, MipLevels: %d, Exposure: %.2f, Threshold: %.2f",
+        params.width, params.height, params.mipLevels, params.exposure, params.threshold);
 
     if (!m_initialized) {
         CUDA_LOG("ERROR: Renderer not initialized");
@@ -397,6 +397,8 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
 
     // Kernel parameters
     int dstPitchPixels = dstMip.width;  // Pitch in pixels, not bytes
+    // Prefilter doesn't need exposure boost - it's applied in upsample
+    float prefilterIntensity = 1.0f;
     void* kernelParams[] = {
         &input,
         &dstMip.devicePtr,
@@ -408,7 +410,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
         (void*)&dstPitchPixels,  // Fixed: was dstMip.pitch (bytes), now pixels
         (void*)&params.threshold,
         (void*)&params.softKnee,
-        (void*)&params.intensity,
+        (void*)&prefilterIntensity,
         (void*)&params.glowColor[0],
         (void*)&params.glowColor[1],
         (void*)&params.glowColor[2],
@@ -445,8 +447,8 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         // This breaks up boxy artifacts -> rounder glow
         int rotationMode = i % 2;  // 0=X, 1=+
 
-        // Use fixed blurOffset from Spread parameter (1.0-3.5px, prevents ghosting)
-        float blurOffset = params.blurOffset;
+        // Use per-level blurOffset (decays from spread to 1.5px for deeper levels)
+        float blurOffset = params.blurOffsets[i];
 
         CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d, rotation=%s, blurOffset=%.2f",
             i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
@@ -495,8 +497,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        // Use fixed blurOffset from Spread parameter (1.0-3.5px, prevents ghosting)
-        float blurOffset = params.blurOffset;
+        // Use per-level blurOffset (decays from spread to 1.5px for deeper levels)
+        float blurOffset = params.blurOffsets[i];
 
         // Level index for weight calculation (inverted: deepest level first)
         int levelIndex = i;
