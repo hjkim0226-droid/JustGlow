@@ -256,6 +256,7 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
     ReleaseMipChain();
 
     m_mipChain.resize(levels);
+    m_upsampleChain.resize(levels);  // Separate buffers for upsample results
     m_currentMipLevels = levels;
     m_currentWidth = width;
     m_currentHeight = height;
@@ -264,6 +265,7 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
     int h = height;
 
     for (int i = 0; i < levels; ++i) {
+        // MIP chain for downsampled textures
         auto& mip = m_mipChain[i];
         mip.width = w;
         mip.height = h;
@@ -277,6 +279,21 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
             return false;
         }
         CUDA_LOG("MIP[%d] allocated: %dx%d, %zu bytes", i, w, h, mip.sizeBytes);
+
+        // Upsample chain for upsample results (same dimensions)
+        auto& upsample = m_upsampleChain[i];
+        upsample.width = w;
+        upsample.height = h;
+        upsample.pitch = mip.pitch;
+        upsample.sizeBytes = mip.sizeBytes;
+
+        err = cuMemAlloc(&upsample.devicePtr, upsample.sizeBytes);
+        if (!CheckCUDAError(err, "cuMemAlloc for Upsample")) {
+            CUDA_LOG("ERROR: Failed to allocate Upsample level %d (%dx%d)", i, w, h);
+            ReleaseMipChain();
+            return false;
+        }
+        CUDA_LOG("Upsample[%d] allocated: %dx%d, %zu bytes", i, w, h, upsample.sizeBytes);
 
         // Next level is half size
         w = (w + 1) / 2;
@@ -296,6 +313,15 @@ void JustGlowCUDARenderer::ReleaseMipChain() {
         }
     }
     m_mipChain.clear();
+
+    for (auto& upsample : m_upsampleChain) {
+        if (upsample.devicePtr) {
+            cuMemFree(upsample.devicePtr);
+            upsample.devicePtr = 0;
+        }
+    }
+    m_upsampleChain.clear();
+
     m_currentMipLevels = 0;
 }
 
@@ -490,39 +516,68 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
 // ============================================================================
 
 bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
-    for (int i = params.mipLevels - 2; i >= 0; --i) {
-        auto& srcMip = m_mipChain[i + 1];  // Smaller
-        auto& dstMip = m_mipChain[i];      // Larger
+    // Correct upsample logic (from Gemini correction):
+    // Result = TentUpsample(Previous) + Current × Weight
+    // - Previous = previous upsample result (from deeper level, smaller texture)
+    // - Current = stored downsample at current level
+    //
+    // Buffer mapping:
+    // - input (current downsample) = m_mipChain[i]
+    // - prevLevel (previous upsample result) = m_upsampleChain[i+1] (or nullptr for deepest)
+    // - output = m_upsampleChain[i]
 
-        int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-        int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    for (int i = params.mipLevels - 1; i >= 0; --i) {
+        auto& currMip = m_mipChain[i];       // Current level's stored downsample (input)
+        auto& dstUpsample = m_upsampleChain[i];  // Output
 
-        // Use per-level blurOffset (decays from spread to 1.5px for deeper levels)
+        int gridX = (dstUpsample.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int gridY = (dstUpsample.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+        // Use per-level blurOffset
         float blurOffset = params.blurOffsets[i];
 
-        // Level index for weight calculation (inverted: deepest level first)
+        // Level index for weight calculation
         int levelIndex = i;
 
-        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d, activeLimit=%.2f, decayK=%.2f, exposure=%.2f, falloffType=%d",
-            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
-            params.activeLimit, params.decayK, params.exposure, params.falloffType);
+        // Previous upsample result (from deeper level)
+        // For deepest level (i == mipLevels-1), there's no previous result
+        CUdeviceptr prevLevel = 0;
+        int prevWidth = 0, prevHeight = 0, prevPitchPixels = 0;
 
-        int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
-        int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
+        if (i < params.mipLevels - 1) {
+            auto& prevUpsample = m_upsampleChain[i + 1];  // Deeper level's upsample result
+            prevLevel = prevUpsample.devicePtr;
+            prevWidth = prevUpsample.width;
+            prevHeight = prevUpsample.height;
+            prevPitchPixels = prevUpsample.width;
+        }
 
-        // For upsample, prevLevel is the current destination (for blending)
-        CUdeviceptr prevLevel = dstMip.devicePtr;
+        CUDA_LOG("Upsample[%d]: curr=%dx%d, prev=%dx%d -> out=%dx%d, activeLimit=%.2f, decayK=%.2f",
+            i, currMip.width, currMip.height, prevWidth, prevHeight,
+            dstUpsample.width, dstUpsample.height,
+            params.activeLimit, params.decayK);
 
-        // New kernel parameters for advanced falloff system
+        int srcPitchPixels = currMip.width;  // Pitch in pixels
+        int dstPitchPixels = dstUpsample.width;
+
+        // Kernel parameters matching new signature:
+        // input, prevLevel, output,
+        // srcWidth, srcHeight, srcPitch,
+        // prevWidth, prevHeight, prevPitch,
+        // dstWidth, dstHeight, dstPitch,
+        // blurOffset, levelIndex, activeLimit, decayK, exposure, falloffType
         void* kernelParams[] = {
-            &srcMip.devicePtr,
-            &prevLevel,
-            &dstMip.devicePtr,
-            (void*)&srcMip.width,
-            (void*)&srcMip.height,
+            &currMip.devicePtr,      // input (current level's stored downsample)
+            &prevLevel,              // prevLevel (previous upsample result, or 0)
+            &dstUpsample.devicePtr,  // output
+            (void*)&currMip.width,
+            (void*)&currMip.height,
             (void*)&srcPitchPixels,
-            (void*)&dstMip.width,
-            (void*)&dstMip.height,
+            (void*)&prevWidth,
+            (void*)&prevHeight,
+            (void*)&prevPitchPixels,
+            (void*)&dstUpsample.width,
+            (void*)&dstUpsample.height,
             (void*)&dstPitchPixels,
             (void*)&blurOffset,
             (void*)&levelIndex,
@@ -561,11 +616,12 @@ bool JustGlowCUDARenderer::ExecuteComposite(
 
     CUDA_LOG("Composite: %dx%d, grid: %dx%d", params.width, params.height, gridX, gridY);
 
-    CUdeviceptr glow = m_mipChain[0].devicePtr;
-    int glowPitch = m_mipChain[0].width;  // Pitch in pixels, not floats
+    // Use upsample result (not mipChain which contains downsampled data)
+    CUdeviceptr glow = m_upsampleChain[0].devicePtr;
+    int glowPitch = m_upsampleChain[0].width;  // Pitch in pixels
 
-    // Apply exposure (pow(2, intensity)) to boost final glow
-    float intensity = params.exposure;
+    // Note: Intensity/exposure is already applied in UpsampleKernel
+    // (better for precision and per-level control)
 
     void* kernelParams[] = {
         &original,
@@ -576,7 +632,6 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&params.srcPitch,
         (void*)&glowPitch,
         (void*)&params.dstPitch,
-        (void*)&intensity,
         (void*)&params.compositeMode
     };
 

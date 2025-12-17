@@ -56,8 +56,10 @@ private:
     CUfunction m_upsampleKernel;
     CUfunction m_compositeKernel;
 
-    // MIP chain buffers
+    // MIP chain buffers (stores downsampled textures - read during upsample)
     std::vector<CUDAMipBuffer> m_mipChain;
+    // Upsample result buffers (separate from mipChain to avoid race condition)
+    std::vector<CUDAMipBuffer> m_upsampleChain;
     int m_currentMipLevels;
     int m_currentWidth;
     int m_currentHeight;

@@ -331,6 +331,7 @@ extern "C" __global__ void UpsampleKernel(
     const float* __restrict__ prevLevel,
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
+    int prevWidth, int prevHeight, int prevPitch,
     int dstWidth, int dstHeight, int dstPitch,
     float blurOffset,
     int levelIndex,
@@ -348,67 +349,80 @@ extern "C" __global__ void UpsampleKernel(
     float u = ((float)x + 0.5f) / (float)dstWidth;
     float v = ((float)y + 0.5f) / (float)dstHeight;
 
-    float texelX = 1.0f / (float)srcWidth;
-    float texelY = 1.0f / (float)srcHeight;
-    float offset = blurOffset + 0.5f;
+    float resR = 0.0f, resG = 0.0f, resB = 0.0f;
 
-    float TLr, TLg, TLb, TLa;
-    float Tr, Tg, Tb, Ta;
-    float TRr, TRg, TRb, TRa;
-    float Lr, Lg, Lb, La;
-    float Cr, Cg, Cb, Ca;
-    float Rr, Rg, Rb, Ra;
-    float BLr, BLg, BLb, BLa;
-    float Bor, Bog, Bob, Boa;
-    float BRr, BRg, BRb, BRa;
-
-    sampleBilinear(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, TLr, TLg, TLb, TLa);
-    sampleBilinear(input, u, v - offset * texelY, srcWidth, srcHeight, srcPitch, Tr, Tg, Tb, Ta);
-    sampleBilinear(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, TRr, TRg, TRb, TRa);
-
-    sampleBilinear(input, u - offset * texelX, v, srcWidth, srcHeight, srcPitch, Lr, Lg, Lb, La);
-    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinear(input, u + offset * texelX, v, srcWidth, srcHeight, srcPitch, Rr, Rg, Rb, Ra);
-
-    sampleBilinear(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, BLr, BLg, BLb, BLa);
-    sampleBilinear(input, u, v + offset * texelY, srcWidth, srcHeight, srcPitch, Bor, Bog, Bob, Boa);
-    sampleBilinear(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, BRr, BRg, BRb, BRa);
-
-    // Tent filter: corners=1, edges=2, center=4 (total=16)
-    float resR = (TLr + TRr + BLr + BRr) * 1.0f + (Tr + Lr + Rr + Bor) * 2.0f + Cr * 4.0f;
-    float resG = (TLg + TRg + BLg + BRg) * 1.0f + (Tg + Lg + Rg + Bog) * 2.0f + Cg * 4.0f;
-    float resB = (TLb + TRb + BLb + BRb) * 1.0f + (Tb + Lb + Rb + Bob) * 2.0f + Cb * 4.0f;
-
-    resR /= 16.0f;
-    resG /= 16.0f;
-    resB /= 16.0f;
-
-    // Add weighted contribution from previous (larger) level
+    // =========================================================
+    // STEP 1: Tent Filter Upsample from Previous Level (smaller texture)
+    // "작은 놈을 키워서 베이스로 삼는다"
+    // =========================================================
     if (prevLevel != nullptr) {
-        float prevR, prevG, prevB, prevA;
-        sampleBilinear(prevLevel, u, v, dstWidth, dstHeight, dstPitch, prevR, prevG, prevB, prevA);
+        float texelX = 1.0f / (float)prevWidth;
+        float texelY = 1.0f / (float)prevHeight;
+        float offset = blurOffset + 0.5f;
 
-        // =========================================================
-        // THE SECRET SAUCE - Advanced Weight Calculation
-        // =========================================================
+        float TLr, TLg, TLb, TLa;
+        float Tr, Tg, Tb, Ta;
+        float TRr, TRg, TRb, TRa;
+        float Lr, Lg, Lb, La;
+        float Cr, Cg, Cb, Ca;
+        float Rr, Rg, Rb, Ra;
+        float BLr, BLg, BLb, BLa;
+        float Bor, Bog, Bob, Boa;
+        float BRr, BRg, BRb, BRa;
 
-        // A. Physical decay weight (The Shape)
-        // Based on falloff type: Exponential, InverseSquare, or Linear
-        float physicalWeight = calculatePhysicalWeight((float)levelIndex, decayK, falloffType);
+        // 9-tap tent filter on prevLevel (the smaller texture being upscaled)
+        sampleBilinear(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
+        sampleBilinear(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
+        sampleBilinear(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
 
-        // B. Distance fade weight (The Cutoff)
-        // Smooth fade out for levels beyond activeLimit (controlled by Radius)
-        float fadeWeight = 1.0f - smoothstepf(activeLimit, activeLimit + 1.0f, (float)levelIndex);
+        sampleBilinear(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
+        sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
+        sampleBilinear(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
 
-        // C. Final weight combines physical decay with distance cutoff
-        // NOTE: exposure is applied in CompositeKernel, not here
-        float finalWeight = physicalWeight * fadeWeight;
+        sampleBilinear(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
+        sampleBilinear(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
+        sampleBilinear(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
 
-        // Accumulate: upsampled glow + weighted current level contribution
-        resR = resR + prevR * finalWeight;
-        resG = resG + prevG * finalWeight;
-        resB = resB + prevB * finalWeight;
+        // Tent filter: corners=1, edges=2, center=4 (total=16)
+        resR = (TLr + TRr + BLr + BRr) * 1.0f + (Tr + Lr + Rr + Bor) * 2.0f + Cr * 4.0f;
+        resG = (TLg + TRg + BLg + BRg) * 1.0f + (Tg + Lg + Rg + Bog) * 2.0f + Cg * 4.0f;
+        resB = (TLb + TRb + BLb + BRb) * 1.0f + (Tb + Lb + Rb + Bob) * 2.0f + Cb * 4.0f;
+
+        resR /= 16.0f;
+        resG /= 16.0f;
+        resB /= 16.0f;
     }
+
+    // =========================================================
+    // STEP 2: Add Current Level's Contribution with Weight
+    // "현재 층의 디테일을 가중치 적용해서 더한다"
+    // =========================================================
+    float currR, currG, currB, currA;
+    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, currR, currG, currB, currA);
+
+    // Weight calculation for current level
+    // A. Physical decay weight (The Shape)
+    float physicalWeight = calculatePhysicalWeight((float)levelIndex, decayK, falloffType);
+
+    // B. Distance fade weight (The Cutoff)
+    // Smooth fade out for levels beyond activeLimit (controlled by Radius)
+    float fadeWeight = 1.0f - smoothstepf(activeLimit, activeLimit + 1.0f, (float)levelIndex);
+
+    // C. Final weight combines:
+    //    - Physical decay (falloff shape)
+    //    - Distance cutoff (radius control)
+    //    - Exposure (intensity boost) - applied here for precision & control
+    //
+    // Why exposure here? (Gemini explanation)
+    // 1. Prevents color banding: dark values × big number at end = banding
+    // 2. Per-level control: can have different intensity per level if needed
+    float finalWeight = physicalWeight * fadeWeight * exposure;
+
+    // Add weighted current level contribution to upsampled base
+    // Result = TentUpsample(Previous) + Current × Weight × Exposure
+    resR = resR + currR * finalWeight;
+    resG = resG + currG * finalWeight;
+    resB = resB + currB * finalWeight;
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -427,7 +441,7 @@ extern "C" __global__ void CompositeKernel(
     float* __restrict__ output,
     int width, int height,
     int originalPitch, int glowPitch, int outputPitch,
-    float intensity, int compositeMode)
+    int compositeMode)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -442,16 +456,12 @@ extern "C" __global__ void CompositeKernel(
     float origA = original[origIdx + 3];
 
     // Sample glow with bilinear
+    // Note: Intensity/exposure already applied in UpsampleKernel
     float u = ((float)x + 0.5f) / (float)width;
     float v = ((float)y + 0.5f) / (float)height;
 
     float glowR, glowG, glowB, glowA;
     sampleBilinear(glow, u, v, width, height, glowPitch, glowR, glowG, glowB, glowA);
-
-    // Apply intensity
-    glowR *= intensity;
-    glowG *= intensity;
-    glowB *= intensity;
 
     float resR, resG, resB;
 
