@@ -7,6 +7,7 @@
 
 #ifdef _WIN32
 
+#include <windows.h>
 #include "JustGlowCUDARenderer.h"
 #include <fstream>
 #include <ctime>
