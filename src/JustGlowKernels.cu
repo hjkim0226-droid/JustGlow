@@ -440,6 +440,7 @@ extern "C" __global__ void CompositeKernel(
     const float* __restrict__ glow,
     float* __restrict__ output,
     int width, int height,
+    int inputWidth, int inputHeight,
     int originalPitch, int glowPitch, int outputPitch,
     int compositeMode)
 {
@@ -449,11 +450,15 @@ extern "C" __global__ void CompositeKernel(
     if (x >= width || y >= height)
         return;
 
-    int origIdx = (y * originalPitch + x) * 4;
-    float origR = original[origIdx + 0];
-    float origG = original[origIdx + 1];
-    float origB = original[origIdx + 2];
-    float origA = original[origIdx + 3];
+    // Read original pixel (with bounds check for expanded output)
+    float origR = 0.0f, origG = 0.0f, origB = 0.0f, origA = 0.0f;
+    if (x < inputWidth && y < inputHeight) {
+        int origIdx = (y * originalPitch + x) * 4;
+        origR = original[origIdx + 0];
+        origG = original[origIdx + 1];
+        origB = original[origIdx + 2];
+        origA = original[origIdx + 3];
+    }
 
     // Sample glow with bilinear
     // Note: Intensity/exposure already applied in UpsampleKernel

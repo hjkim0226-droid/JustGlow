@@ -201,11 +201,15 @@ struct RenderParams {
     int     compositeMode;      // CompositeMode enum value (0=Add, 1=Screen, 2=Overlay)
     bool    hdrMode;
 
-    // Image info
+    // Image info (output dimensions - may be expanded for glow)
     int     width;
     int     height;
     int     srcPitch;
     int     dstPitch;
+
+    // Original input dimensions (for bounds checking in Composite)
+    int     inputWidth;
+    int     inputHeight;
 
     // Computed
     int     mipLevels;

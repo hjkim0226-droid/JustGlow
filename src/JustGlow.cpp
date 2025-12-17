@@ -8,6 +8,7 @@
 #include "JustGlowParams.h"
 #include <AE_Macros.h>
 #include <Util/Param_Utils.h>
+#include <algorithm>  // for std::max, std::min
 
 #if HAS_DIRECTX
 #include "JustGlowGPURenderer.h"
@@ -688,7 +689,42 @@ PF_Err PreRender(
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
 
-    // Checkout input layer at current time
+    // Calculate glow expansion based on quality and spread
+    // Glow can spread approximately: sum of (blurOffset * 2^level) for all levels
+    // Simplified: use quality level as multiplier (more levels = more spread)
+    // Base expansion: ~64px for Low, ~128px for Medium, ~256px for High, ~512px for Ultra
+    int qualityMultiplier = 16;  // Base pixels per level
+
+    // Get quality parameter early for extent calculation
+    PF_ParamDef qualityParam;
+    AEFX_CLR_STRUCT(qualityParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_QUALITY, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &qualityParam);
+    BlurQuality quality = static_cast<BlurQuality>(qualityParam.u.pd.value);
+    int mipLevels = GetQualityLevelCount(quality);
+
+    // Get spread for more accurate expansion
+    PF_ParamDef spreadParam;
+    AEFX_CLR_STRUCT(spreadParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &spreadParam);
+    float spread = spreadParam.u.fs_d.value;
+
+    // Calculate expansion: base + (spread factor * 2^mipLevels)
+    // This ensures glow has room to expand into
+    int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f));
+    glowExpansion = std::max(64, std::min(glowExpansion, 1024));  // Clamp to reasonable range
+
+    PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f)",
+        glowExpansion, static_cast<int>(quality), mipLevels, spread);
+
+    // Expand the request rect to get extra pixels for glow spread
+    req.rect.left -= glowExpansion;
+    req.rect.top -= glowExpansion;
+    req.rect.right += glowExpansion;
+    req.rect.bottom += glowExpansion;
+
+    // Checkout input layer at current time (with expanded request)
     err = extra->cb->checkout_layer(
         in_data->effect_ref,
         PARAM_INPUT,
@@ -841,9 +877,23 @@ PF_Err PreRender(
         preRenderData->exposure = powf(2.0f, preRenderData->intensity);
     }
 
-    // Set up output
+    // Set up output with expanded rect for glow spread
+    // The glow extends beyond the original layer bounds
     extra->output->result_rect = in_result.result_rect;
     extra->output->max_result_rect = in_result.max_result_rect;
+
+    // Expand output rect by glow expansion amount
+    // This tells AE that our output is larger than the input
+    extra->output->result_rect.left -= glowExpansion;
+    extra->output->result_rect.top -= glowExpansion;
+    extra->output->result_rect.right += glowExpansion;
+    extra->output->result_rect.bottom += glowExpansion;
+
+    extra->output->max_result_rect.left -= glowExpansion;
+    extra->output->max_result_rect.top -= glowExpansion;
+    extra->output->max_result_rect.right += glowExpansion;
+    extra->output->max_result_rect.bottom += glowExpansion;
+
     extra->output->solid = FALSE;
     extra->output->pre_render_data = preRenderData;
     extra->output->delete_pre_render_data_func = DeletePreRenderData;
@@ -975,7 +1025,12 @@ PF_Err SmartRender(
                     rp.height = output_worldP->height;
                     rp.srcPitch = input_worldP->rowbytes / sizeof(float) / 4;
                     rp.dstPitch = output_worldP->rowbytes / sizeof(float) / 4;
+                    rp.inputWidth = input_worldP->width;
+                    rp.inputHeight = input_worldP->height;
                     rp.mipLevels = preRenderData->mipLevels;
+
+                    PLUGIN_LOG("SmartRender: output=%dx%d, input=%dx%d",
+                        rp.width, rp.height, rp.inputWidth, rp.inputHeight);
 
                     // Execute GPU rendering based on framework
                     bool renderSuccess = false;

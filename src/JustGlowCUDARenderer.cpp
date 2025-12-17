@@ -623,12 +623,17 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     // Note: Intensity/exposure is already applied in UpsampleKernel
     // (better for precision and per-level control)
 
+    CUDA_LOG("Composite: output=%dx%d, input=%dx%d",
+        params.width, params.height, params.inputWidth, params.inputHeight);
+
     void* kernelParams[] = {
         &original,
         &glow,
         &output,
         (void*)&params.width,
         (void*)&params.height,
+        (void*)&params.inputWidth,
+        (void*)&params.inputHeight,
         (void*)&params.srcPitch,
         (void*)&glowPitch,
         (void*)&params.dstPitch,
