@@ -92,6 +92,7 @@ enum ParamID {
     PARAM_ANAMORPHIC_ANGLE,     // Anamorphic direction angle
     PARAM_COMPOSITE_MODE,       // Composite mode (Add/Screen/Overlay)
     PARAM_HDR_MODE,             // Enable Karis Average for HDR
+    PARAM_FALLOFF,              // Light falloff (0-100%, controls distance decay)
 
     PARAM_COUNT
 };
@@ -110,7 +111,8 @@ enum ParamDiskID {
     DISK_ID_ANAMORPHIC,
     DISK_ID_ANAMORPHIC_ANGLE,
     DISK_ID_COMPOSITE_MODE,
-    DISK_ID_HDR_MODE
+    DISK_ID_HDR_MODE,
+    DISK_ID_FALLOFF
 };
 
 // ============================================================================
@@ -156,6 +158,7 @@ namespace Defaults {
     constexpr float AnamorphicAngle = 0.0f;     // Horizontal
     constexpr int   CompositeMode   = static_cast<int>(CompositeMode::Add);
     constexpr bool  HDRMode         = true;
+    constexpr float Falloff         = 70.0f;    // 70% (balanced Deep Glow feel)
 }
 
 namespace Ranges {
@@ -182,6 +185,10 @@ namespace Ranges {
     // Anamorphic Angle
     constexpr float AngleMin        = -90.0f;
     constexpr float AngleMax        = 90.0f;
+
+    // Falloff
+    constexpr float FalloffMin      = 0.0f;
+    constexpr float FalloffMax      = 100.0f;
 }
 
 // ============================================================================
@@ -221,6 +228,7 @@ struct JustGlowPreRenderData {
     float anamorphicAngle;
     CompositeMode compositeMode;
     bool hdrMode;
+    float falloff;
 
     // Computed values
     int mipLevels;

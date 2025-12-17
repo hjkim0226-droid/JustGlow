@@ -4,9 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-JustGlow is a GPU-accelerated glow effect plugin for Adobe After Effects. It uses DirectX 12 compute shaders on Windows with planned Metal support for macOS.
+JustGlow is a GPU-accelerated glow effect plugin for Adobe After Effects. It uses CUDA on Windows (DirectX 12 planned) with planned Metal support for macOS.
 
-**Core Algorithm:** Dual Kawase blur with Karis Average for HDR firefly prevention, 13-tap downsample, 9-tap tent upsample.
+**Core Algorithm:** Dual Kawase blur with:
+- 13-tap prefilter (Karis Average for HDR firefly prevention)
+- 5-tap downsample with X/+ rotation alternation (rounder glow)
+- 9-tap tent upsample with falloff-based blending (physical light decay)
+- Dynamic MIP levels (up to 12, until min dimension < 16px)
 
 ## Build Commands
 
@@ -74,4 +78,13 @@ Key checkpoints:
 
 ## Parameters
 
-13 UI parameters defined in `JustGlow.h` ParamID enum. Quality setting controls MIP chain depth (Low=3, Medium=4, High=5, Ultra=6 levels).
+14 UI parameters defined in `JustGlow.h` ParamID enum:
+- **Quality:** Controls MIP chain depth (Low=4, Medium=6, High=8, Ultra=12 levels)
+- **Falloff:** Light decay rate (default 70%, higher = more spread)
+- **Radius:** Scales blur offsets
+
+## Key Techniques
+
+1. **X/+ Rotation:** Alternates diagonal (X) and cross (+) sampling patterns during downsample to break boxy artifacts → rounder glow at zero cost
+2. **Dynamic MIP Levels:** Ultra quality goes to 12 levels (until 16px), providing Deep Glow-like "atmosphere" feel
+3. **Falloff Blending:** `levelWeight = pow(falloff, level)` during upsample for physical light decay

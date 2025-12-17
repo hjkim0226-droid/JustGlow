@@ -432,6 +432,20 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_HDR_MODE);
 
+    // Falloff (light decay with distance)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Falloff",
+        Ranges::FalloffMin,
+        Ranges::FalloffMax,
+        Ranges::FalloffMin,
+        Ranges::FalloffMax,
+        Defaults::Falloff,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_FALLOFF);
+
     out_data->num_params = PARAM_COUNT;
 
     return err;
@@ -751,7 +765,13 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->hdrMode = (param.u.bd.value != 0);
 
-        // Calculate MIP levels
+        // Falloff
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_FALLOFF, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->falloff = param.u.fs_d.value;
+
+        // Calculate MIP levels (dynamic based on resolution and quality)
         preRenderData->mipLevels = CalculateMipLevels(
             preRenderData->radius, preRenderData->quality);
         preRenderData->fractionalAmount = CalculateFractionalAmount(
@@ -872,13 +892,14 @@ PF_Err SmartRender(
                     rp.anamorphicAngle = preRenderData->anamorphicAngle;
                     rp.compositeMode = static_cast<int>(preRenderData->compositeMode);
                     rp.hdrMode = preRenderData->hdrMode;
+                    rp.falloff = preRenderData->falloff / 100.0f;  // Convert to 0-1 range
                     rp.width = output_worldP->width;
                     rp.height = output_worldP->height;
                     rp.srcPitch = input_worldP->rowbytes / sizeof(float) / 4;
                     rp.dstPitch = output_worldP->rowbytes / sizeof(float) / 4;
                     rp.mipLevels = preRenderData->mipLevels;
                     rp.fractionalAmount = preRenderData->fractionalAmount;
-                    rp.mipChain = CalculateMipChain(rp.width, rp.height, rp.mipLevels);
+                    rp.mipChain = CalculateMipChain(rp.width, rp.height, rp.mipLevels, rp.radius);
 
                     // Execute GPU rendering based on framework
                     bool renderSuccess = false;
@@ -953,17 +974,33 @@ PF_Err SmartRender(
 // ============================================================================
 
 int CalculateMipLevels(float radius, BlurQuality quality) {
-    // Base levels from quality setting
-    int maxLevels = GetQualityLevelCount(quality);
+    // Quality setting determines maximum depth
+    // Low: 4 levels (fast, tight glow)
+    // Medium: 6 levels (balanced)
+    // High: 8 levels (good quality)
+    // Ultra: 12 levels (Deep Glow-like depth, until ~16px)
+    int maxLevelsByQuality;
+    switch (quality) {
+        case BlurQuality::Low:    maxLevelsByQuality = 4;  break;
+        case BlurQuality::Medium: maxLevelsByQuality = 6;  break;
+        case BlurQuality::High:   maxLevelsByQuality = 8;  break;
+        case BlurQuality::Ultra:  maxLevelsByQuality = 12; break;  // Deep Glow-like
+        default:                  maxLevelsByQuality = 8;  break;
+    }
 
     // Calculate required levels from radius
     // Each level doubles the effective blur radius
     int requiredLevels = 1;
     float currentRadius = 2.0f;  // Base radius at level 1
 
-    while (currentRadius < radius && requiredLevels < maxLevels) {
+    while (currentRadius < radius && requiredLevels < maxLevelsByQuality) {
         currentRadius *= 2.0f;
         requiredLevels++;
+    }
+
+    // For Ultra quality, ensure we go deep enough for atmosphere
+    if (quality == BlurQuality::Ultra && requiredLevels < 8) {
+        requiredLevels = 8;  // Minimum 8 levels for Ultra (atmosphere/global illumination)
     }
 
     return requiredLevels;

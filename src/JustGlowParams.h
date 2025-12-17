@@ -106,8 +106,8 @@ CONSTANT_BUFFER_END
 
 #ifdef __cplusplus
 
-// Maximum supported MIP levels
-constexpr int MAX_MIP_LEVELS = 8;
+// Maximum supported MIP levels (12 supports up to 8K resolution)
+constexpr int MAX_MIP_LEVELS = 12;
 
 // MIP chain configuration
 struct MipChainConfig {
@@ -117,8 +117,29 @@ struct MipChainConfig {
     float   blurOffsets[MAX_MIP_LEVELS];    // Kawase offset per level
 };
 
+// Calculate dynamic MIP levels based on resolution
+// Goes until minimum dimension reaches minSize (default 16px for Deep Glow-like depth)
+// maxLevels can limit the depth for performance (0 = no limit)
+inline int CalculateDynamicMipLevels(int width, int height, int minSize = 16, int maxLevels = 0) {
+    int levels = 1;  // Start with level 0 (original size)
+    int w = width;
+    int h = height;
+
+    while (w > minSize && h > minSize && (maxLevels == 0 || levels < maxLevels)) {
+        w = (w + 1) / 2;
+        h = (h + 1) / 2;
+        levels++;
+
+        if (levels >= MAX_MIP_LEVELS) break;
+    }
+
+    return levels;
+}
+
 // Calculate MIP chain configuration
-inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int levels) {
+// radius: blur radius parameter (default 50.0 as baseline)
+// Dynamic levels: calculates until min dimension < 16px
+inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int levels, float radius = 50.0f) {
     MipChainConfig config = {};
     config.levelCount = levels;
 
@@ -132,8 +153,16 @@ inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int level
         2.0f,   // Level 4
         3.0f,   // Level 5
         3.0f,   // Level 6
-        4.0f    // Level 7
+        3.0f,   // Level 7
+        4.0f,   // Level 8
+        4.0f,   // Level 9
+        4.0f,   // Level 10
+        4.0f    // Level 11
     };
+
+    // Scale blur offsets by radius (50.0 as baseline)
+    float radiusScale = radius / 50.0f;
+    if (radiusScale < 0.1f) radiusScale = 0.1f;  // Minimum scale
 
     int w = baseWidth;
     int h = baseHeight;
@@ -141,7 +170,8 @@ inline MipChainConfig CalculateMipChain(int baseWidth, int baseHeight, int level
     for (int i = 0; i < levels && i < MAX_MIP_LEVELS; ++i) {
         config.widths[i] = w;
         config.heights[i] = h;
-        config.blurOffsets[i] = (i < 8) ? kawaseOffsets[i] : 4.0f;
+        float baseOffset = (i < 12) ? kawaseOffsets[i] : 4.0f;
+        config.blurOffsets[i] = baseOffset * radiusScale;
 
         // Halve dimensions for next level
         w = (w + 1) / 2;  // Round up
@@ -174,6 +204,7 @@ struct RenderParams {
     float   anamorphicAngle;
     int     compositeMode;      // CompositeMode enum value
     bool    hdrMode;
+    float   falloff;            // Light falloff (0-1, controls distance decay)
 
     // Image info
     int     width;

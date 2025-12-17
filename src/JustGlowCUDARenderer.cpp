@@ -441,7 +441,13 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d", i, srcMip.width, srcMip.height, dstMip.width, dstMip.height);
+        // Alternate between X (diagonal) and + (cross) patterns
+        // This breaks up boxy artifacts -> rounder glow
+        int rotationMode = i % 2;  // 0=X, 1=+
+
+        CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d, rotation=%s",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
+            rotationMode == 0 ? "X" : "+");
 
         float blurOffset = params.mipChain.blurOffsets[i];
         int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
@@ -456,7 +462,8 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
             (void*)&dstMip.width,
             (void*)&dstMip.height,
             (void*)&dstPitchPixels,
-            (void*)&blurOffset
+            (void*)&blurOffset,
+            (void*)&rotationMode
         };
 
         CUresult err = cuLaunchKernel(
@@ -486,10 +493,24 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d", i, srcMip.width, srcMip.height, dstMip.width, dstMip.height);
-
         float blurOffset = params.mipChain.blurOffsets[i + 1];
-        float blendFactor = (i == params.mipLevels - 2) ? 0.0f : 0.5f;  // First pass: no blend
+
+        // Calculate level weight using falloff parameter
+        // levelWeight = pow(falloff, level) for physical light decay
+        // First pass (deepest level): no blend, just upsample
+        // Subsequent passes: blend with falloff-weighted contribution
+        float levelWeight;
+        if (i == params.mipLevels - 2) {
+            levelWeight = 0.0f;  // First pass: no blend (starting from deepest)
+        } else {
+            // Weight decreases with level depth based on falloff
+            // Higher falloff = light spreads further
+            levelWeight = powf(params.falloff, static_cast<float>(params.mipLevels - 2 - i));
+        }
+
+        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d, levelWeight=%.3f",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, levelWeight);
+
         int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
         int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
 
@@ -507,7 +528,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             (void*)&dstMip.height,
             (void*)&dstPitchPixels,
             (void*)&blurOffset,
-            (void*)&blendFactor
+            (void*)&levelWeight
         };
 
         CUresult err = cuLaunchKernel(

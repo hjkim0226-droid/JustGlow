@@ -227,7 +227,9 @@ extern "C" __global__ void PrefilterKernel(
 }
 
 // ============================================================================
-// Downsample Kernel (Dual Kawase 4-Tap)
+// Downsample Kernel (Dual Kawase 5-Tap with X/+ Rotation)
+// rotationMode: 0 = X (diagonal), 1 = + (cross)
+// Alternating patterns breaks up boxy artifacts -> rounder glow
 // ============================================================================
 
 extern "C" __global__ void DownsampleKernel(
@@ -235,7 +237,7 @@ extern "C" __global__ void DownsampleKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float blurOffset)
+    float blurOffset, int rotationMode)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -256,10 +258,22 @@ extern "C" __global__ void DownsampleKernel(
     float Dr, Dg, Db, Da;
     float centerR, centerG, centerB, centerA;
 
-    sampleBilinear(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);
-    sampleBilinear(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
-    sampleBilinear(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinear(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);
+    if (rotationMode == 0) {
+        // X pattern (diagonal) - default
+        sampleBilinear(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);
+        sampleBilinear(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
+        sampleBilinear(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
+        sampleBilinear(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);
+    } else {
+        // + pattern (cross) - 45 degree rotation
+        // Slightly larger offset (1.414x) to maintain similar coverage area
+        float crossOffset = offset * 1.414f;
+        sampleBilinear(input, u, v - crossOffset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);  // Top
+        sampleBilinear(input, u + crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);  // Right
+        sampleBilinear(input, u, v + crossOffset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);  // Bottom
+        sampleBilinear(input, u - crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);  // Left
+    }
+
     sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, centerR, centerG, centerB, centerA);
 
     float resR = centerR * 0.5f + (Ar + Br + Cr + Dr) * 0.125f;
@@ -274,7 +288,8 @@ extern "C" __global__ void DownsampleKernel(
 }
 
 // ============================================================================
-// Upsample Kernel (9-Tap Tent Filter)
+// Upsample Kernel (9-Tap Tent Filter with Falloff)
+// levelWeight: pow(falloff, level) - controls light decay with distance
 // ============================================================================
 
 extern "C" __global__ void UpsampleKernel(
@@ -283,7 +298,7 @@ extern "C" __global__ void UpsampleKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float blurOffset, float blendFactor)
+    float blurOffset, float levelWeight)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -329,13 +344,15 @@ extern "C" __global__ void UpsampleKernel(
     resG /= 16.0f;
     resB /= 16.0f;
 
-    // Blend with previous level if needed
-    if (blendFactor > 0.0f && prevLevel != nullptr) {
+    // Add weighted contribution from previous (larger) level
+    // levelWeight = pow(falloff, level) for physical light decay
+    if (levelWeight > 0.0f && prevLevel != nullptr) {
         float prevR, prevG, prevB, prevA;
         sampleBilinear(prevLevel, u, v, dstWidth, dstHeight, dstPitch, prevR, prevG, prevB, prevA);
-        resR = resR + prevR * blendFactor;
-        resG = resG + prevG * blendFactor;
-        resB = resB + prevB * blendFactor;
+        // Accumulate: upsampled glow + weighted current level contribution
+        resR = resR + prevR * levelWeight;
+        resG = resG + prevG * levelWeight;
+        resB = resB + prevB * levelWeight;
     }
 
     int outIdx = (y * dstPitch + x) * 4;
@@ -411,5 +428,9 @@ extern "C" __global__ void CompositeKernel(
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = origA;
+
+    // Expand alpha to include glow contribution (for transparent backgrounds)
+    float glowLum = fmaxf(fmaxf(glowR, glowG), glowB);
+    float expandedAlpha = fmaxf(origA, clampf(glowLum, 0.0f, 1.0f));
+    output[outIdx + 3] = expandedAlpha;
 }
