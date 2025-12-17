@@ -636,6 +636,7 @@ PF_Err PreRender(
     PF_CheckoutResult in_result;
 
     PLUGIN_LOG("=== PreRender ===");
+    PLUGIN_LOG("PreRender input: bitdepth=%d", extra->input->bitdepth);
 
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
