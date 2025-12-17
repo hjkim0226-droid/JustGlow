@@ -917,8 +917,8 @@ PF_Err SmartRender(
         PF_COPY(input_worldP, output_worldP, nullptr, nullptr);
     }
 
-    // Cleanup pre-render data
-    delete preRenderData;
+    // NOTE: Do NOT delete preRenderData here!
+    // AE will call DeletePreRenderData via delete_pre_render_data_func
 
     return err;
 }
