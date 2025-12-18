@@ -904,8 +904,8 @@ PF_Err PreRender(
         preRenderData->decayK = preRenderData->falloff;
 
         // level1Weight: Intensity -> Level 1 starting weight (0-1)
-        // Intensity 0% = 0.5 (spread), Intensity 100% = 1.0 (core)
-        preRenderData->level1Weight = 0.5f + (preRenderData->intensity / 100.0f) * 0.5f;
+        // Intensity 0% = 0 (no outer glow), Intensity 100% = 1.0 (full)
+        preRenderData->level1Weight = preRenderData->intensity / 100.0f;
     }
 
     // Set up output with expanded rect for glow spread
