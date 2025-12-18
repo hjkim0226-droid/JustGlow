@@ -462,8 +462,8 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
     int useHDR = params.hdrMode ? 1 : 0;
 
     // srcPitch is for the input buffer (AE's input layer)
-    // Use inputWidth as the pitch for the input since that's its actual size
-    int inputPitch = params.inputWidth;
+    // Use actual srcPitch from AE (may include padding)
+    int inputPitch = params.srcPitch;
 
     void* kernelParams[] = {
         &input,
