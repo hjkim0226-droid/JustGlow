@@ -43,25 +43,34 @@ __device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) 
 }
 
 // Calculate physical weight based on falloff type
-// falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
+// falloffType: 0=Sigmoid (S-curve), 1=InverseSquare, 2=Linear
+// New sigmoid approach: core (level 0-2) stays bright, decay starts at level 3
 __device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType) {
-    float x = level * decayK;
+    // Transition point: where decay begins (around level 2.5-3)
+    float transition = 2.5f;
 
     switch (falloffType) {
-        case 0:  // Exponential - Deep Glow Standard
-            // pow(0.5, x) - balanced, natural decay
-            return powf(0.5f, x);
+        case 0:  // Sigmoid (S-curve) - Natural glow falloff
+            // Core (level 0-2) maintains ~1.0, sharp decay at level 3+
+            // decayK controls steepness (higher = sharper transition)
+            return 1.0f / (1.0f + expf(decayK * (level - transition)));
 
         case 1:  // Inverse Square - Realistic VFX
             // 1 / (x^2 + 1) - sharp core, long tail
-            return 1.0f / (x * x + 1.0f);
+            {
+                float x = level * decayK;
+                return 1.0f / (x * x + 1.0f);
+            }
 
         case 2:  // Linear - Soft/Foggy
             // max(0, 1 - x * 0.1) - uniform decay, dreamy
-            return fmaxf(0.0f, 1.0f - x * 0.1f);
+            {
+                float x = level * decayK;
+                return fmaxf(0.0f, 1.0f - x * 0.1f);
+            }
 
         default:
-            return powf(0.5f, x);
+            return 1.0f / (1.0f + expf(decayK * (level - transition)));
     }
 }
 
@@ -421,7 +430,7 @@ extern "C" __global__ void UpsampleKernel(
     sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, currR, currG, currB, currA);
 
     // Weight calculation for current level
-    // A. Physical decay weight (The Shape)
+    // A. Physical decay weight (The Shape) - now using sigmoid curve
     float physicalWeight = calculatePhysicalWeight((float)levelIndex, decayK, falloffType);
 
     // B. Distance fade weight (The Cutoff)
@@ -431,15 +440,12 @@ extern "C" __global__ void UpsampleKernel(
     // C. Final weight combines:
     //    - Physical decay (falloff shape)
     //    - Distance cutoff (radius control)
-    //    - Exposure (intensity boost) - applied here for precision & control
-    //
-    // Why exposure here? (Gemini explanation)
-    // 1. Prevents color banding: dark values × big number at end = banding
-    // 2. Per-level control: can have different intensity per level if needed
-    float finalWeight = physicalWeight * fadeWeight * exposure;
+    //    - Exposure is NOW applied in CompositeKernel to prevent accumulation explosion
+    float finalWeight = physicalWeight * fadeWeight;
 
     // Add weighted current level contribution to upsampled base
-    // Result = TentUpsample(Previous) + Current × Weight × Exposure
+    // Result = TentUpsample(Previous) + Current × Weight
+    // Note: Exposure will be applied once in Composite, not accumulated per level
     resR = resR + currR * finalWeight;
     resG = resG + currG * finalWeight;
     resB = resB + currB * finalWeight;
@@ -462,7 +468,8 @@ extern "C" __global__ void CompositeKernel(
     int width, int height,
     int inputWidth, int inputHeight,
     int originalPitch, int glowPitch, int outputPitch,
-    int compositeMode)
+    int compositeMode,
+    float exposure)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -489,12 +496,17 @@ extern "C" __global__ void CompositeKernel(
     }
 
     // Sample glow with bilinear
-    // Note: Intensity/exposure already applied in UpsampleKernel
     float u = ((float)x + 0.5f) / (float)width;
     float v = ((float)y + 0.5f) / (float)height;
 
     float glowR, glowG, glowB, glowA;
     sampleBilinear(glow, u, v, width, height, glowPitch, glowR, glowG, glowB, glowA);
+
+    // Apply exposure here (once) instead of accumulating in UpsampleKernel
+    // This prevents color blowout from exposure being multiplied at each level
+    glowR *= exposure;
+    glowG *= exposure;
+    glowB *= exposure;
 
     float resR, resG, resB;
 

@@ -623,14 +623,15 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     int gridX = (params.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
     int gridY = (params.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-    CUDA_LOG("Composite: %dx%d, grid: %dx%d", params.width, params.height, gridX, gridY);
+    CUDA_LOG("Composite: %dx%d, grid: %dx%d, exposure: %.2f",
+        params.width, params.height, gridX, gridY, params.exposure);
 
     // Use upsample result (not mipChain which contains downsampled data)
     CUdeviceptr glow = m_upsampleChain[0].devicePtr;
     int glowPitch = m_upsampleChain[0].width;  // Pitch in pixels
 
-    // Note: Intensity/exposure is already applied in UpsampleKernel
-    // (better for precision and per-level control)
+    // Exposure is now applied here (once) instead of in UpsampleKernel
+    // This prevents accumulation explosion when exposure is multiplied at each level
 
     CUDA_LOG("Composite: output=%dx%d, input=%dx%d",
         params.width, params.height, params.inputWidth, params.inputHeight);
@@ -646,7 +647,8 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&params.srcPitch,
         (void*)&glowPitch,
         (void*)&params.dstPitch,
-        (void*)&params.compositeMode
+        (void*)&params.compositeMode,
+        (void*)&params.exposure
     };
 
     CUresult err = cuLaunchKernel(
