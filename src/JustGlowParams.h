@@ -179,7 +179,7 @@ struct RenderParams {
     // Core computed values
     float   activeLimit;        // Radius -> MIP level limit (0 to mipLevels)
     float   blurOffsets[MAX_MIP_LEVELS]; // Spread -> per-level pixel offset
-    float   decayK;             // Falloff -> decay rate per level
+    float   decayK;             // Falloff value (0-100, 50=neutral)
     float   exposure;           // Exposure -> brightness multiplier
     float   level1Weight;       // Intensity -> Level 1 starting weight (0.5-1.0)
     int     falloffType;        // Decay curve type (0=Exponential, 1=InverseSquare, 2=Linear)

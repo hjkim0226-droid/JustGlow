@@ -899,8 +899,9 @@ PF_Err PreRender(
             preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset);
         }
 
-        // decayK: Falloff -> decay rate per level
-        preRenderData->decayK = 0.2f + (preRenderData->falloff / 100.0f) * 2.8f;
+        // decayK: Pass falloff directly (0-100), kernel calculates decayRate
+        // 0% = boost outer, 50% = neutral, 100% = decay
+        preRenderData->decayK = preRenderData->falloff;
 
         // level1Weight: Intensity -> Level 1 starting weight (0-1)
         // Intensity 0% = 0.5 (spread), Intensity 100% = 1.0 (core)

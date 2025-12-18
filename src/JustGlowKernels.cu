@@ -42,20 +42,30 @@ __device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) 
     return t * t * (3.0f - 2.0f * t);
 }
 
-// Calculate weight based on level and intensity
+// Calculate weight based on level, falloff, and intensity
 // Level 0: always 100%
 // Level 1: level1Weight (controlled by Intensity parameter, 50%-100%)
 // Level 2+: level1Weight * pow(decayRate, level-1)
-// decayRate is derived from Falloff parameter
-__device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType, float level1Weight) {
+// Falloff: 0%=boost outer, 50%=neutral, 100%=decay to core
+__device__ __forceinline__ float calculatePhysicalWeight(float level, float falloff, int falloffType, float level1Weight) {
     // Level 0 is always 100%
     if (level < 0.5f) return 1.0f;
 
-    // Decay rate per level (from Falloff)
-    // decayK range 0.2-3.0 -> decayRate 0.95-0.5
-    float decayRate = 1.0f - (decayK - 0.2f) / 2.8f * 0.5f;  // 0.5 ~ 1.0
+    // Calculate decayRate from Falloff (0-100, 50=neutral)
+    // Falloff 0%   -> decayRate 1.25 (boost outer levels)
+    // Falloff 50%  -> decayRate 1.0  (neutral, natural decay only)
+    // Falloff 100% -> decayRate 0.5  (strong decay to core)
+    float normalizedFalloff = (falloff - 50.0f) / 50.0f;  // -1 to 1
+    float decayRate;
+    if (normalizedFalloff < 0.0f) {
+        // Boost: 0% -> 1.25, 50% -> 1.0
+        decayRate = 1.0f - normalizedFalloff * 0.25f;
+    } else {
+        // Decay: 50% -> 1.0, 100% -> 0.5
+        decayRate = 1.0f - normalizedFalloff * 0.5f;
+    }
 
-    // Level 1 starts at level1Weight, then decays
+    // Level 1 starts at level1Weight, then multiplies by decayRate per level
     // weight = level1Weight * pow(decayRate, level - 1)
     float weight = level1Weight * powf(decayRate, level - 1.0f);
 
@@ -630,26 +640,6 @@ extern "C" __global__ void CompositeKernel(
             resG = origG + glowG;
             resB = origB + glowB;
             break;
-    }
-
-    // Brightness overflow → white desaturation
-    // When brightness exceeds 1.0, colors shift toward white (like real light bloom)
-    float maxVal = fmaxf(fmaxf(resR, resG), resB);
-    if (maxVal > 1.0f) {
-        // Normalize to preserve hue
-        float invMax = 1.0f / maxVal;
-        float normR = resR * invMax;
-        float normG = resG * invMax;
-        float normB = resB * invMax;
-
-        // Blend toward white based on overbright amount
-        // Uses soft curve: overbright/(overbright+1000) → barely noticeable desaturation
-        float overbright = maxVal - 1.0f;
-        float blendFactor = overbright / (overbright + 1000.0f);
-
-        resR = normR + blendFactor * (1.0f - normR);
-        resG = normG + blendFactor * (1.0f - normG);
-        resB = normB + blendFactor * (1.0f - normB);
     }
 
     int outIdx = (y * outputPitch + x) * 4;

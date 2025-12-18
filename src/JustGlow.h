@@ -158,7 +158,7 @@ namespace Defaults {
     constexpr float Exposure        = 10.0f;    // 10x brightness multiplier
     constexpr float Radius          = 100.0f;   // 100% = all MIP levels active
     constexpr float Spread          = 50.0f;    // 50% = balanced blur offset
-    constexpr float Falloff         = 50.0f;    // 50% = balanced decay rate
+    constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
     constexpr float Threshold       = 70.0f;    // 70% - visible effect on application
     constexpr float SoftKnee        = 50.0f;    // 50%
 
@@ -192,7 +192,7 @@ namespace Ranges {
     constexpr float SpreadMax       = 100.0f;   // Maps to 1.1-2.5px offset
 
     constexpr float FalloffMin      = 0.0f;
-    constexpr float FalloffMax      = 100.0f;   // Decay rate per level
+    constexpr float FalloffMax      = 100.0f;   // 0=boost, 50=neutral, 100=decay
 
     // Threshold & Soft Knee
     constexpr float ThresholdMin    = 0.0f;
@@ -259,7 +259,7 @@ struct JustGlowPreRenderData {
     int mipLevels;          // Based on quality setting
     float activeLimit;      // Radius mapped to MIP level limit
     float blurOffsets[PRERENDER_MAX_MIP_LEVELS]; // Spread -> per-level offset
-    float decayK;           // Falloff mapped to decay rate
+    float decayK;           // Falloff value (0-100, 50=neutral)
     float level1Weight;     // Intensity mapped to Level 1 starting weight (0-1)
 };
 
