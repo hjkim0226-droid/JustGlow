@@ -47,9 +47,12 @@ __device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) 
 // This gives physically accurate, smooth falloff
 // falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
 __device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType) {
-    // Convert level to actual pixel distance (matches MIP resolution)
-    // Level 0 = 1px, Level 1 = 2px, Level 2 = 4px, etc.
-    float distance = powf(2.0f, level);
+    // Convert level to distance: Level 0 = 0 (100%), Level 1+ decays
+    // Level 0: 2^0-1 = 0 → 100%
+    // Level 1: 2^1-1 = 1
+    // Level 2: 2^2-1 = 3
+    // Level 3: 2^3-1 = 7
+    float distance = powf(2.0f, level) - 1.0f;
 
     // Scale decayK for distance-based calculation
     // Original decayK range 0.2-3.0, scale for faster decay
@@ -641,6 +644,26 @@ extern "C" __global__ void CompositeKernel(
             resG = origG + glowG;
             resB = origB + glowB;
             break;
+    }
+
+    // Brightness overflow → white desaturation
+    // When brightness exceeds 1.0, colors shift toward white (like real light bloom)
+    float maxVal = fmaxf(fmaxf(resR, resG), resB);
+    if (maxVal > 1.0f) {
+        // Normalize to preserve hue
+        float invMax = 1.0f / maxVal;
+        float normR = resR * invMax;
+        float normG = resG * invMax;
+        float normB = resB * invMax;
+
+        // Blend toward white based on overbright amount
+        // Uses soft curve: overbright/(overbright+1) → never reaches 1.0
+        float overbright = maxVal - 1.0f;
+        float blendFactor = overbright / (overbright + 1.0f);
+
+        resR = normR + blendFactor * (1.0f - normR);
+        resG = normG + blendFactor * (1.0f - normG);
+        resB = normB + blendFactor * (1.0f - normB);
     }
 
     int outIdx = (y * outputPitch + x) * 4;

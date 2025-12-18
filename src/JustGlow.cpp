@@ -886,9 +886,9 @@ PF_Err PreRender(
         // decayK: Falloff -> decay constant (0.2-3.0, higher = steeper)
         preRenderData->decayK = 0.2f + (preRenderData->falloff / 100.0f) * 2.8f;
 
-        // exposure: Intensity -> HDR exposure pow(2, intensity)
-        // Intensity 0 = 1x, 1 = 2x, 5 = 32x, 10 = 1024x
-        preRenderData->exposure = powf(2.0f, preRenderData->intensity);
+        // exposure: Intensity -> Linear exposure
+        // Intensity 0 = 0 (no glow), 1 = 1x, 5 = 5x, 10 = 10x
+        preRenderData->exposure = preRenderData->intensity;
     }
 
     // Set up output with expanded rect for glow spread

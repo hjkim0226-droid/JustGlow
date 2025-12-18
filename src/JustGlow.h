@@ -79,7 +79,7 @@ enum ParamID {
     PARAM_RADIUS,               // Glow reach distance (0-100) → controls active MIP levels
     PARAM_SPREAD,               // Blur softness (0-100) → controls blur offset (max 3.5px)
     PARAM_FALLOFF,              // Decay slope (0-100) → controls exponential decay k
-    PARAM_INTENSITY,            // Glow power (0-10) → HDR exposure pow(2, intensity)
+    PARAM_INTENSITY,            // Glow power (0-10) → Linear exposure multiplier
 
     // === Threshold ===
     PARAM_THRESHOLD,            // Brightness threshold (0-100%)
@@ -190,7 +190,7 @@ namespace Ranges {
     constexpr float FalloffMax      = 100.0f;   // Maps to k=0.2-3.0
 
     constexpr float IntensityMin    = 0.0f;
-    constexpr float IntensityMax    = 10.0f;    // pow(2, 10) = 1024x max
+    constexpr float IntensityMax    = 10.0f;    // Linear: 0 = no glow, 10 = 10x
 
     // Threshold & Soft Knee
     constexpr float ThresholdMin    = 0.0f;
@@ -233,7 +233,7 @@ struct JustGlowPreRenderData {
     float radius;       // 0-100: controls active MIP levels
     float spread;       // 0-100: controls blur offset (1.0-3.5px)
     float falloff;      // 0-100: controls decay k (0.2-3.0)
-    float intensity;    // 0-10: HDR exposure pow(2, intensity)
+    float intensity;    // 0-10: Linear exposure (0 = no glow)
 
     // Threshold
     float threshold;
@@ -259,7 +259,7 @@ struct JustGlowPreRenderData {
     float activeLimit;      // Radius mapped to MIP level limit
     float blurOffsets[PRERENDER_MAX_MIP_LEVELS]; // Spread -> per-level offset (decays to 1.5px)
     float decayK;           // Falloff mapped to decay constant (0.2-3.0)
-    float exposure;         // Intensity mapped to pow(2, intensity)
+    float exposure;         // Linear: same as intensity (0 = no glow)
 };
 
 // ============================================================================
