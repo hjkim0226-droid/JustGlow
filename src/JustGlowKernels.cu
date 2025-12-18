@@ -166,6 +166,7 @@ extern "C" __global__ void PrefilterKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
+    int inputWidth, int inputHeight,
     float threshold, float softKnee, float intensity,
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
@@ -177,11 +178,30 @@ extern "C" __global__ void PrefilterKernel(
     if (x >= dstWidth || y >= dstHeight)
         return;
 
-    float u = ((float)x + 0.5f) / (float)dstWidth;
-    float v = ((float)y + 0.5f) / (float)dstHeight;
+    // Calculate offset for centering input within expanded output
+    int offsetX = (dstWidth - inputWidth) / 2;
+    int offsetY = (dstHeight - inputHeight) / 2;
 
-    float texelX = 1.0f / (float)srcWidth;
-    float texelY = 1.0f / (float)srcHeight;
+    // Map output coordinates to input coordinates
+    int srcX = x - offsetX;
+    int srcY = y - offsetY;
+
+    // Check if we're outside the input bounds - output black
+    if (srcX < 0 || srcX >= inputWidth || srcY < 0 || srcY >= inputHeight) {
+        int outIdx = (y * dstPitch + x) * 4;
+        output[outIdx + 0] = 0.0f;
+        output[outIdx + 1] = 0.0f;
+        output[outIdx + 2] = 0.0f;
+        output[outIdx + 3] = 0.0f;
+        return;
+    }
+
+    // UV coordinates within the input region
+    float u = ((float)srcX + 0.5f) / (float)inputWidth;
+    float v = ((float)srcY + 0.5f) / (float)inputHeight;
+
+    float texelX = 1.0f / (float)inputWidth;
+    float texelY = 1.0f / (float)inputHeight;
 
     // 13-tap sampling
     float Ar, Ag, Ab, Aa;
@@ -199,25 +219,25 @@ extern "C" __global__ void PrefilterKernel(
     float Mr, Mg, Mb, Ma;
 
     // Outer corners
-    sampleBilinear(input, u - 2.0f * texelX, v - 2.0f * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);
-    sampleBilinear(input, u + 2.0f * texelX, v - 2.0f * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinear(input, u - 2.0f * texelX, v + 2.0f * texelY, srcWidth, srcHeight, srcPitch, Kr, Kg, Kb, Ka);
-    sampleBilinear(input, u + 2.0f * texelX, v + 2.0f * texelY, srcWidth, srcHeight, srcPitch, Mr, Mg, Mb, Ma);
+    sampleBilinear(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
+    sampleBilinear(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinear(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
+    sampleBilinear(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
 
     // Outer cross
-    sampleBilinear(input, u, v - 2.0f * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
-    sampleBilinear(input, u - 2.0f * texelX, v, srcWidth, srcHeight, srcPitch, Fr, Fg, Fb, Fa);
-    sampleBilinear(input, u + 2.0f * texelX, v, srcWidth, srcHeight, srcPitch, Hr, Hg, Hb, Ha);
-    sampleBilinear(input, u, v + 2.0f * texelY, srcWidth, srcHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinear(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinear(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
+    sampleBilinear(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
+    sampleBilinear(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
 
     // Inner corners
-    sampleBilinear(input, u - texelX, v - texelY, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);
-    sampleBilinear(input, u + texelX, v - texelY, srcWidth, srcHeight, srcPitch, Er, Eg, Eb, Ea);
-    sampleBilinear(input, u - texelX, v + texelY, srcWidth, srcHeight, srcPitch, Ir, Ig, Ib, Ia);
-    sampleBilinear(input, u + texelX, v + texelY, srcWidth, srcHeight, srcPitch, Jr, Jg, Jb, Ja);
+    sampleBilinear(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
+    sampleBilinear(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
+    sampleBilinear(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
+    sampleBilinear(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
 
     // Center
-    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, Gr, Gg, Gb, Ga);
+    sampleBilinear(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
 
     float resR, resG, resB;
 

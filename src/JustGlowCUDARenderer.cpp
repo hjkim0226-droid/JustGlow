@@ -427,15 +427,22 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
     float prefilterIntensity = 1.0f;
     // Convert bool to int for CUDA kernel (bool pointer would be wrong size)
     int useHDR = params.hdrMode ? 1 : 0;
+
+    // srcPitch is for the input buffer (AE's input layer)
+    // Use inputWidth as the pitch for the input since that's its actual size
+    int inputPitch = params.inputWidth;
+
     void* kernelParams[] = {
         &input,
         &dstMip.devicePtr,
-        (void*)&params.width,
-        (void*)&params.height,
-        (void*)&params.srcPitch,
+        (void*)&params.inputWidth,   // srcWidth = actual input size
+        (void*)&params.inputHeight,  // srcHeight = actual input size
+        (void*)&inputPitch,          // srcPitch = input width in pixels
         (void*)&dstMip.width,
         (void*)&dstMip.height,
-        (void*)&dstPitchPixels,  // Fixed: was dstMip.pitch (bytes), now pixels
+        (void*)&dstPitchPixels,
+        (void*)&params.inputWidth,   // inputWidth for offset calculation
+        (void*)&params.inputHeight,  // inputHeight for offset calculation
         (void*)&params.threshold,
         (void*)&params.softKnee,
         (void*)&prefilterIntensity,
