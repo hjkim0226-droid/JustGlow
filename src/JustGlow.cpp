@@ -782,20 +782,19 @@ PF_Err PreRender(
         // ===========================================
 
         // Threshold - non-linear mapping for better control
-        // UI 0-100 maps to actual 0-100 with quadratic curve
-        // UI 50 -> 25, UI 70 -> 49, UI 85 -> 72.25, UI 100 -> 100
+        // Threshold: UI 0-100 -> internal 0.0-1.0 (linear mapping)
+        // UI 70 (default) -> 0.7 threshold
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_THRESHOLD, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        float thresholdUI = param.u.fs_d.value;
-        float normalizedThreshold = thresholdUI / 100.0f;
-        preRenderData->threshold = normalizedThreshold * normalizedThreshold * 100.0f;
+        preRenderData->threshold = param.u.fs_d.value / 100.0f;
 
-        // Soft Knee - also increase default for smoother transition
+        // Soft Knee: UI 0-100 -> internal 0.0-1.0
+        // UI 50 (default) -> 0.5 knee width
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_SOFT_KNEE, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->softKnee = param.u.fs_d.value;
+        preRenderData->softKnee = param.u.fs_d.value / 100.0f;
 
         // ===========================================
         // Blur Options
@@ -887,9 +886,9 @@ PF_Err PreRender(
         // decayK: Falloff -> decay constant (0.2-3.0, higher = steeper)
         preRenderData->decayK = 0.2f + (preRenderData->falloff / 100.0f) * 2.8f;
 
-        // exposure: Intensity -> HDR exposure pow(2, intensity) / 100
-        // Scaled down by 100 for usable range
-        preRenderData->exposure = powf(2.0f, preRenderData->intensity) / 100.0f;
+        // exposure: Intensity -> HDR exposure pow(2, intensity)
+        // Intensity 0 = 1x, 1 = 2x, 5 = 32x, 10 = 1024x
+        preRenderData->exposure = powf(2.0f, preRenderData->intensity);
     }
 
     // Set up output with expanded rect for glow spread

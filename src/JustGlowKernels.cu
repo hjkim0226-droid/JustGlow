@@ -47,13 +47,13 @@ __device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) 
 // This gives physically accurate, smooth falloff
 // falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
 __device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType) {
-    // Convert level to actual pixel distance
-    // Level 0 = ~2px, Level 1 = ~4px, Level 2 = ~8px, etc.
-    float distance = powf(2.0f, level + 1.0f);
+    // Convert level to actual pixel distance (matches MIP resolution)
+    // Level 0 = 1px, Level 1 = 2px, Level 2 = 4px, etc.
+    float distance = powf(2.0f, level);
 
     // Scale decayK for distance-based calculation
-    // Original decayK range 0.2-3.0, scale down for pixel distances
-    float k = decayK * 0.02f;
+    // Original decayK range 0.2-3.0, scale for faster decay
+    float k = decayK * 0.08f;
 
     switch (falloffType) {
         case 0:  // Exponential - Natural light falloff
