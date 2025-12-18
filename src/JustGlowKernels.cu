@@ -450,10 +450,18 @@ extern "C" __global__ void CompositeKernel(
     if (x >= width || y >= height)
         return;
 
-    // Read original pixel (with bounds check for expanded output)
+    // Calculate offset for centering original within expanded output
+    // The original layer is centered within the glow-expanded output
+    int offsetX = (width - inputWidth) / 2;
+    int offsetY = (height - inputHeight) / 2;
+
+    // Read original pixel (with bounds check accounting for expansion offset)
     float origR = 0.0f, origG = 0.0f, origB = 0.0f, origA = 0.0f;
-    if (x < inputWidth && y < inputHeight) {
-        int origIdx = (y * originalPitch + x) * 4;
+    int srcX = x - offsetX;
+    int srcY = y - offsetY;
+
+    if (srcX >= 0 && srcX < inputWidth && srcY >= 0 && srcY < inputHeight) {
+        int origIdx = (srcY * originalPitch + srcX) * 4;
         origR = original[origIdx + 0];
         origG = original[origIdx + 1];
         origB = original[origIdx + 2];
