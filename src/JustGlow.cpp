@@ -899,14 +899,18 @@ PF_Err PreRender(
     extra->output->pre_render_data = preRenderData;
     extra->output->delete_pre_render_data_func = DeletePreRenderData;
 
+    // Set RETURNS_EXTRA_PIXELS flag since we expand result_rect beyond request_rect
+    // This is required for glow effects that extend beyond layer bounds
+    extra->output->flags = PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS;
+
     // Flag GPU rendering as possible (only if GPU is actually available)
 #if HAS_CUDA || HAS_DIRECTX
     bool gpuAvailable = (extra->input->gpu_data != nullptr) &&
                         (extra->input->what_gpu != PF_GPU_Framework_NONE);
 
     if (gpuAvailable) {
-        extra->output->flags = PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
-        PLUGIN_LOG("PreRender: GPU available (what_gpu=%d), GPU_RENDER_POSSIBLE flag set (0x%X)",
+        extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+        PLUGIN_LOG("PreRender: GPU available (what_gpu=%d), flags set (0x%X)",
             extra->input->what_gpu, extra->output->flags);
     } else {
         PLUGIN_LOG("PreRender: GPU NOT available (gpu_data=%p, what_gpu=%d) - CPU fallback",
