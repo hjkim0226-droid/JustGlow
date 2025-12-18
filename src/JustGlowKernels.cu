@@ -43,34 +43,33 @@ __device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) 
 }
 
 // Calculate physical weight based on falloff type
-// falloffType: 0=Sigmoid (S-curve), 1=InverseSquare, 2=Linear
-// New sigmoid approach: core (level 0-2) stays bright, decay starts at level 3
+// Now using ACTUAL PIXEL DISTANCE instead of level index
+// This gives physically accurate, smooth falloff
+// falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
 __device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType) {
-    // Transition point: where decay begins (around level 2.5-3)
-    float transition = 2.5f;
+    // Convert level to actual pixel distance
+    // Level 0 = ~2px, Level 1 = ~4px, Level 2 = ~8px, etc.
+    float distance = powf(2.0f, level + 1.0f);
+
+    // Scale decayK for distance-based calculation
+    // Original decayK range 0.2-3.0, scale down for pixel distances
+    float k = decayK * 0.02f;
 
     switch (falloffType) {
-        case 0:  // Sigmoid (S-curve) - Natural glow falloff
-            // Core (level 0-2) maintains ~1.0, sharp decay at level 3+
-            // decayK controls steepness (higher = sharper transition)
-            return 1.0f / (1.0f + expf(decayK * (level - transition)));
+        case 0:  // Exponential - Natural light falloff
+            // pow(0.5, distance * k) - smooth exponential decay
+            return powf(0.5f, distance * k);
 
-        case 1:  // Inverse Square - Realistic VFX
-            // 1 / (x^2 + 1) - sharp core, long tail
-            {
-                float x = level * decayK;
-                return 1.0f / (x * x + 1.0f);
-            }
+        case 1:  // Inverse Square - Realistic VFX (physical light)
+            // 1 / (1 + d*k) - inverse falloff
+            return 1.0f / (1.0f + distance * k);
 
         case 2:  // Linear - Soft/Foggy
-            // max(0, 1 - x * 0.1) - uniform decay, dreamy
-            {
-                float x = level * decayK;
-                return fmaxf(0.0f, 1.0f - x * 0.1f);
-            }
+            // max(0, 1 - d*k*0.01) - uniform decay
+            return fmaxf(0.0f, 1.0f - distance * k * 0.01f);
 
         default:
-            return 1.0f / (1.0f + expf(decayK * (level - transition)));
+            return powf(0.5f, distance * k);
     }
 }
 
