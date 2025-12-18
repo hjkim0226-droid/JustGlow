@@ -55,11 +55,14 @@ private:
     CUfunction m_downsampleKernel;
     CUfunction m_upsampleKernel;
     CUfunction m_compositeKernel;
+    CUfunction m_horizontalBlurKernel;
 
     // MIP chain buffers (stores downsampled textures - read during upsample)
     std::vector<CUDAMipBuffer> m_mipChain;
     // Upsample result buffers (separate from mipChain to avoid race condition)
     std::vector<CUDAMipBuffer> m_upsampleChain;
+    // Temp buffer for horizontal blur (separable Gaussian first pass)
+    CUDAMipBuffer m_horizontalTemp;
     int m_currentMipLevels;
     int m_currentWidth;
     int m_currentHeight;

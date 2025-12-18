@@ -345,13 +345,65 @@ extern "C" __global__ void DownsampleKernel(
 }
 
 // ============================================================================
-// Upsample Kernel (9-Tap Tent Filter with Advanced Falloff)
-// New parameters:
+// Horizontal Blur Kernel (5-Tap Gaussian)
+// First pass of separable Gaussian blur
+// Weights: [1, 4, 6, 4, 1] / 16
+// ============================================================================
+
+extern "C" __global__ void HorizontalBlurKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height, int pitch,
+    float blurOffset)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    float u = ((float)x + 0.5f) / (float)width;
+    float v = ((float)y + 0.5f) / (float)height;
+
+    float texelX = 1.0f / (float)width;
+    float offset = blurOffset + 0.5f;
+    float offset2 = offset * 2.0f;
+
+    // Sample 5 horizontal points
+    float L2r, L2g, L2b, L2a;
+    float L1r, L1g, L1b, L1a;
+    float Cr, Cg, Cb, Ca;
+    float R1r, R1g, R1b, R1a;
+    float R2r, R2g, R2b, R2a;
+
+    sampleBilinear(input, u - offset2 * texelX, v, width, height, pitch, L2r, L2g, L2b, L2a);
+    sampleBilinear(input, u - offset * texelX, v, width, height, pitch, L1r, L1g, L1b, L1a);
+    sampleBilinear(input, u, v, width, height, pitch, Cr, Cg, Cb, Ca);
+    sampleBilinear(input, u + offset * texelX, v, width, height, pitch, R1r, R1g, R1b, R1a);
+    sampleBilinear(input, u + offset2 * texelX, v, width, height, pitch, R2r, R2g, R2b, R2a);
+
+    // Gaussian weights: [1, 4, 6, 4, 1] / 16
+    float outR = (L2r * 1.0f + L1r * 4.0f + Cr * 6.0f + R1r * 4.0f + R2r * 1.0f) / 16.0f;
+    float outG = (L2g * 1.0f + L1g * 4.0f + Cg * 6.0f + R1g * 4.0f + R2g * 1.0f) / 16.0f;
+    float outB = (L2b * 1.0f + L1b * 4.0f + Cb * 6.0f + R1b * 4.0f + R2b * 1.0f) / 16.0f;
+    float outA = (L2a * 1.0f + L1a * 4.0f + Ca * 6.0f + R1a * 4.0f + R2a * 1.0f) / 16.0f;
+
+    int outIdx = (y * pitch + x) * 4;
+    output[outIdx + 0] = outR;
+    output[outIdx + 1] = outG;
+    output[outIdx + 2] = outB;
+    output[outIdx + 3] = outA;
+}
+
+// ============================================================================
+// Upsample Kernel (Separable Gaussian / Tent Filter with Advanced Falloff)
+// Parameters:
 // - levelIndex: current MIP level (0 = core, higher = atmosphere)
 // - activeLimit: Radius-controlled level limit (fade out beyond this)
 // - decayK: Falloff decay constant (0.2-3.0, higher = steeper)
 // - exposure: HDR exposure multiplier pow(2, intensity)
 // - falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
+// - blurMode: 0=Tent filter (3x3), 1=Vertical Gaussian (5-tap, assumes H-blur done)
 // ============================================================================
 
 extern "C" __global__ void UpsampleKernel(
@@ -366,7 +418,8 @@ extern "C" __global__ void UpsampleKernel(
     float activeLimit,
     float decayK,
     float exposure,
-    int falloffType)
+    int falloffType,
+    int blurMode)  // 0=Tent (3x3), 1=Vertical Gaussian (5-tap)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -381,60 +434,39 @@ extern "C" __global__ void UpsampleKernel(
 
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
-    // Level 0-4: Separable Gaussian (smoother, prevents text smearing)
-    // Level 5+:  Tent filter (faster, sufficient for atmosphere)
+    // blurMode 0: Tent filter (3x3, 9 samples)
+    // blurMode 1: Vertical Gaussian (5-tap, assumes H-blur already done)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
         float offset = blurOffset + 0.5f;
 
-        if (levelIndex <= 4) {
+        if (blurMode == 1) {
             // =========================================
-            // Separable Gaussian (cross pattern, 9 samples)
-            // Gaussian weights: [1, 4, 6, 4, 1] / 16
+            // Vertical Gaussian (5-tap) - Second pass of separable blur
+            // Input (prevLevel) is already horizontally blurred
+            // Weights: [1, 4, 6, 4, 1] / 16
             // =========================================
-            float L2r, L2g, L2b, L2a;  // Left 2
-            float L1r, L1g, L1b, L1a;  // Left 1
-            float Cr, Cg, Cb, Ca;       // Center
-            float R1r, R1g, R1b, R1a;  // Right 1
-            float R2r, R2g, R2b, R2a;  // Right 2
             float T2r, T2g, T2b, T2a;  // Top 2
             float T1r, T1g, T1b, T1a;  // Top 1
+            float Cr, Cg, Cb, Ca;       // Center
             float B1r, B1g, B1b, B1a;  // Bottom 1
             float B2r, B2g, B2b, B2a;  // Bottom 2
 
             float offset2 = offset * 2.0f;
 
-            // Horizontal samples
-            sampleBilinear(prevLevel, u - offset2 * texelX, v, prevWidth, prevHeight, prevPitch, L2r, L2g, L2b, L2a);
-            sampleBilinear(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, L1r, L1g, L1b, L1a);
-            sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
-            sampleBilinear(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, R1r, R1g, R1b, R1a);
-            sampleBilinear(prevLevel, u + offset2 * texelX, v, prevWidth, prevHeight, prevPitch, R2r, R2g, R2b, R2a);
-
-            // Vertical samples (center already sampled)
+            // Vertical samples only (horizontal blur already done in HorizontalBlurKernel)
             sampleBilinear(prevLevel, u, v - offset2 * texelY, prevWidth, prevHeight, prevPitch, T2r, T2g, T2b, T2a);
             sampleBilinear(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, T1r, T1g, T1b, T1a);
+            sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
             sampleBilinear(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, B1r, B1g, B1b, B1a);
             sampleBilinear(prevLevel, u, v + offset2 * texelY, prevWidth, prevHeight, prevPitch, B2r, B2g, B2b, B2a);
 
-            // Gaussian weights: 1, 4, 6, 4, 1 (sum=16 per axis)
-            // Horizontal blur
-            float hR = L2r * 1.0f + L1r * 4.0f + Cr * 6.0f + R1r * 4.0f + R2r * 1.0f;
-            float hG = L2g * 1.0f + L1g * 4.0f + Cg * 6.0f + R1g * 4.0f + R2g * 1.0f;
-            float hB = L2b * 1.0f + L1b * 4.0f + Cb * 6.0f + R1b * 4.0f + R2b * 1.0f;
-
-            // Vertical blur
-            float vR = T2r * 1.0f + T1r * 4.0f + Cr * 6.0f + B1r * 4.0f + B2r * 1.0f;
-            float vG = T2g * 1.0f + T1g * 4.0f + Cg * 6.0f + B1g * 4.0f + B2g * 1.0f;
-            float vB = T2b * 1.0f + T1b * 4.0f + Cb * 6.0f + B1b * 4.0f + B2b * 1.0f;
-
-            // Combine horizontal and vertical (approximate 2D Gaussian)
-            // Average of both directions, normalized
-            resR = (hR + vR) / 32.0f;
-            resG = (hG + vG) / 32.0f;
-            resB = (hB + vB) / 32.0f;
+            // Gaussian weights: [1, 4, 6, 4, 1] / 16
+            resR = (T2r * 1.0f + T1r * 4.0f + Cr * 6.0f + B1r * 4.0f + B2r * 1.0f) / 16.0f;
+            resG = (T2g * 1.0f + T1g * 4.0f + Cg * 6.0f + B1g * 4.0f + B2g * 1.0f) / 16.0f;
+            resB = (T2b * 1.0f + T1b * 4.0f + Cb * 6.0f + B1b * 4.0f + B2b * 1.0f) / 16.0f;
         } else {
             // =========================================
             // Tent Filter (9-tap, 3x3 pattern)
