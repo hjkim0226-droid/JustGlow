@@ -878,7 +878,7 @@ PF_Err PreRender(
 
         // blurOffsets: Spread -> per-level pixel offset (decays from spread to 1.5px)
         // Level 0 gets full offset, deeper levels decay toward 1.5px minimum
-        float spreadOffset = 1.5f + (preRenderData->spread / 100.0f) * 2.0f; // 1.5 ~ 3.5px
+        float spreadOffset = 1.1f + (preRenderData->spread / 100.0f) * 1.4f; // 1.1 ~ 2.5px
         for (int i = 0; i < preRenderData->mipLevels && i < PRERENDER_MAX_MIP_LEVELS; ++i) {
             preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset);
         }

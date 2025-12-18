@@ -657,9 +657,9 @@ extern "C" __global__ void CompositeKernel(
         float normB = resB * invMax;
 
         // Blend toward white based on overbright amount
-        // Uses soft curve: overbright/(overbright+1) → never reaches 1.0
+        // Uses soft curve: overbright/(overbright+10) → very gradual desaturation
         float overbright = maxVal - 1.0f;
-        float blendFactor = overbright / (overbright + 1.0f);
+        float blendFactor = overbright / (overbright + 10.0f);
 
         resR = normR + blendFactor * (1.0f - normR);
         resG = normG + blendFactor * (1.0f - normG);
