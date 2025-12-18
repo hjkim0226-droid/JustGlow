@@ -425,6 +425,8 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
     int dstPitchPixels = dstMip.width;  // Pitch in pixels, not bytes
     // Prefilter doesn't need exposure boost - it's applied in upsample
     float prefilterIntensity = 1.0f;
+    // Convert bool to int for CUDA kernel (bool pointer would be wrong size)
+    int useHDR = params.hdrMode ? 1 : 0;
     void* kernelParams[] = {
         &input,
         &dstMip.devicePtr,
@@ -444,7 +446,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
         (void*)&colorTempG,
         (void*)&colorTempB,
         (void*)&params.preserveColor,
-        (void*)&params.hdrMode
+        (void*)&useHDR
     };
 
     CUresult err = cuLaunchKernel(

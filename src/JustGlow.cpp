@@ -713,7 +713,8 @@ PF_Err PreRender(
     // Calculate expansion: base + (spread factor * 2^mipLevels)
     // This ensures glow has room to expand into
     int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f));
-    glowExpansion = std::max(64, std::min(glowExpansion, 1024));  // Clamp to reasonable range
+    // Use parentheses to prevent Windows min/max macro expansion
+    glowExpansion = (std::max)(64, (std::min)(glowExpansion, 1024));  // Clamp to reasonable range
 
     PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f)",
         glowExpansion, static_cast<int>(quality), mipLevels, spread);
