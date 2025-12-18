@@ -119,7 +119,11 @@ __device__ void sampleBilinear(
 }
 
 // ============================================================================
-// Soft Threshold
+// Soft Threshold (Fixed: threshold 아래 픽셀은 무조건 0)
+// Effective range: [threshold, threshold + 2*knee]
+// - Below threshold: 0
+// - threshold ~ threshold+2*knee: quadratic curve
+// - Above threshold+2*knee: linear
 // ============================================================================
 
 __device__ void softThreshold(
@@ -127,13 +131,35 @@ __device__ void softThreshold(
     float threshold, float knee)
 {
     float brightness = fmaxf(fmaxf(r, g), b);
+    float contribution;
 
-    float soft = brightness - threshold + knee;
+    // 1. Knee가 0일 때: hard threshold
+    if (knee <= 0.001f) {
+        contribution = fmaxf(0.0f, brightness - threshold);
+        contribution /= fmaxf(brightness, EPSILON);
+        contribution = fmaxf(contribution, 0.0f);
+        r *= contribution;
+        g *= contribution;
+        b *= contribution;
+        return;
+    }
+
+    // 2. Threshold 오프셋 (선형 구간 시작점)
+    float curveThreshold = threshold + knee;
+
+    // 3. Soft curve 계산
+    // brightness < threshold: soft = 0 (clamp)
+    // brightness in [threshold, threshold+2*knee]: quadratic
+    float soft = brightness - threshold;
     soft = clampf(soft, 0.0f, 2.0f * knee);
-    soft = soft * soft / (4.0f * knee + EPSILON);
+    soft = (soft * soft) / (4.0f * knee);
 
-    float contribution = fmaxf(soft, brightness - threshold);
-    contribution = contribution / fmaxf(brightness, EPSILON);
+    // 4. 곡선 vs 선형 중 큰 값 선택
+    // brightness > threshold+2*knee 이면 선형이 더 큼
+    contribution = fmaxf(soft, brightness - curveThreshold);
+
+    // 5. 정규화
+    contribution /= fmaxf(brightness, EPSILON);
     contribution = fmaxf(contribution, 0.0f);
 
     r *= contribution;

@@ -63,7 +63,7 @@ constexpr int PRERENDER_MAX_MIP_LEVELS = 12;
 #define PLUGIN_DESCRIPTION      "High-quality GPU Glow Effect with Dual Kawase Blur"
 
 #define MAJOR_VERSION           1
-#define MINOR_VERSION           1
+#define MINOR_VERSION           2
 #define BUG_VERSION             0
 #define STAGE_VERSION           PF_Stage_DEVELOP
 #define BUILD_VERSION           1
@@ -190,7 +190,7 @@ namespace Ranges {
     constexpr float FalloffMax      = 100.0f;   // Maps to k=0.2-3.0
 
     constexpr float IntensityMin    = 0.0f;
-    constexpr float IntensityMax    = 10.0f;    // pow(2, 10) = 1024x max
+    constexpr float IntensityMax    = 50.0f;    // pow(2, 50) / 100
 
     // Threshold & Soft Knee
     constexpr float ThresholdMin    = 0.0f;
