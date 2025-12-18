@@ -696,6 +696,17 @@ PF_Err PreRender(
         extra->input->what_gpu,
         extra->input->gpu_data);
 
+    // Get downsample factor for preview resolution support
+    // Full resolution = 1.0, Half = 0.5, Quarter = 0.25, etc.
+    float downsampleX = static_cast<float>(in_data->downsample_x.num) /
+                        static_cast<float>(in_data->downsample_x.den);
+    float downsampleY = static_cast<float>(in_data->downsample_y.num) /
+                        static_cast<float>(in_data->downsample_y.den);
+    float downsampleFactor = (downsampleX + downsampleY) * 0.5f;  // Average
+
+    PLUGIN_LOG("PreRender: downsample factor = %.3f (X=%.3f, Y=%.3f)",
+        downsampleFactor, downsampleX, downsampleY);
+
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
 
@@ -732,8 +743,10 @@ PF_Err PreRender(
     // radius 0 -> 0.5x, radius 50 -> 0.75x, radius 100 -> 1.0x
     float radiusFactor = 0.5f + (radius / 200.0f);
     int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f) * radiusFactor);
+    // Scale by downsample factor for preview resolution support
+    glowExpansion = static_cast<int>(glowExpansion * downsampleFactor);
     // Use parentheses to prevent Windows min/max macro expansion
-    glowExpansion = (std::max)(64, (std::min)(glowExpansion, 2048));  // Increased max for high radius
+    glowExpansion = (std::max)(32, (std::min)(glowExpansion, 2048));  // Min 32 for preview
 
     PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f, radius=%.1f)",
         glowExpansion, static_cast<int>(quality), mipLevels, spread, radius);

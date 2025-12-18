@@ -258,9 +258,10 @@ struct JustGlowPreRenderData {
     // Computed values
     int mipLevels;          // Based on quality setting
     float activeLimit;      // Radius mapped to MIP level limit
-    float blurOffsets[PRERENDER_MAX_MIP_LEVELS]; // Spread -> per-level offset
+    float blurOffsets[PRERENDER_MAX_MIP_LEVELS]; // Spread -> per-level offset (scaled by downsample)
     float decayK;           // Falloff value (0-100, 50=neutral)
     float level1Weight;     // Intensity mapped to Level 1 starting weight (0-1)
+    float downsampleFactor; // Preview resolution factor (1.0=full, 0.5=half, etc.)
 };
 
 // ============================================================================
