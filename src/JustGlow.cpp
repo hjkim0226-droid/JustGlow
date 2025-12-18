@@ -781,13 +781,18 @@ PF_Err PreRender(
         // Threshold
         // ===========================================
 
-        // Threshold
+        // Threshold - non-linear mapping for better control
+        // UI 0-100 maps to actual 0-50 with quadratic curve
+        // This makes the 45-55 "sweet spot" easier to adjust
+        // UI 50 -> 12.5, UI 70 -> 24.5, UI 85 -> 36.1, UI 100 -> 50
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_THRESHOLD, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->threshold = param.u.fs_d.value;
+        float thresholdUI = param.u.fs_d.value;
+        float normalizedThreshold = thresholdUI / 100.0f;
+        preRenderData->threshold = normalizedThreshold * normalizedThreshold * 50.0f;
 
-        // Soft Knee
+        // Soft Knee - also increase default for smoother transition
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_SOFT_KNEE, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
