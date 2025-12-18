@@ -380,45 +380,97 @@ extern "C" __global__ void UpsampleKernel(
     float resR = 0.0f, resG = 0.0f, resB = 0.0f;
 
     // =========================================================
-    // STEP 1: Tent Filter Upsample from Previous Level (smaller texture)
-    // "작은 놈을 키워서 베이스로 삼는다"
+    // STEP 1: Upsample from Previous Level (smaller texture)
+    // Level 0-4: Separable Gaussian (smoother, prevents text smearing)
+    // Level 5+:  Tent filter (faster, sufficient for atmosphere)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
         float offset = blurOffset + 0.5f;
 
-        float TLr, TLg, TLb, TLa;
-        float Tr, Tg, Tb, Ta;
-        float TRr, TRg, TRb, TRa;
-        float Lr, Lg, Lb, La;
-        float Cr, Cg, Cb, Ca;
-        float Rr, Rg, Rb, Ra;
-        float BLr, BLg, BLb, BLa;
-        float Bor, Bog, Bob, Boa;
-        float BRr, BRg, BRb, BRa;
+        if (levelIndex <= 4) {
+            // =========================================
+            // Separable Gaussian (cross pattern, 9 samples)
+            // Gaussian weights: [1, 4, 6, 4, 1] / 16
+            // =========================================
+            float L2r, L2g, L2b, L2a;  // Left 2
+            float L1r, L1g, L1b, L1a;  // Left 1
+            float Cr, Cg, Cb, Ca;       // Center
+            float R1r, R1g, R1b, R1a;  // Right 1
+            float R2r, R2g, R2b, R2a;  // Right 2
+            float T2r, T2g, T2b, T2a;  // Top 2
+            float T1r, T1g, T1b, T1a;  // Top 1
+            float B1r, B1g, B1b, B1a;  // Bottom 1
+            float B2r, B2g, B2b, B2a;  // Bottom 2
 
-        // 9-tap tent filter on prevLevel (the smaller texture being upscaled)
-        sampleBilinear(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
-        sampleBilinear(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
-        sampleBilinear(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
+            float offset2 = offset * 2.0f;
 
-        sampleBilinear(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
-        sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
-        sampleBilinear(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
+            // Horizontal samples
+            sampleBilinear(prevLevel, u - offset2 * texelX, v, prevWidth, prevHeight, prevPitch, L2r, L2g, L2b, L2a);
+            sampleBilinear(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, L1r, L1g, L1b, L1a);
+            sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
+            sampleBilinear(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, R1r, R1g, R1b, R1a);
+            sampleBilinear(prevLevel, u + offset2 * texelX, v, prevWidth, prevHeight, prevPitch, R2r, R2g, R2b, R2a);
 
-        sampleBilinear(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
-        sampleBilinear(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
-        sampleBilinear(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
+            // Vertical samples (center already sampled)
+            sampleBilinear(prevLevel, u, v - offset2 * texelY, prevWidth, prevHeight, prevPitch, T2r, T2g, T2b, T2a);
+            sampleBilinear(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, T1r, T1g, T1b, T1a);
+            sampleBilinear(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, B1r, B1g, B1b, B1a);
+            sampleBilinear(prevLevel, u, v + offset2 * texelY, prevWidth, prevHeight, prevPitch, B2r, B2g, B2b, B2a);
 
-        // Tent filter: corners=1, edges=2, center=4 (total=16)
-        resR = (TLr + TRr + BLr + BRr) * 1.0f + (Tr + Lr + Rr + Bor) * 2.0f + Cr * 4.0f;
-        resG = (TLg + TRg + BLg + BRg) * 1.0f + (Tg + Lg + Rg + Bog) * 2.0f + Cg * 4.0f;
-        resB = (TLb + TRb + BLb + BRb) * 1.0f + (Tb + Lb + Rb + Bob) * 2.0f + Cb * 4.0f;
+            // Gaussian weights: 1, 4, 6, 4, 1 (sum=16 per axis)
+            // Horizontal blur
+            float hR = L2r * 1.0f + L1r * 4.0f + Cr * 6.0f + R1r * 4.0f + R2r * 1.0f;
+            float hG = L2g * 1.0f + L1g * 4.0f + Cg * 6.0f + R1g * 4.0f + R2g * 1.0f;
+            float hB = L2b * 1.0f + L1b * 4.0f + Cb * 6.0f + R1b * 4.0f + R2b * 1.0f;
 
-        resR /= 16.0f;
-        resG /= 16.0f;
-        resB /= 16.0f;
+            // Vertical blur
+            float vR = T2r * 1.0f + T1r * 4.0f + Cr * 6.0f + B1r * 4.0f + B2r * 1.0f;
+            float vG = T2g * 1.0f + T1g * 4.0f + Cg * 6.0f + B1g * 4.0f + B2g * 1.0f;
+            float vB = T2b * 1.0f + T1b * 4.0f + Cb * 6.0f + B1b * 4.0f + B2b * 1.0f;
+
+            // Combine horizontal and vertical (approximate 2D Gaussian)
+            // Average of both directions, normalized
+            resR = (hR + vR) / 32.0f;
+            resG = (hG + vG) / 32.0f;
+            resB = (hB + vB) / 32.0f;
+        } else {
+            // =========================================
+            // Tent Filter (9-tap, 3x3 pattern)
+            // For deeper levels where speed matters more
+            // =========================================
+            float TLr, TLg, TLb, TLa;
+            float Tr, Tg, Tb, Ta;
+            float TRr, TRg, TRb, TRa;
+            float Lr, Lg, Lb, La;
+            float Cr, Cg, Cb, Ca;
+            float Rr, Rg, Rb, Ra;
+            float BLr, BLg, BLb, BLa;
+            float Bor, Bog, Bob, Boa;
+            float BRr, BRg, BRb, BRa;
+
+            sampleBilinear(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
+            sampleBilinear(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
+            sampleBilinear(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
+
+            sampleBilinear(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
+            sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
+            sampleBilinear(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
+
+            sampleBilinear(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
+            sampleBilinear(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
+            sampleBilinear(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
+
+            // Tent filter: corners=1, edges=2, center=4 (total=16)
+            resR = (TLr + TRr + BLr + BRr) * 1.0f + (Tr + Lr + Rr + Bor) * 2.0f + Cr * 4.0f;
+            resG = (TLg + TRg + BLg + BRg) * 1.0f + (Tg + Lg + Rg + Bog) * 2.0f + Cg * 4.0f;
+            resB = (TLb + TRb + BLb + BRb) * 1.0f + (Tb + Lb + Rb + Bob) * 2.0f + Cb * 4.0f;
+
+            resR /= 16.0f;
+            resG /= 16.0f;
+            resB /= 16.0f;
+        }
     }
 
     // =========================================================
