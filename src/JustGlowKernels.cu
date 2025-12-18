@@ -309,9 +309,143 @@ extern "C" __global__ void PrefilterKernel(
 }
 
 // ============================================================================
+// Gaussian Downsample - Horizontal Pass (9-tap)
+// First pass of separable Gaussian blur for high-quality downsampling
+// Used for Level 0-2 to preserve near-glow detail
+// Weights: [1, 8, 28, 56, 70, 56, 28, 8, 1] / 256
+// ============================================================================
+
+extern "C" __global__ void GaussianDownsampleHKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height, int pitch,
+    float blurOffset)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    float u = ((float)x + 0.5f) / (float)width;
+    float v = ((float)y + 0.5f) / (float)height;
+
+    float texelX = 1.0f / (float)width;
+    float offset = blurOffset;
+    float offset2 = offset * 2.0f;
+    float offset3 = offset * 3.0f;
+    float offset4 = offset * 4.0f;
+
+    // Sample 9 horizontal points
+    float s0r, s0g, s0b, s0a;  // -4
+    float s1r, s1g, s1b, s1a;  // -3
+    float s2r, s2g, s2b, s2a;  // -2
+    float s3r, s3g, s3b, s3a;  // -1
+    float s4r, s4g, s4b, s4a;  // center
+    float s5r, s5g, s5b, s5a;  // +1
+    float s6r, s6g, s6b, s6a;  // +2
+    float s7r, s7g, s7b, s7a;  // +3
+    float s8r, s8g, s8b, s8a;  // +4
+
+    sampleBilinear(input, u - offset4 * texelX, v, width, height, pitch, s0r, s0g, s0b, s0a);
+    sampleBilinear(input, u - offset3 * texelX, v, width, height, pitch, s1r, s1g, s1b, s1a);
+    sampleBilinear(input, u - offset2 * texelX, v, width, height, pitch, s2r, s2g, s2b, s2a);
+    sampleBilinear(input, u - offset * texelX, v, width, height, pitch, s3r, s3g, s3b, s3a);
+    sampleBilinear(input, u, v, width, height, pitch, s4r, s4g, s4b, s4a);
+    sampleBilinear(input, u + offset * texelX, v, width, height, pitch, s5r, s5g, s5b, s5a);
+    sampleBilinear(input, u + offset2 * texelX, v, width, height, pitch, s6r, s6g, s6b, s6a);
+    sampleBilinear(input, u + offset3 * texelX, v, width, height, pitch, s7r, s7g, s7b, s7a);
+    sampleBilinear(input, u + offset4 * texelX, v, width, height, pitch, s8r, s8g, s8b, s8a);
+
+    // Gaussian weights: [1, 8, 28, 56, 70, 56, 28, 8, 1] / 256
+    float outR = (s0r * 1.0f + s1r * 8.0f + s2r * 28.0f + s3r * 56.0f + s4r * 70.0f +
+                  s5r * 56.0f + s6r * 28.0f + s7r * 8.0f + s8r * 1.0f) / 256.0f;
+    float outG = (s0g * 1.0f + s1g * 8.0f + s2g * 28.0f + s3g * 56.0f + s4g * 70.0f +
+                  s5g * 56.0f + s6g * 28.0f + s7g * 8.0f + s8g * 1.0f) / 256.0f;
+    float outB = (s0b * 1.0f + s1b * 8.0f + s2b * 28.0f + s3b * 56.0f + s4b * 70.0f +
+                  s5b * 56.0f + s6b * 28.0f + s7b * 8.0f + s8b * 1.0f) / 256.0f;
+    float outA = (s0a * 1.0f + s1a * 8.0f + s2a * 28.0f + s3a * 56.0f + s4a * 70.0f +
+                  s5a * 56.0f + s6a * 28.0f + s7a * 8.0f + s8a * 1.0f) / 256.0f;
+
+    int outIdx = (y * pitch + x) * 4;
+    output[outIdx + 0] = outR;
+    output[outIdx + 1] = outG;
+    output[outIdx + 2] = outB;
+    output[outIdx + 3] = outA;
+}
+
+// ============================================================================
+// Gaussian Downsample - Vertical Pass with 2x Downsample (9-tap)
+// Second pass of separable Gaussian + actual downsampling
+// Reads from H-blurred source, writes to half-resolution destination
+// ============================================================================
+
+extern "C" __global__ void GaussianDownsampleVKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch,
+    float blurOffset)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    // Map destination to source (2x)
+    float u = ((float)x + 0.5f) / (float)dstWidth;
+    float v = ((float)y + 0.5f) / (float)dstHeight;
+
+    float texelY = 1.0f / (float)srcHeight;
+    float offset = blurOffset;
+    float offset2 = offset * 2.0f;
+    float offset3 = offset * 3.0f;
+    float offset4 = offset * 4.0f;
+
+    // Sample 9 vertical points from H-blurred source
+    float s0r, s0g, s0b, s0a;
+    float s1r, s1g, s1b, s1a;
+    float s2r, s2g, s2b, s2a;
+    float s3r, s3g, s3b, s3a;
+    float s4r, s4g, s4b, s4a;
+    float s5r, s5g, s5b, s5a;
+    float s6r, s6g, s6b, s6a;
+    float s7r, s7g, s7b, s7a;
+    float s8r, s8g, s8b, s8a;
+
+    sampleBilinear(input, u, v - offset4 * texelY, srcWidth, srcHeight, srcPitch, s0r, s0g, s0b, s0a);
+    sampleBilinear(input, u, v - offset3 * texelY, srcWidth, srcHeight, srcPitch, s1r, s1g, s1b, s1a);
+    sampleBilinear(input, u, v - offset2 * texelY, srcWidth, srcHeight, srcPitch, s2r, s2g, s2b, s2a);
+    sampleBilinear(input, u, v - offset * texelY, srcWidth, srcHeight, srcPitch, s3r, s3g, s3b, s3a);
+    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, s4r, s4g, s4b, s4a);
+    sampleBilinear(input, u, v + offset * texelY, srcWidth, srcHeight, srcPitch, s5r, s5g, s5b, s5a);
+    sampleBilinear(input, u, v + offset2 * texelY, srcWidth, srcHeight, srcPitch, s6r, s6g, s6b, s6a);
+    sampleBilinear(input, u, v + offset3 * texelY, srcWidth, srcHeight, srcPitch, s7r, s7g, s7b, s7a);
+    sampleBilinear(input, u, v + offset4 * texelY, srcWidth, srcHeight, srcPitch, s8r, s8g, s8b, s8a);
+
+    // Gaussian weights: [1, 8, 28, 56, 70, 56, 28, 8, 1] / 256
+    float outR = (s0r * 1.0f + s1r * 8.0f + s2r * 28.0f + s3r * 56.0f + s4r * 70.0f +
+                  s5r * 56.0f + s6r * 28.0f + s7r * 8.0f + s8r * 1.0f) / 256.0f;
+    float outG = (s0g * 1.0f + s1g * 8.0f + s2g * 28.0f + s3g * 56.0f + s4g * 70.0f +
+                  s5g * 56.0f + s6g * 28.0f + s7g * 8.0f + s8g * 1.0f) / 256.0f;
+    float outB = (s0b * 1.0f + s1b * 8.0f + s2b * 28.0f + s3b * 56.0f + s4b * 70.0f +
+                  s5b * 56.0f + s6b * 28.0f + s7b * 8.0f + s8b * 1.0f) / 256.0f;
+    float outA = (s0a * 1.0f + s1a * 8.0f + s2a * 28.0f + s3a * 56.0f + s4a * 70.0f +
+                  s5a * 56.0f + s6a * 28.0f + s7a * 8.0f + s8a * 1.0f) / 256.0f;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = outR;
+    output[outIdx + 1] = outG;
+    output[outIdx + 2] = outB;
+    output[outIdx + 3] = outA;
+}
+
+// ============================================================================
 // Downsample Kernel (Dual Kawase 5-Tap with X/+ Rotation)
 // rotationMode: 0 = X (diagonal), 1 = + (cross)
 // Alternating patterns breaks up boxy artifacts -> rounder glow
+// Used for Level 3+ where speed matters more than detail
 // ============================================================================
 
 extern "C" __global__ void DownsampleKernel(

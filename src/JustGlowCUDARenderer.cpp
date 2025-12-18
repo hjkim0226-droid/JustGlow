@@ -101,7 +101,10 @@ JustGlowCUDARenderer::JustGlowCUDARenderer()
     , m_upsampleKernel(nullptr)
     , m_compositeKernel(nullptr)
     , m_horizontalBlurKernel(nullptr)
+    , m_gaussianDownsampleHKernel(nullptr)
+    , m_gaussianDownsampleVKernel(nullptr)
     , m_horizontalTemp{}
+    , m_gaussianDownsampleTemp{}
     , m_currentMipLevels(0)
     , m_currentWidth(0)
     , m_currentHeight(0)
@@ -217,6 +220,18 @@ bool JustGlowCUDARenderer::LoadKernels() {
     }
     CUDA_LOG("HorizontalBlurKernel loaded");
 
+    err = cuModuleGetFunction(&m_gaussianDownsampleHKernel, m_module, "GaussianDownsampleHKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(GaussianDownsampleHKernel)")) {
+        return false;
+    }
+    CUDA_LOG("GaussianDownsampleHKernel loaded");
+
+    err = cuModuleGetFunction(&m_gaussianDownsampleVKernel, m_module, "GaussianDownsampleVKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(GaussianDownsampleVKernel)")) {
+        return false;
+    }
+    CUDA_LOG("GaussianDownsampleVKernel loaded");
+
     return true;
 }
 
@@ -245,6 +260,8 @@ void JustGlowCUDARenderer::Shutdown() {
     m_upsampleKernel = nullptr;
     m_compositeKernel = nullptr;
     m_horizontalBlurKernel = nullptr;
+    m_gaussianDownsampleHKernel = nullptr;
+    m_gaussianDownsampleVKernel = nullptr;
     m_context = nullptr;
     m_stream = nullptr;
     m_initialized = false;
@@ -311,7 +328,7 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
         if (h < 1) h = 1;
     }
 
-    // Allocate horizontal temp buffer for separable Gaussian blur
+    // Allocate horizontal temp buffer for separable Gaussian blur during upsample
     // Size matches level 1 (largest buffer needed for horizontal blur of prevLevel)
     if (levels > 1) {
         m_horizontalTemp.width = m_upsampleChain[1].width;
@@ -327,6 +344,24 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
         }
         CUDA_LOG("HorizontalTemp allocated: %dx%d, %zu bytes",
             m_horizontalTemp.width, m_horizontalTemp.height, m_horizontalTemp.sizeBytes);
+    }
+
+    // Allocate Gaussian downsample temp buffer (for H-blur at source resolution)
+    // Size matches level 0 (largest source resolution for Gaussian downsample)
+    {
+        m_gaussianDownsampleTemp.width = m_mipChain[0].width;
+        m_gaussianDownsampleTemp.height = m_mipChain[0].height;
+        m_gaussianDownsampleTemp.pitch = m_mipChain[0].pitch;
+        m_gaussianDownsampleTemp.sizeBytes = m_mipChain[0].sizeBytes;
+
+        CUresult err = cuMemAlloc(&m_gaussianDownsampleTemp.devicePtr, m_gaussianDownsampleTemp.sizeBytes);
+        if (!CheckCUDAError(err, "cuMemAlloc for GaussianDownsampleTemp")) {
+            CUDA_LOG("ERROR: Failed to allocate GaussianDownsampleTemp buffer");
+            ReleaseMipChain();
+            return false;
+        }
+        CUDA_LOG("GaussianDownsampleTemp allocated: %dx%d, %zu bytes",
+            m_gaussianDownsampleTemp.width, m_gaussianDownsampleTemp.height, m_gaussianDownsampleTemp.sizeBytes);
     }
 
     return true;
@@ -353,6 +388,12 @@ void JustGlowCUDARenderer::ReleaseMipChain() {
     if (m_horizontalTemp.devicePtr) {
         cuMemFree(m_horizontalTemp.devicePtr);
         m_horizontalTemp.devicePtr = 0;
+    }
+
+    // Free Gaussian downsample temp buffer
+    if (m_gaussianDownsampleTemp.devicePtr) {
+        cuMemFree(m_gaussianDownsampleTemp.devicePtr);
+        m_gaussianDownsampleTemp.devicePtr = 0;
     }
 
     m_currentMipLevels = 0;
@@ -504,49 +545,123 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
 // ============================================================================
 
 bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
+    // Hybrid downsample: Gaussian (9-tap separable) for Level 0-2, Kawase for 3+
+    // Gaussian preserves near-glow detail, Kawase is faster for deep levels
+    constexpr int GAUSSIAN_LEVELS = 3;  // Use Gaussian for levels 0, 1, 2
+
     for (int i = 0; i < params.mipLevels - 1; ++i) {
         auto& srcMip = m_mipChain[i];
         auto& dstMip = m_mipChain[i + 1];
 
-        int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-        int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-
-        // Alternate between X (diagonal) and + (cross) patterns
-        // This breaks up boxy artifacts -> rounder glow
-        int rotationMode = i % 2;  // 0=X, 1=+
-
         // Use per-level blurOffset (decays from spread to 1.5px for deeper levels)
         float blurOffset = params.blurOffsets[i];
 
-        CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d, rotation=%s, blurOffset=%.2f",
-            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
-            rotationMode == 0 ? "X" : "+", blurOffset);
+        if (i < GAUSSIAN_LEVELS) {
+            // =========================================
+            // Gaussian 9-tap Separable (2 passes)
+            // Pass 1: Horizontal blur at source resolution
+            // Pass 2: Vertical blur + 2x downsample
+            // =========================================
 
-        int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
-        int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
+            // Pass 1: Horizontal Gaussian blur (src -> temp at src resolution)
+            int hGridX = (srcMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+            int hGridY = (srcMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+            int srcPitchPixels = srcMip.width;
 
-        void* kernelParams[] = {
-            &srcMip.devicePtr,
-            &dstMip.devicePtr,
-            (void*)&srcMip.width,
-            (void*)&srcMip.height,
-            (void*)&srcPitchPixels,
-            (void*)&dstMip.width,
-            (void*)&dstMip.height,
-            (void*)&dstPitchPixels,
-            (void*)&blurOffset,
-            (void*)&rotationMode
-        };
+            CUDA_LOG("Downsample[%d]: Gaussian H-blur %dx%d, blurOffset=%.2f",
+                i, srcMip.width, srcMip.height, blurOffset);
 
-        CUresult err = cuLaunchKernel(
-            m_downsampleKernel,
-            gridX, gridY, 1,
-            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-            0, m_stream,
-            kernelParams, nullptr);
+            void* hBlurParams[] = {
+                &srcMip.devicePtr,
+                &m_gaussianDownsampleTemp.devicePtr,
+                (void*)&srcMip.width,
+                (void*)&srcMip.height,
+                (void*)&srcPitchPixels,
+                (void*)&blurOffset
+            };
 
-        if (!CheckCUDAError(err, "cuLaunchKernel(Downsample)")) {
-            return false;
+            CUresult err = cuLaunchKernel(
+                m_gaussianDownsampleHKernel,
+                hGridX, hGridY, 1,
+                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+                0, m_stream,
+                hBlurParams, nullptr);
+
+            if (!CheckCUDAError(err, "cuLaunchKernel(GaussianDownsampleH)")) {
+                return false;
+            }
+
+            // Pass 2: Vertical Gaussian blur + 2x downsample (temp -> dst)
+            int vGridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+            int vGridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+            int dstPitchPixels = dstMip.width;
+
+            CUDA_LOG("Downsample[%d]: Gaussian V-blur+downsample %dx%d -> %dx%d",
+                i, srcMip.width, srcMip.height, dstMip.width, dstMip.height);
+
+            void* vBlurParams[] = {
+                &m_gaussianDownsampleTemp.devicePtr,
+                &dstMip.devicePtr,
+                (void*)&srcMip.width,
+                (void*)&srcMip.height,
+                (void*)&srcPitchPixels,
+                (void*)&dstMip.width,
+                (void*)&dstMip.height,
+                (void*)&dstPitchPixels,
+                (void*)&blurOffset
+            };
+
+            err = cuLaunchKernel(
+                m_gaussianDownsampleVKernel,
+                vGridX, vGridY, 1,
+                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+                0, m_stream,
+                vBlurParams, nullptr);
+
+            if (!CheckCUDAError(err, "cuLaunchKernel(GaussianDownsampleV)")) {
+                return false;
+            }
+        } else {
+            // =========================================
+            // Kawase 5-tap (single pass, faster)
+            // =========================================
+            int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+            int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+            // Alternate between X (diagonal) and + (cross) patterns
+            // This breaks up boxy artifacts -> rounder glow
+            int rotationMode = i % 2;  // 0=X, 1=+
+
+            CUDA_LOG("Downsample[%d]: Kawase %dx%d -> %dx%d, rotation=%s, blurOffset=%.2f",
+                i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
+                rotationMode == 0 ? "X" : "+", blurOffset);
+
+            int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
+            int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
+
+            void* kernelParams[] = {
+                &srcMip.devicePtr,
+                &dstMip.devicePtr,
+                (void*)&srcMip.width,
+                (void*)&srcMip.height,
+                (void*)&srcPitchPixels,
+                (void*)&dstMip.width,
+                (void*)&dstMip.height,
+                (void*)&dstPitchPixels,
+                (void*)&blurOffset,
+                (void*)&rotationMode
+            };
+
+            CUresult err = cuLaunchKernel(
+                m_downsampleKernel,
+                gridX, gridY, 1,
+                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+                0, m_stream,
+                kernelParams, nullptr);
+
+            if (!CheckCUDAError(err, "cuLaunchKernel(Downsample)")) {
+                return false;
+            }
         }
     }
 
