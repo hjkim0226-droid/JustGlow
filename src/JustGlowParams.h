@@ -176,11 +176,12 @@ inline float GetLevelBlurOffset(int level, float spreadOffset) {
 
 // Render parameters collected from AE params
 struct RenderParams {
-    // Core 4 computed values (The Secret Sauce)
+    // Core computed values
     float   activeLimit;        // Radius -> MIP level limit (0 to mipLevels)
-    float   blurOffsets[MAX_MIP_LEVELS]; // Spread -> per-level pixel offset (decays from spread to 1.5px)
-    float   decayK;             // Falloff -> decay constant (0.2-3.0)
-    float   exposure;           // Intensity -> HDR exposure pow(2, intensity)
+    float   blurOffsets[MAX_MIP_LEVELS]; // Spread -> per-level pixel offset
+    float   decayK;             // Falloff -> decay rate per level
+    float   exposure;           // Exposure -> brightness multiplier
+    float   level1Weight;       // Intensity -> Level 1 starting weight (0.5-1.0)
     int     falloffType;        // Decay curve type (0=Exponential, 1=InverseSquare, 2=Linear)
 
     // Threshold

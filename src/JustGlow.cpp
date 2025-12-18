@@ -268,52 +268,10 @@ PF_Err ParamsSetup(
     PF_ParamDef def;
 
     // ===========================================
-    // Core 4 Parameters (The Big Four)
+    // Core Parameters (New Order)
     // ===========================================
 
-    // Radius (0-100) - Controls how far glow reaches (active MIP levels)
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX(
-        "Radius",
-        Ranges::RadiusMin,
-        Ranges::RadiusMax,
-        Ranges::RadiusMin,
-        Ranges::RadiusMax,
-        Defaults::Radius,
-        PF_Precision_TENTHS,
-        0,
-        0,
-        DISK_ID_RADIUS);
-
-    // Spread (0-100) - Controls blur softness (offset 1.0-3.5px)
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX(
-        "Spread",
-        Ranges::SpreadMin,
-        Ranges::SpreadMax,
-        Ranges::SpreadMin,
-        Ranges::SpreadMax,
-        Defaults::Spread,
-        PF_Precision_TENTHS,
-        0,
-        0,
-        DISK_ID_SPREAD);
-
-    // Falloff (0-100) - Controls decay slope (k=0.2-3.0, higher = faster decay)
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX(
-        "Falloff",
-        Ranges::FalloffMin,
-        Ranges::FalloffMax,
-        Ranges::FalloffMin,
-        Ranges::FalloffMax,
-        Defaults::Falloff,
-        PF_Precision_TENTHS,
-        0,
-        0,
-        DISK_ID_FALLOFF);
-
-    // Intensity (0-10) - HDR exposure pow(2, intensity)
+    // Intensity (0-100%) - Level 1 starting weight (core concentration)
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
         "Intensity",
@@ -327,9 +285,61 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_INTENSITY);
 
-    // ===========================================
-    // Threshold
-    // ===========================================
+    // Exposure (0-50) - Brightness multiplier
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Exposure",
+        Ranges::ExposureMin,
+        Ranges::ExposureMax,
+        Ranges::ExposureMin,
+        Ranges::ExposureMax,
+        Defaults::Exposure,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_EXPOSURE);
+
+    // Radius (0-200) - Controls how far glow reaches (active MIP levels)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Radius",
+        Ranges::RadiusMin,
+        Ranges::RadiusMax,
+        Ranges::RadiusMin,
+        Ranges::RadiusMax,
+        Defaults::Radius,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_RADIUS);
+
+    // Spread (0-100) - Controls blur softness (offset 1.1-2.5px)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Spread",
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Defaults::Spread,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_SPREAD);
+
+    // Falloff (0-100) - Decay rate per level
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Falloff",
+        Ranges::FalloffMin,
+        Ranges::FalloffMax,
+        Ranges::FalloffMin,
+        Ranges::FalloffMax,
+        Defaults::Falloff,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_FALLOFF);
 
     // Threshold (0-100%)
     AEFX_CLR_STRUCT(def);
@@ -750,10 +760,22 @@ PF_Err PreRender(
         PF_ParamDef param;
 
         // ===========================================
-        // Core 4 Parameters
+        // Core Parameters (New Order)
         // ===========================================
 
-        // Radius (0-100)
+        // Intensity (0-100%) - Level 1 starting weight
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_INTENSITY, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->intensity = param.u.fs_d.value;
+
+        // Exposure (0-50) - Brightness multiplier
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_EXPOSURE, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->exposure = param.u.fs_d.value;
+
+        // Radius (0-200)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_RADIUS, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
@@ -770,12 +792,6 @@ PF_Err PreRender(
         PF_CHECKOUT_PARAM(in_data, PARAM_FALLOFF, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->falloff = param.u.fs_d.value;
-
-        // Intensity (0-10)
-        AEFX_CLR_STRUCT(param);
-        PF_CHECKOUT_PARAM(in_data, PARAM_INTENSITY, in_data->current_time,
-            in_data->time_step, in_data->time_scale, &param);
-        preRenderData->intensity = param.u.fs_d.value;
 
         // ===========================================
         // Threshold
@@ -883,12 +899,12 @@ PF_Err PreRender(
             preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset);
         }
 
-        // decayK: Falloff -> decay constant (0.2-3.0, higher = steeper)
+        // decayK: Falloff -> decay rate per level
         preRenderData->decayK = 0.2f + (preRenderData->falloff / 100.0f) * 2.8f;
 
-        // exposure: Intensity -> Linear exposure
-        // Intensity 0 = 0 (no glow), 1 = 1x, 5 = 5x, 10 = 10x
-        preRenderData->exposure = preRenderData->intensity;
+        // level1Weight: Intensity -> Level 1 starting weight (0-1)
+        // Intensity 0% = 0.5 (spread), Intensity 100% = 1.0 (core)
+        preRenderData->level1Weight = 0.5f + (preRenderData->intensity / 100.0f) * 0.5f;
     }
 
     // Set up output with expanded rect for glow spread
@@ -1016,6 +1032,7 @@ PF_Err SmartRender(
                     }
                     rp.decayK = preRenderData->decayK;
                     rp.exposure = preRenderData->exposure;
+                    rp.level1Weight = preRenderData->level1Weight;
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);
 
                     // Threshold

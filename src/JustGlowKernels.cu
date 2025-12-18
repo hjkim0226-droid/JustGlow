@@ -42,38 +42,24 @@ __device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) 
     return t * t * (3.0f - 2.0f * t);
 }
 
-// Calculate physical weight based on falloff type
-// Now using ACTUAL PIXEL DISTANCE instead of level index
-// This gives physically accurate, smooth falloff
-// falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
-__device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType) {
-    // Convert level to distance: Level 0 = 0 (100%), Level 1+ decays
-    // Level 0: 2^0-1 = 0 → 100%
-    // Level 1: 2^1-1 = 1
-    // Level 2: 2^2-1 = 3
-    // Level 3: 2^3-1 = 7
-    float distance = powf(2.0f, level) - 1.0f;
+// Calculate weight based on level and intensity
+// Level 0: always 100%
+// Level 1: level1Weight (controlled by Intensity parameter, 50%-100%)
+// Level 2+: level1Weight * pow(decayRate, level-1)
+// decayRate is derived from Falloff parameter
+__device__ __forceinline__ float calculatePhysicalWeight(float level, float decayK, int falloffType, float level1Weight) {
+    // Level 0 is always 100%
+    if (level < 0.5f) return 1.0f;
 
-    // Scale decayK for distance-based calculation
-    // Original decayK range 0.2-3.0, scale for faster decay
-    float k = decayK * 0.08f;
+    // Decay rate per level (from Falloff)
+    // decayK range 0.2-3.0 -> decayRate 0.95-0.5
+    float decayRate = 1.0f - (decayK - 0.2f) / 2.8f * 0.5f;  // 0.5 ~ 1.0
 
-    switch (falloffType) {
-        case 0:  // Exponential - Natural light falloff
-            // pow(0.5, distance * k) - smooth exponential decay
-            return powf(0.5f, distance * k);
+    // Level 1 starts at level1Weight, then decays
+    // weight = level1Weight * pow(decayRate, level - 1)
+    float weight = level1Weight * powf(decayRate, level - 1.0f);
 
-        case 1:  // Inverse Square - Realistic VFX (physical light)
-            // 1 / (1 + d*k) - inverse falloff
-            return 1.0f / (1.0f + distance * k);
-
-        case 2:  // Linear - Soft/Foggy
-            // max(0, 1 - d*k*0.01) - uniform decay
-            return fmaxf(0.0f, 1.0f - distance * k * 0.01f);
-
-        default:
-            return powf(0.5f, distance * k);
-    }
+    return fmaxf(0.0f, weight);
 }
 
 // ============================================================================
@@ -446,7 +432,7 @@ extern "C" __global__ void UpsampleKernel(
     int levelIndex,
     float activeLimit,
     float decayK,
-    float exposure,
+    float level1Weight,
     int falloffType,
     int blurMode)  // 0=Tent (3x3), 1=Vertical Gaussian (5-tap)
 {
@@ -542,8 +528,8 @@ extern "C" __global__ void UpsampleKernel(
     sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, currR, currG, currB, currA);
 
     // Weight calculation for current level
-    // A. Physical decay weight (The Shape) - now using sigmoid curve
-    float physicalWeight = calculatePhysicalWeight((float)levelIndex, decayK, falloffType);
+    // A. Physical decay weight (The Shape) - Level 0=100%, Level 1=level1Weight, then decay
+    float physicalWeight = calculatePhysicalWeight((float)levelIndex, decayK, falloffType, level1Weight);
 
     // B. Distance fade weight (The Cutoff)
     // Smooth fade out for levels beyond activeLimit (controlled by Radius)
@@ -657,9 +643,9 @@ extern "C" __global__ void CompositeKernel(
         float normB = resB * invMax;
 
         // Blend toward white based on overbright amount
-        // Uses soft curve: overbright/(overbright+10) → very gradual desaturation
+        // Uses soft curve: overbright/(overbright+1000) → barely noticeable desaturation
         float overbright = maxVal - 1.0f;
-        float blendFactor = overbright / (overbright + 10.0f);
+        float blendFactor = overbright / (overbright + 1000.0f);
 
         resR = normR + blendFactor * (1.0f - normR);
         resG = normG + blendFactor * (1.0f - normG);

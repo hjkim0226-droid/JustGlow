@@ -75,13 +75,12 @@ constexpr int PRERENDER_MAX_MIP_LEVELS = 12;
 enum ParamID {
     PARAM_INPUT = 0,
 
-    // === Core 4 Parameters (The Big Four) ===
-    PARAM_RADIUS,               // Glow reach distance (0-100) → controls active MIP levels
-    PARAM_SPREAD,               // Blur softness (0-100) → controls blur offset (max 3.5px)
-    PARAM_FALLOFF,              // Decay slope (0-100) → controls exponential decay k
-    PARAM_INTENSITY,            // Glow power (0-10) → Linear exposure multiplier
-
-    // === Threshold ===
+    // === Core Parameters (New Order) ===
+    PARAM_INTENSITY,            // Level 1 starting weight (0-100%) → core concentration
+    PARAM_EXPOSURE,             // Brightness multiplier (0-50) → final glow brightness
+    PARAM_RADIUS,               // Glow reach distance (0-200) → controls active MIP levels
+    PARAM_SPREAD,               // Blur softness (0-100) → controls blur offset (1.1-2.5px)
+    PARAM_FALLOFF,              // Decay rate per level (0-100) → weight decay
     PARAM_THRESHOLD,            // Brightness threshold (0-100%)
     PARAM_SOFT_KNEE,            // Soft knee width (0-100%)
 
@@ -105,10 +104,11 @@ enum ParamID {
 
 // Parameter disk IDs (for saving/loading)
 enum ParamDiskID {
-    DISK_ID_RADIUS = 1,
+    DISK_ID_INTENSITY = 1,
+    DISK_ID_EXPOSURE,
+    DISK_ID_RADIUS,
     DISK_ID_SPREAD,
     DISK_ID_FALLOFF,
-    DISK_ID_INTENSITY,
     DISK_ID_THRESHOLD,
     DISK_ID_SOFT_KNEE,
     DISK_ID_QUALITY,
@@ -153,13 +153,12 @@ enum class CompositeMode : int {
 // ============================================================================
 
 namespace Defaults {
-    // Core 4 Parameters
+    // Core Parameters (New Order)
+    constexpr float Intensity       = 100.0f;   // 100% = Level 1 starts at 100% weight
+    constexpr float Exposure        = 10.0f;    // 10x brightness multiplier
     constexpr float Radius          = 100.0f;   // 100% = all MIP levels active
-    constexpr float Spread          = 50.0f;    // 50% = 2.25px blur offset (balanced)
-    constexpr float Falloff         = 50.0f;    // 50% = k=1.6 (balanced decay)
-    constexpr float Intensity       = 1.0f;     // 1.0 = 2x brightness (pow(2,1))
-
-    // Threshold
+    constexpr float Spread          = 50.0f;    // 50% = balanced blur offset
+    constexpr float Falloff         = 50.0f;    // 50% = balanced decay rate
     constexpr float Threshold       = 70.0f;    // 70% - visible effect on application
     constexpr float SoftKnee        = 50.0f;    // 50%
 
@@ -179,18 +178,21 @@ namespace Defaults {
 }
 
 namespace Ranges {
-    // Core 4 Parameters
+    // Core Parameters (New Order)
+    constexpr float IntensityMin    = 0.0f;
+    constexpr float IntensityMax    = 100.0f;   // Level 1 weight: 0% = spread, 100% = core
+
+    constexpr float ExposureMin     = 0.0f;
+    constexpr float ExposureMax     = 50.0f;    // Linear: 0 = no glow, 50 = 50x
+
     constexpr float RadiusMin       = 0.0f;
     constexpr float RadiusMax       = 200.0f;   // Extended range for wider glow
 
     constexpr float SpreadMin       = 0.0f;
-    constexpr float SpreadMax       = 100.0f;   // Maps to 1.0-3.5px offset
+    constexpr float SpreadMax       = 100.0f;   // Maps to 1.1-2.5px offset
 
     constexpr float FalloffMin      = 0.0f;
-    constexpr float FalloffMax      = 100.0f;   // Maps to k=0.2-3.0
-
-    constexpr float IntensityMin    = 0.0f;
-    constexpr float IntensityMax    = 10.0f;    // Linear: 0 = no glow, 10 = 10x
+    constexpr float FalloffMax      = 100.0f;   // Decay rate per level
 
     // Threshold & Soft Knee
     constexpr float ThresholdMin    = 0.0f;
@@ -229,15 +231,14 @@ struct JustGlowGPUData {
 
 // Pre-render data passed to SmartRender
 struct JustGlowPreRenderData {
-    // Core 4 Parameters
-    float radius;       // 0-100: controls active MIP levels
-    float spread;       // 0-100: controls blur offset (1.0-3.5px)
-    float falloff;      // 0-100: controls decay k (0.2-3.0)
-    float intensity;    // 0-10: Linear exposure (0 = no glow)
-
-    // Threshold
-    float threshold;
-    float softKnee;
+    // Core Parameters (New Order)
+    float intensity;    // 0-100: Level 1 starting weight (core concentration)
+    float exposure;     // 0-50: Brightness multiplier (final glow brightness)
+    float radius;       // 0-200: controls active MIP levels
+    float spread;       // 0-100: controls blur offset (1.1-2.5px)
+    float falloff;      // 0-100: decay rate per level
+    float threshold;    // 0-100: brightness threshold
+    float softKnee;     // 0-100: soft knee width
 
     // Blur Options
     BlurQuality quality;
@@ -257,9 +258,9 @@ struct JustGlowPreRenderData {
     // Computed values
     int mipLevels;          // Based on quality setting
     float activeLimit;      // Radius mapped to MIP level limit
-    float blurOffsets[PRERENDER_MAX_MIP_LEVELS]; // Spread -> per-level offset (decays to 1.5px)
-    float decayK;           // Falloff mapped to decay constant (0.2-3.0)
-    float exposure;         // Linear: same as intensity (0 = no glow)
+    float blurOffsets[PRERENDER_MAX_MIP_LEVELS]; // Spread -> per-level offset
+    float decayK;           // Falloff mapped to decay rate
+    float level1Weight;     // Intensity mapped to Level 1 starting weight (0-1)
 };
 
 // ============================================================================

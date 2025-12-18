@@ -653,7 +653,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
                 (void*)&levelIndex,
                 (void*)&params.activeLimit,
                 (void*)&params.decayK,
-                (void*)&params.exposure,
+                (void*)&params.level1Weight,
                 (void*)&params.falloffType,
                 (void*)&blurMode
             };
@@ -693,7 +693,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
                 (void*)&levelIndex,
                 (void*)&params.activeLimit,
                 (void*)&params.decayK,
-                (void*)&params.exposure,
+                (void*)&params.level1Weight,
                 (void*)&params.falloffType,
                 (void*)&blurMode
             };
