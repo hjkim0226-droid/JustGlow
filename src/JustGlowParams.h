@@ -201,6 +201,8 @@ struct RenderParams {
     float   anamorphicAngle;
     int     compositeMode;      // CompositeMode enum value (0=Add, 1=Screen, 2=Overlay)
     bool    hdrMode;
+    bool    linearize;          // Enable sRGB to Linear conversion
+    int     inputProfile;       // Input color profile (1=sRGB, 2=Rec709, 3=Gamma2.2)
 
     // Debug
     int     debugView;          // DebugViewMode enum value

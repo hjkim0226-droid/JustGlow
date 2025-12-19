@@ -98,6 +98,8 @@ enum ParamID {
     PARAM_ANAMORPHIC_ANGLE,     // Anamorphic direction angle
     PARAM_COMPOSITE_MODE,       // Composite mode (Add/Screen/Overlay)
     PARAM_HDR_MODE,             // Enable Karis Average for HDR
+    PARAM_LINEARIZE,            // Enable Linear conversion
+    PARAM_INPUT_PROFILE,        // Input color profile (sRGB/Rec709/Gamma2.2)
 
     // === Debug Options ===
     PARAM_DEBUG_VIEW,           // Debug view mode (Final/Prefilter/Down0-6/Up0-6/GlowOnly)
@@ -125,6 +127,8 @@ enum ParamDiskID {
     DISK_ID_ANAMORPHIC_ANGLE,
     DISK_ID_COMPOSITE_MODE,
     DISK_ID_HDR_MODE,
+    DISK_ID_LINEARIZE,
+    DISK_ID_INPUT_PROFILE,
     DISK_ID_DEBUG_VIEW,
     DISK_ID_SOURCE_OPACITY,
     DISK_ID_GLOW_OPACITY
@@ -154,6 +158,13 @@ enum class CompositeMode : int {
     Add = 1,        // Additive blending (brightest)
     Screen = 2,     // Screen blending (natural)
     Overlay = 3     // Overlay blending (contrast)
+};
+
+// Input color profile (gamma curve for linearization)
+enum class InputProfile : int {
+    sRGB = 1,       // Standard sRGB (gamma ~2.2 with linear toe)
+    Rec709 = 2,     // Rec.709 (gamma 2.4)
+    Gamma22 = 3     // Pure gamma 2.2
 };
 
 // Debug view modes for visualizing pipeline stages
@@ -204,6 +215,8 @@ namespace Defaults {
     constexpr float AnamorphicAngle = 0.0f;     // Horizontal
     constexpr int   CompositeMode   = static_cast<int>(::CompositeMode::Add);
     constexpr bool  HDRMode         = true;
+    constexpr bool  Linearize       = false;  // OFF by default (simpler, no alpha issues)
+    constexpr int   InputProfile    = static_cast<int>(::InputProfile::sRGB);
 
     // Debug
     constexpr int   DebugView       = static_cast<int>(DebugViewMode::Final);
@@ -292,6 +305,8 @@ struct JustGlowPreRenderData {
     float anamorphicAngle;
     CompositeMode compositeMode;
     bool hdrMode;
+    bool linearize;         // Enable sRGB to Linear conversion
+    InputProfile inputProfile;  // Input color profile (sRGB/Rec709/Gamma2.2)
 
     // Debug
     DebugViewMode debugView;

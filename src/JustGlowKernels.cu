@@ -66,6 +66,56 @@ __device__ __forceinline__ float linearToSrgb(float c) {
         : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
 }
 
+// ============================================================================
+// Additional Color Profile Conversions
+// ============================================================================
+
+// Rec.709 to Linear (BT.709 gamma ~2.4)
+__device__ __forceinline__ float rec709ToLinear(float c) {
+    if (c <= 0.0f) return 0.0f;
+    return (c < 0.081f)
+        ? c / 4.5f
+        : powf((c + 0.099f) / 1.099f, 1.0f / 0.45f);
+}
+
+// Linear to Rec.709
+__device__ __forceinline__ float linearToRec709(float c) {
+    if (c <= 0.0f) return 0.0f;
+    return (c < 0.018f)
+        ? c * 4.5f
+        : 1.099f * powf(c, 0.45f) - 0.099f;
+}
+
+// Gamma 2.2 to Linear (pure power function)
+__device__ __forceinline__ float gamma22ToLinear(float c) {
+    if (c <= 0.0f) return 0.0f;
+    return powf(c, 2.2f);
+}
+
+// Linear to Gamma 2.2
+__device__ __forceinline__ float linearToGamma22(float c) {
+    if (c <= 0.0f) return 0.0f;
+    return powf(c, 1.0f / 2.2f);
+}
+
+// Generic toLinear based on profile (1=sRGB, 2=Rec709, 3=Gamma2.2)
+__device__ __forceinline__ float toLinear(float c, int profile) {
+    switch (profile) {
+        case 2:  return rec709ToLinear(c);
+        case 3:  return gamma22ToLinear(c);
+        default: return srgbToLinear(c);  // 1 or default = sRGB
+    }
+}
+
+// Generic fromLinear based on profile
+__device__ __forceinline__ float fromLinear(float c, int profile) {
+    switch (profile) {
+        case 2:  return linearToRec709(c);
+        case 3:  return linearToGamma22(c);
+        default: return linearToSrgb(c);  // 1 or default = sRGB
+    }
+}
+
 // Unpremultiply alpha (AE uses premultiplied alpha)
 // Converts from premultiplied to straight alpha for correct threshold calculation
 __device__ __forceinline__ void unpremultiply(float& r, float& g, float& b, float a) {
@@ -289,7 +339,7 @@ extern "C" __global__ void PrefilterKernel(
     float threshold, float softKnee, float intensity,
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
-    float preserveColor, int useHDR)
+    float preserveColor, int useHDR, int useLinear, int inputProfile)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -358,55 +408,63 @@ extern "C" __global__ void PrefilterKernel(
     sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
 
     // =========================================
-    // Alpha-Weighted Normalization (in sRGB space)
-    // Accumulate RGB and Alpha separately, then divide at the end
-    // This prevents hot edges from low-alpha pixel amplification
+    // Weighted Average (kernel weights only)
+    // Input is premultiplied, so RGB already contains alpha info
     // =========================================
-    float sumR, sumG, sumB, sumA;
+    (void)useHDR;  // Suppress unused parameter warning
 
     // Kernel weights for 13-tap sampling:
     // Center G: 0.125, Inner DEIJ: 0.03125 each, Outer cross BFHL: 0.015625 each, Outer corners ACKM: 0.0078125 each
-    // Note: Karis Average removed - caused artifacts on transparent backgrounds
-    //       (transparent pixels got maximum weight, polluting color average)
     const float wCenter = 0.125f;
     const float wInner = 0.03125f;
     const float wCross = 0.015625f;
     const float wCorner = 0.0078125f;
 
-    // Simple alpha-weighted average (useHDR parameter kept for API compatibility but ignored)
-    // This properly handles premultiplied alpha without Karis-related artifacts
-    (void)useHDR;  // Suppress unused parameter warning
-
-    sumR = Gr * wCenter + (Dr + Er + Ir + Jr) * wInner + (Br + Fr + Hr + Lr) * wCross + (Ar + Cr + Kr + Mr) * wCorner;
-    sumG = Gg * wCenter + (Dg + Eg + Ig + Jg) * wInner + (Bg + Fg + Hg + Lg) * wCross + (Ag + Cg + Kg + Mg) * wCorner;
-    sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
-    sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
+    // Simple weighted average of premultiplied RGB
+    float sumR = Gr * wCenter + (Dr + Er + Ir + Jr) * wInner + (Br + Fr + Hr + Lr) * wCross + (Ar + Cr + Kr + Mr) * wCorner;
+    float sumG = Gg * wCenter + (Dg + Eg + Ig + Jg) * wInner + (Bg + Fg + Hg + Lg) * wCross + (Ag + Cg + Kg + Mg) * wCorner;
+    float sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
+    float sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
 
     // =========================================
-    // Final Unpremultiply: divide accumulated RGB by accumulated Alpha
-    // This is the industry-standard approach - noise cancels out before division
+    // Color Space Conversion
+    // OFF: Premultiplied sRGB/Rec709/Gamma2.2 유지
+    // ON:  Unmult → Input Profile→Linear → Premult
+    // Threshold는 항상 Premultiplied 상태에서 적용 (통일)
+    // inputProfile: 1=sRGB, 2=Rec709, 3=Gamma2.2
     // =========================================
     float resR, resG, resB;
-    if (sumA > 0.001f) {
-        resR = sumR / sumA;
-        resG = sumG / sumA;
-        resB = sumB / sumA;
+
+    if (useLinear) {
+        // Step 1: Unpremultiply
+        float straightR, straightG, straightB;
+        if (sumA > 0.001f) {
+            straightR = sumR / sumA;
+            straightG = sumG / sumA;
+            straightB = sumB / sumA;
+        } else {
+            straightR = 0.0f;
+            straightG = 0.0f;
+            straightB = 0.0f;
+        }
+
+        // Step 2: Input Profile → Linear
+        straightR = toLinear(straightR, inputProfile);
+        straightG = toLinear(straightG, inputProfile);
+        straightB = toLinear(straightB, inputProfile);
+
+        // Step 3: Premultiply
+        resR = straightR * sumA;
+        resG = straightG * sumA;
+        resB = straightB * sumA;
     } else {
-        resR = 0.0f;
-        resG = 0.0f;
-        resB = 0.0f;
+        // No conversion: stay in Premultiplied (sRGB/Rec709/Gamma2.2)
+        resR = sumR;
+        resG = sumG;
+        resB = sumB;
     }
 
-    // =========================================
-    // Convert sRGB to Linear AFTER unpremultiply
-    // sRGB gamma is non-linear, so conversion must happen on unpremultiplied values
-    // linearize(RGB * alpha) ≠ linearize(RGB) * alpha
-    // =========================================
-    resR = srgbToLinear(resR);
-    resG = srgbToLinear(resG);
-    resB = srgbToLinear(resB);
-
-    // Apply soft threshold (now in Linear space)
+    // Soft threshold on Premultiplied (통일된 위치)
     softThreshold(resR, resG, resB, threshold, softKnee);
 
     // Write output
@@ -414,7 +472,7 @@ extern "C" __global__ void PrefilterKernel(
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = 1.0f;
+    output[outIdx + 3] = sumA;
 }
 
 // ============================================================================
@@ -887,7 +945,9 @@ extern "C" __global__ void DebugOutputKernel(
     float exposure,
     float sourceOpacity,    // 0-1
     float glowOpacity,      // 0-2
-    int compositeMode)
+    int compositeMode,
+    int useLinear,          // Enable sRGB to Linear conversion
+    int inputProfile)       // 1=sRGB, 2=Rec709, 3=Gamma2.2
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -911,10 +971,17 @@ extern "C" __global__ void DebugOutputKernel(
         origB = original[origIdx + 2];
         origA = original[origIdx + 3];
 
-        // Convert original from sRGB to Linear for correct compositing
-        origR = srgbToLinear(origR);
-        origG = srgbToLinear(origG);
-        origB = srgbToLinear(origB);
+        if (useLinear) {
+            // Convert original from Premultiplied Input Profile to Premultiplied Linear
+            // VFX rule: Unpremult → Input Profile→Linear → Premult
+            if (origA > 0.001f) {
+                float invA = 1.0f / origA;
+                origR = toLinear(origR * invA, inputProfile) * origA;
+                origG = toLinear(origG * invA, inputProfile) * origA;
+                origB = toLinear(origB * invA, inputProfile) * origA;
+            }
+        }
+        // When useLinear=false, original stays in Premultiplied (sRGB/Rec709/Gamma2.2)
     }
 
     float u = ((float)x + 0.5f) / (float)width;
@@ -925,7 +992,7 @@ extern "C" __global__ void DebugOutputKernel(
     // debugMode: 1=Final, 2=Prefilter, 3-8=Down1-6, 9-15=Up0-6, 16=GlowOnly
     if (debugMode == 1) {
         // Final: normal composite with opacity controls
-        // Glow is already in Linear space (converted in Prefilter)
+        // Color space: Premultiplied Linear (if useLinear) or Premultiplied sRGB (if not)
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
@@ -934,12 +1001,12 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Apply source opacity (original is already in Linear)
+        // Apply source opacity
         float srcR = origR * sourceOpacity;
         float srcG = origG * sourceOpacity;
         float srcB = origB * sourceOpacity;
 
-        // Composite in Linear space for physically correct light blending
+        // Composite (Add mode works on premultiplied values)
         switch (compositeMode) {
             case 0: // Add
                 resR = srcR + glowR;
@@ -967,7 +1034,8 @@ extern "C" __global__ void DebugOutputKernel(
         resA = fmaxf(origA * sourceOpacity, clampf(glowLum, 0.0f, 1.0f));
     }
     else if (debugMode == 16) {
-        // GlowOnly: just glow with exposure and opacity (already in Linear)
+        // GlowOnly: just glow with exposure and opacity
+        // Color space: Premultiplied Linear (if useLinear) or Premultiplied sRGB (if not)
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
@@ -1040,11 +1108,19 @@ extern "C" __global__ void DebugOutputKernel(
     }
 
     // =========================================
-    // Convert Linear to sRGB for output
+    // Output Color Space Conversion
     // =========================================
-    resR = linearToSrgb(resR);
-    resG = linearToSrgb(resG);
-    resB = linearToSrgb(resB);
+    if (useLinear) {
+        // Convert from Premultiplied Linear to Premultiplied Input Profile
+        // VFX rule: Unpremult → Linear→Input Profile → Premult
+        if (resA > 0.001f) {
+            float invA = 1.0f / resA;
+            resR = fromLinear(resR * invA, inputProfile) * resA;
+            resG = fromLinear(resG * invA, inputProfile) * resA;
+            resB = fromLinear(resB * invA, inputProfile) * resA;
+        }
+    }
+    // When useLinear=false, output stays in Premultiplied (sRGB/Rec709/Gamma2.2)
 
     int outIdx = (y * outputPitch + x) * 4;
     output[outIdx + 0] = resR;

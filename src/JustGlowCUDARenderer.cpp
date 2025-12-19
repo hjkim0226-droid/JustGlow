@@ -538,6 +538,8 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
     float prefilterIntensity = 1.0f;
     // Convert bool to int for CUDA kernel (bool pointer would be wrong size)
     int useHDR = params.hdrMode ? 1 : 0;
+    int useLinear = params.linearize ? 1 : 0;
+    int inputProfile = params.inputProfile;  // 1=sRGB, 2=Rec709, 3=Gamma2.2
 
     // srcPitch is for the input buffer (AE's input layer)
     // Use actual srcPitch from AE (may include padding)
@@ -564,7 +566,9 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
         (void*)&colorTempG,
         (void*)&colorTempB,
         (void*)&params.preserveColor,
-        (void*)&useHDR
+        (void*)&useHDR,
+        (void*)&useLinear,
+        (void*)&inputProfile
     };
 
     CUresult err = cuLaunchKernel(
@@ -861,6 +865,9 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         params.width, params.height, params.inputWidth, params.inputHeight,
         params.sourceOpacity, params.glowOpacity);
 
+    int useLinear = params.linearize ? 1 : 0;
+    int inputProfile = params.inputProfile;  // 1=sRGB, 2=Rec709, 3=Gamma2.2
+
     void* kernelParams[] = {
         &original,
         &debugBuffer,
@@ -882,7 +889,9 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&params.exposure,
         (void*)&params.sourceOpacity,
         (void*)&params.glowOpacity,
-        (void*)&params.compositeMode
+        (void*)&params.compositeMode,
+        (void*)&useLinear,
+        (void*)&inputProfile
     };
 
     CUresult err = cuLaunchKernel(

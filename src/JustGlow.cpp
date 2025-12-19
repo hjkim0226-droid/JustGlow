@@ -476,6 +476,24 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_HDR_MODE);
 
+    // Linearize
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_CHECKBOX(
+        "Linearize",
+        "Convert input to Linear (enable when AE Linearize is OFF)",
+        Defaults::Linearize ? 1 : 0,
+        0,
+        DISK_ID_LINEARIZE);
+
+    // Input Profile (appears when Linearize is ON)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_POPUP(
+        "Input Profile",
+        3,  // Number of choices
+        Defaults::InputProfile,
+        "sRGB|Rec.709|Gamma 2.2",
+        DISK_ID_INPUT_PROFILE);
+
     // ===========================================
     // Debug Options
     // ===========================================
@@ -935,6 +953,18 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->hdrMode = (param.u.bd.value != 0);
 
+        // Linearize
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_LINEARIZE, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->linearize = (param.u.bd.value != 0);
+
+        // Input Profile (only used when Linearize is ON)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_INPUT_PROFILE, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->inputProfile = static_cast<InputProfile>(param.u.pd.value);
+
         // ===========================================
         // Debug Options
         // ===========================================
@@ -1133,6 +1163,8 @@ PF_Err SmartRender(
                     rp.anamorphicAngle = preRenderData->anamorphicAngle;
                     rp.compositeMode = static_cast<int>(preRenderData->compositeMode);
                     rp.hdrMode = preRenderData->hdrMode;
+                    rp.linearize = preRenderData->linearize;
+                    rp.inputProfile = static_cast<int>(preRenderData->inputProfile);
 
                     // Debug
                     rp.debugView = static_cast<int>(preRenderData->debugView);
