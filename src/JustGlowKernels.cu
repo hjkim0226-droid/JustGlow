@@ -1048,62 +1048,83 @@ extern "C" __global__ void DebugOutputKernel(
     }
     else {
         // Debug view: show specific buffer (Prefilter, Down1-6, Up0-6)
-        // debugBuffer is in Linear space
-        float dbgR, dbgG, dbgB, dbgA;
-        sampleBilinear(debugBuffer, u, v, debugWidth, debugHeight, debugPitch, dbgR, dbgG, dbgB, dbgA);
+        // Check for null buffer or zero dimensions (level doesn't exist)
+        if (debugBuffer == nullptr || debugWidth <= 0 || debugHeight <= 0) {
+            // Show magenta placeholder with checkerboard pattern for missing levels
+            int checkerX = (x / 16) % 2;
+            int checkerY = (y / 16) % 2;
+            bool checker = (checkerX ^ checkerY) == 0;
+            resR = checker ? 1.0f : 0.5f;
+            resG = 0.0f;
+            resB = checker ? 1.0f : 0.5f;
+            resA = 1.0f;
+        }
+        else {
+            // debugBuffer is in Linear space
+            float dbgR, dbgG, dbgB, dbgA;
+            sampleBilinear(debugBuffer, u, v, debugWidth, debugHeight, debugPitch, dbgR, dbgG, dbgB, dbgA);
 
-        // For debug views, apply exposure so we can see threshold results
-        resR = dbgR * exposure;
-        resG = dbgG * exposure;
-        resB = dbgB * exposure;
-        resA = 1.0f;
+            // For debug views, apply exposure so we can see threshold results
+            resR = dbgR * exposure;
+            resG = dbgG * exposure;
+            resB = dbgB * exposure;
+            resA = 1.0f;
+        }
 
         // =========================================
-        // Gaussian/Kawase Indicator for Downsample debug views
+        // Algorithm Indicator for debug views
         // Top-left 24x24 square with color indicator:
-        // - Green = Gaussian (debugMode 3-7 = Down1-5)
-        // - Blue = Kawase (debugMode 8 = Down6+)
         // - Yellow = Prefilter (debugMode 2)
+        // - Green = Gaussian Downsample (debugMode 3-7 = Down1-5)
+        // - Blue = Kawase Downsample (debugMode 8 = Down6+)
+        // - Cyan = Upsample (debugMode 9-15 = Up0-6)
+        // - Magenta = Level not available
         // =========================================
-        if (debugMode >= 2 && debugMode <= 8) {
-            // Only show indicator for downsample-related views
-            const int indicatorSize = 24;
-            const int borderSize = 2;
+        const int indicatorSize = 24;
+        const int borderSize = 2;
 
-            if (x < indicatorSize && y < indicatorSize) {
-                // Inside indicator box
-                bool isBorder = (x < borderSize || x >= indicatorSize - borderSize ||
-                                 y < borderSize || y >= indicatorSize - borderSize);
+        if (x < indicatorSize && y < indicatorSize) {
+            // Inside indicator box
+            bool isBorder = (x < borderSize || x >= indicatorSize - borderSize ||
+                             y < borderSize || y >= indicatorSize - borderSize);
 
-                if (isBorder) {
-                    // White border for visibility
+            if (isBorder) {
+                // White border for visibility
+                resR = 1.0f;
+                resG = 1.0f;
+                resB = 1.0f;
+            } else {
+                // Check if level is available (buffer is valid)
+                bool levelAvailable = (debugBuffer != nullptr && debugWidth > 0 && debugHeight > 0);
+
+                if (!levelAvailable) {
+                    // Magenta = Level not available
                     resR = 1.0f;
-                    resG = 1.0f;
+                    resG = 0.0f;
                     resB = 1.0f;
-                } else {
-                    // Color based on algorithm used:
-                    // debugMode 2 = Prefilter (13-tap) - Yellow
-                    // debugMode 3-7 = Down1-5 (iteration 0-4) = Gaussian - Green
-                    // debugMode 8+ = Down6+ (iteration 5+) = Kawase - Blue
-                    if (debugMode == 2) {
-                        // Prefilter - Yellow
-                        resR = 1.0f;
-                        resG = 0.9f;
-                        resB = 0.2f;
-                    } else if (debugMode <= 7) {
-                        // Gaussian (Down1-5) - Green
-                        resR = 0.2f;
-                        resG = 0.8f;
-                        resB = 0.2f;
-                    } else {
-                        // Kawase (Down6+) - Blue
-                        resR = 0.2f;
-                        resG = 0.4f;
-                        resB = 0.9f;
-                    }
+                } else if (debugMode == 2) {
+                    // Prefilter - Yellow
+                    resR = 1.0f;
+                    resG = 0.9f;
+                    resB = 0.2f;
+                } else if (debugMode >= 3 && debugMode <= 7) {
+                    // Gaussian Downsample (Down1-5) - Green
+                    resR = 0.2f;
+                    resG = 0.8f;
+                    resB = 0.2f;
+                } else if (debugMode == 8) {
+                    // Kawase Downsample (Down6+) - Blue
+                    resR = 0.2f;
+                    resG = 0.4f;
+                    resB = 0.9f;
+                } else if (debugMode >= 9 && debugMode <= 15) {
+                    // Upsample (Up0-6) - Cyan
+                    resR = 0.2f;
+                    resG = 0.8f;
+                    resB = 0.9f;
                 }
-                resA = 1.0f;
             }
+            resA = 1.0f;
         }
     }
 
