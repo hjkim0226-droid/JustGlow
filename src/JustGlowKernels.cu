@@ -42,6 +42,31 @@ __device__ __forceinline__ float smoothstepf(float edge0, float edge1, float x) 
     return t * t * (3.0f - 2.0f * t);
 }
 
+// ============================================================================
+// Color Space Conversion (sRGB <-> Linear)
+// Glow must be calculated in Linear space for physically correct light addition
+// ============================================================================
+
+// sRGB to Linear (remove gamma, called at input)
+__device__ __forceinline__ float srgbToLinear(float c) {
+    // Clamp negative values (can happen with some footage)
+    if (c <= 0.0f) return 0.0f;
+    // Standard sRGB transfer function
+    return (c <= 0.04045f)
+        ? c / 12.92f
+        : powf((c + 0.055f) / 1.055f, 2.4f);
+}
+
+// Linear to sRGB (apply gamma, called at output)
+__device__ __forceinline__ float linearToSrgb(float c) {
+    // Clamp negative values
+    if (c <= 0.0f) return 0.0f;
+    // Standard sRGB transfer function
+    return (c <= 0.0031308f)
+        ? c * 12.92f
+        : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+}
+
 // Calculate weight based on level, falloff, and intensity
 // Level 0: always 100%
 // Level 1: level1Weight (controlled by Intensity parameter, 50%-100%)
@@ -271,6 +296,24 @@ extern "C" __global__ void PrefilterKernel(
 
     // Center
     sampleBilinear(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
+
+    // =========================================
+    // Convert sRGB to Linear color space
+    // Glow calculation must be done in Linear space for physically correct light blending
+    // =========================================
+    Ar = srgbToLinear(Ar); Ag = srgbToLinear(Ag); Ab = srgbToLinear(Ab);
+    Br = srgbToLinear(Br); Bg = srgbToLinear(Bg); Bb = srgbToLinear(Bb);
+    Cr = srgbToLinear(Cr); Cg = srgbToLinear(Cg); Cb = srgbToLinear(Cb);
+    Dr = srgbToLinear(Dr); Dg = srgbToLinear(Dg); Db = srgbToLinear(Db);
+    Er = srgbToLinear(Er); Eg = srgbToLinear(Eg); Eb = srgbToLinear(Eb);
+    Fr = srgbToLinear(Fr); Fg = srgbToLinear(Fg); Fb = srgbToLinear(Fb);
+    Gr = srgbToLinear(Gr); Gg = srgbToLinear(Gg); Gb = srgbToLinear(Gb);
+    Hr = srgbToLinear(Hr); Hg = srgbToLinear(Hg); Hb = srgbToLinear(Hb);
+    Ir = srgbToLinear(Ir); Ig = srgbToLinear(Ig); Ib = srgbToLinear(Ib);
+    Jr = srgbToLinear(Jr); Jg = srgbToLinear(Jg); Jb = srgbToLinear(Jb);
+    Kr = srgbToLinear(Kr); Kg = srgbToLinear(Kg); Kb = srgbToLinear(Kb);
+    Lr = srgbToLinear(Lr); Lg = srgbToLinear(Lg); Lb = srgbToLinear(Lb);
+    Mr = srgbToLinear(Mr); Mg = srgbToLinear(Mg); Mb = srgbToLinear(Mb);
 
     float resR, resG, resB;
 
@@ -801,6 +844,11 @@ extern "C" __global__ void DebugOutputKernel(
         origG = original[origIdx + 1];
         origB = original[origIdx + 2];
         origA = original[origIdx + 3];
+
+        // Convert original from sRGB to Linear for correct compositing
+        origR = srgbToLinear(origR);
+        origG = srgbToLinear(origG);
+        origB = srgbToLinear(origB);
     }
 
     float u = ((float)x + 0.5f) / (float)width;
@@ -811,6 +859,7 @@ extern "C" __global__ void DebugOutputKernel(
     // debugMode: 1=Final, 2=Prefilter, 3-9=Down0-6, 10-16=Up0-6, 17=GlowOnly
     if (debugMode == 1) {
         // Final: normal composite with opacity controls
+        // Glow is already in Linear space (converted in Prefilter)
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
@@ -819,12 +868,12 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Apply source opacity
+        // Apply source opacity (original is already in Linear)
         float srcR = origR * sourceOpacity;
         float srcG = origG * sourceOpacity;
         float srcB = origB * sourceOpacity;
 
-        // Composite modes: 0=Add, 1=Screen, 2=Overlay
+        // Composite in Linear space for physically correct light blending
         switch (compositeMode) {
             case 0: // Add
                 resR = srcR + glowR;
@@ -852,7 +901,7 @@ extern "C" __global__ void DebugOutputKernel(
         resA = fmaxf(origA * sourceOpacity, clampf(glowLum, 0.0f, 1.0f));
     }
     else if (debugMode == 17) {
-        // GlowOnly: just glow with exposure and opacity
+        // GlowOnly: just glow with exposure and opacity (already in Linear)
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
@@ -865,7 +914,7 @@ extern "C" __global__ void DebugOutputKernel(
     }
     else {
         // Debug view: show specific buffer (Prefilter, Down0-6, Up0-6)
-        // debugBuffer points to the specific MIP level to visualize
+        // debugBuffer is in Linear space
         float dbgR, dbgG, dbgB, dbgA;
         sampleBilinear(debugBuffer, u, v, debugWidth, debugHeight, debugPitch, dbgR, dbgG, dbgB, dbgA);
 
@@ -875,6 +924,13 @@ extern "C" __global__ void DebugOutputKernel(
         resB = dbgB * exposure;
         resA = 1.0f;
     }
+
+    // =========================================
+    // Convert Linear to sRGB for output
+    // =========================================
+    resR = linearToSrgb(resR);
+    resG = linearToSrgb(resG);
+    resB = linearToSrgb(resB);
 
     int outIdx = (y * outputPitch + x) * 4;
     output[outIdx + 0] = resR;
