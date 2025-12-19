@@ -5,10 +5,13 @@
  * Uses Driver API compatible signatures for PTX loading.
  *
  * Kernels:
- * - PrefilterKernel: 13-tap downsample + soft threshold + Karis average
- * - DownsampleKernel: Dual Kawase 4-tap
+ * - PrefilterKernel: 13-tap downsample + soft threshold + alpha-weighted average
+ * - GaussianDownsampleH/VKernel: Separable 5-tap Gaussian (Level 0-4)
+ * - DownsampleKernel: Dual Kawase 5-tap with X/+ rotation (Level 5+)
  * - UpsampleKernel: 9-tap tent filter with progressive blend
- * - CompositeKernel: Final blend with original
+ * - DebugOutputKernel: Final composite + debug view modes
+ *
+ * Note: Karis Average removed (v1.4.0) - caused artifacts on transparent backgrounds
  */
 
 #include <cuda_runtime.h>
@@ -30,10 +33,6 @@ __device__ __forceinline__ float clampf(float x, float minVal, float maxVal) {
 
 __device__ __forceinline__ float luminance(float r, float g, float b) {
     return 0.2126f * r + 0.7152f * g + 0.0722f * b;
-}
-
-__device__ __forceinline__ float karisWeight(float r, float g, float b) {
-    return 1.0f / (1.0f + luminance(r, g, b));
 }
 
 // Smooth step function for fade transitions
@@ -277,29 +276,6 @@ __device__ void softThreshold(
 }
 
 // ============================================================================
-// Karis Average for 4 samples
-// ============================================================================
-
-__device__ void karisAverage4(
-    float r0, float g0, float b0,
-    float r1, float g1, float b1,
-    float r2, float g2, float b2,
-    float r3, float g3, float b3,
-    float& outR, float& outG, float& outB)
-{
-    float w0 = karisWeight(r0, g0, b0);
-    float w1 = karisWeight(r1, g1, b1);
-    float w2 = karisWeight(r2, g2, b2);
-    float w3 = karisWeight(r3, g3, b3);
-
-    float totalWeight = w0 + w1 + w2 + w3;
-
-    outR = (r0 * w0 + r1 * w1 + r2 * w2 + r3 * w3) / totalWeight;
-    outG = (g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3) / totalWeight;
-    outB = (b0 * w0 + b1 * w1 + b2 * w2 + b3 * w3) / totalWeight;
-}
-
-// ============================================================================
 // Prefilter Kernel
 // Driver API entry point
 // ============================================================================
@@ -388,52 +364,23 @@ extern "C" __global__ void PrefilterKernel(
     // =========================================
     float sumR, sumG, sumB, sumA;
 
-    // Kernel weights (same as before):
+    // Kernel weights for 13-tap sampling:
     // Center G: 0.125, Inner DEIJ: 0.03125 each, Outer cross BFHL: 0.015625 each, Outer corners ACKM: 0.0078125 each
+    // Note: Karis Average removed - caused artifacts on transparent backgrounds
+    //       (transparent pixels got maximum weight, polluting color average)
     const float wCenter = 0.125f;
     const float wInner = 0.03125f;
     const float wCross = 0.015625f;
     const float wCorner = 0.0078125f;
 
-    if (useHDR) {
-        // Karis average with alpha weighting
-        // Group 1: Inner corners (D, E, I, J) - weight 0.5
-        float g1r, g1g, g1b;
-        karisAverage4(Dr, Dg, Db, Er, Eg, Eb, Ir, Ig, Ib, Jr, Jg, Jb, g1r, g1g, g1b);
-        float g1a = (Da + Ea + Ia + Ja) * 0.25f;
+    // Simple alpha-weighted average (useHDR parameter kept for API compatibility but ignored)
+    // This properly handles premultiplied alpha without Karis-related artifacts
+    (void)useHDR;  // Suppress unused parameter warning
 
-        // Group 2: Top-left (A, B, F, G) - weight 0.125
-        float g2r, g2g, g2b;
-        karisAverage4(Ar, Ag, Ab, Br, Bg, Bb, Fr, Fg, Fb, Gr, Gg, Gb, g2r, g2g, g2b);
-        float g2a = (Aa + Ba + Fa + Ga) * 0.25f;
-
-        // Group 3: Top-right (B, C, G, H) - weight 0.125
-        float g3r, g3g, g3b;
-        karisAverage4(Br, Bg, Bb, Cr, Cg, Cb, Gr, Gg, Gb, Hr, Hg, Hb, g3r, g3g, g3b);
-        float g3a = (Ba + Ca + Ga + Ha) * 0.25f;
-
-        // Group 4: Bottom-left (F, G, K, L) - weight 0.125
-        float g4r, g4g, g4b;
-        karisAverage4(Fr, Fg, Fb, Gr, Gg, Gb, Kr, Kg, Kb, Lr, Lg, Lb, g4r, g4g, g4b);
-        float g4a = (Fa + Ga + Ka + La) * 0.25f;
-
-        // Group 5: Bottom-right (G, H, L, M) - weight 0.125
-        float g5r, g5g, g5b;
-        karisAverage4(Gr, Gg, Gb, Hr, Hg, Hb, Lr, Lg, Lb, Mr, Mg, Mb, g5r, g5g, g5b);
-        float g5a = (Ga + Ha + La + Ma) * 0.25f;
-
-        // Weighted sum (RGB stays premultiplied through Karis)
-        sumR = g1r * 0.5f + (g2r + g3r + g4r + g5r) * 0.125f;
-        sumG = g1g * 0.5f + (g2g + g3g + g4g + g5g) * 0.125f;
-        sumB = g1b * 0.5f + (g2b + g3b + g4b + g5b) * 0.125f;
-        sumA = g1a * 0.5f + (g2a + g3a + g4a + g5a) * 0.125f;
-    } else {
-        // Simple weighted average with alpha accumulation
-        sumR = Gr * wCenter + (Dr + Er + Ir + Jr) * wInner + (Br + Fr + Hr + Lr) * wCross + (Ar + Cr + Kr + Mr) * wCorner;
-        sumG = Gg * wCenter + (Dg + Eg + Ig + Jg) * wInner + (Bg + Fg + Hg + Lg) * wCross + (Ag + Cg + Kg + Mg) * wCorner;
-        sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
-        sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
-    }
+    sumR = Gr * wCenter + (Dr + Er + Ir + Jr) * wInner + (Br + Fr + Hr + Lr) * wCross + (Ar + Cr + Kr + Mr) * wCorner;
+    sumG = Gg * wCenter + (Dg + Eg + Ig + Jg) * wInner + (Bg + Fg + Hg + Lg) * wCross + (Ag + Cg + Kg + Mg) * wCorner;
+    sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
+    sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
 
     // =========================================
     // Final Unpremultiply: divide accumulated RGB by accumulated Alpha
@@ -1032,7 +979,7 @@ extern "C" __global__ void DebugOutputKernel(
         resA = clampf(glowLum, 0.0f, 1.0f);
     }
     else {
-        // Debug view: show specific buffer (Prefilter, Down0-6, Up0-6)
+        // Debug view: show specific buffer (Prefilter, Down1-6, Up0-6)
         // debugBuffer is in Linear space
         float dbgR, dbgG, dbgB, dbgA;
         sampleBilinear(debugBuffer, u, v, debugWidth, debugHeight, debugPitch, dbgR, dbgG, dbgB, dbgA);
@@ -1042,6 +989,54 @@ extern "C" __global__ void DebugOutputKernel(
         resG = dbgG * exposure;
         resB = dbgB * exposure;
         resA = 1.0f;
+
+        // =========================================
+        // Gaussian/Kawase Indicator for Downsample debug views
+        // Top-left 24x24 square with color indicator:
+        // - Green = Gaussian (debugMode 3-7 = Down1-5)
+        // - Blue = Kawase (debugMode 8 = Down6+)
+        // - Yellow = Prefilter (debugMode 2)
+        // =========================================
+        if (debugMode >= 2 && debugMode <= 8) {
+            // Only show indicator for downsample-related views
+            const int indicatorSize = 24;
+            const int borderSize = 2;
+
+            if (x < indicatorSize && y < indicatorSize) {
+                // Inside indicator box
+                bool isBorder = (x < borderSize || x >= indicatorSize - borderSize ||
+                                 y < borderSize || y >= indicatorSize - borderSize);
+
+                if (isBorder) {
+                    // White border for visibility
+                    resR = 1.0f;
+                    resG = 1.0f;
+                    resB = 1.0f;
+                } else {
+                    // Color based on algorithm used:
+                    // debugMode 2 = Prefilter (13-tap) - Yellow
+                    // debugMode 3-7 = Down1-5 (iteration 0-4) = Gaussian - Green
+                    // debugMode 8+ = Down6+ (iteration 5+) = Kawase - Blue
+                    if (debugMode == 2) {
+                        // Prefilter - Yellow
+                        resR = 1.0f;
+                        resG = 0.9f;
+                        resB = 0.2f;
+                    } else if (debugMode <= 7) {
+                        // Gaussian (Down1-5) - Green
+                        resR = 0.2f;
+                        resG = 0.8f;
+                        resB = 0.2f;
+                    } else {
+                        // Kawase (Down6+) - Blue
+                        resR = 0.2f;
+                        resG = 0.4f;
+                        resB = 0.9f;
+                    }
+                }
+                resA = 1.0f;
+            }
+        }
     }
 
     // =========================================
