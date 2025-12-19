@@ -67,6 +67,18 @@ __device__ __forceinline__ float linearToSrgb(float c) {
         : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
 }
 
+// Unpremultiply alpha (AE uses premultiplied alpha)
+// Converts from premultiplied to straight alpha for correct threshold calculation
+__device__ __forceinline__ void unpremultiply(float& r, float& g, float& b, float a) {
+    if (a > 0.001f) {
+        float invA = 1.0f / a;
+        r *= invA;
+        g *= invA;
+        b *= invA;
+    }
+    // If alpha is near zero, RGB should already be zero in premultiplied format
+}
+
 // Calculate weight based on level, falloff, and intensity
 // Level 0: always 100%
 // Level 1: level1Weight (controlled by Intensity parameter, 50%-100%)
@@ -296,6 +308,25 @@ extern "C" __global__ void PrefilterKernel(
 
     // Center
     sampleBilinear(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
+
+    // =========================================
+    // Unpremultiply Alpha (AE uses premultiplied alpha)
+    // Without this, semi-transparent edge pixels have darker RGB values
+    // which causes threshold to fail on anti-aliased edges
+    // =========================================
+    unpremultiply(Ar, Ag, Ab, Aa);
+    unpremultiply(Br, Bg, Bb, Ba);
+    unpremultiply(Cr, Cg, Cb, Ca);
+    unpremultiply(Dr, Dg, Db, Da);
+    unpremultiply(Er, Eg, Eb, Ea);
+    unpremultiply(Fr, Fg, Fb, Fa);
+    unpremultiply(Gr, Gg, Gb, Ga);
+    unpremultiply(Hr, Hg, Hb, Ha);
+    unpremultiply(Ir, Ig, Ib, Ia);
+    unpremultiply(Jr, Jg, Jb, Ja);
+    unpremultiply(Kr, Kg, Kb, Ka);
+    unpremultiply(Lr, Lg, Lb, La);
+    unpremultiply(Mr, Mg, Mb, Ma);
 
     // =========================================
     // Convert sRGB to Linear color space
@@ -623,16 +654,16 @@ extern "C" __global__ void UpsampleKernel(
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
     // 9-Tap Discrete Gaussian (3x3 pattern)
-    // Fixed offset 1.0 - samples exactly at adjacent pixels
+    // Fixed offset 2.0 - spreads blur wider to prevent center clumping
     // Weights: Center=4/16, Cross=2/16, Diagonal=1/16 (total=16)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Fixed 1.0 pixel offset - standard for upsample
-        // Prevents image shift that occurs with linear optimization
-        const float offset = 1.0f;
+        // Fixed 2.0 pixel offset - wider spread for smoother glow
+        // 1.0 caused center clumping (hot spots), 2.0 is standard Dual Kawase upsample
+        const float offset = 2.0f;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)

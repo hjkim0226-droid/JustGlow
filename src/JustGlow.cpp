@@ -222,7 +222,8 @@ PF_Err GlobalSetup(
     out_data->out_flags2 =
         PF_OutFlag2_FLOAT_COLOR_AWARE |         // 32bpc float support
         PF_OutFlag2_SUPPORTS_SMART_RENDER |     // SmartFX support
-        PF_OutFlag2_SUPPORTS_THREADED_RENDERING // Thread-safe
+        PF_OutFlag2_SUPPORTS_THREADED_RENDERING | // Thread-safe
+        PF_OutFlag2_REVEALS_ZERO_ALPHA          // Glow extends into transparent areas
 #if HAS_CUDA || HAS_DIRECTX
         | PF_OutFlag2_SUPPORTS_GPU_RENDER_F32   // GPU rendering (float32)
 #endif

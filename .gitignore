@@ -31,3 +31,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local documentation (not committed)
+*.local.md
+docs/*.local.md
