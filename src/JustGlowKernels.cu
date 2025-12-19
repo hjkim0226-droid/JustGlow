@@ -161,6 +161,73 @@ __device__ void sampleBilinear(
 }
 
 // ============================================================================
+// Bilinear Sampling with Zero Padding
+// Returns black (0,0,0,0) for UV coordinates outside [0,1] range
+// Used in Prefilter to prevent edge pixel repetition causing light clumping
+// ============================================================================
+
+__device__ void sampleBilinearZeroPad(
+    const float* src, float u, float v,
+    int width, int height, int pitch,
+    float& outR, float& outG, float& outB, float& outA)
+{
+    // Return black for out-of-bounds UV
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
+        outR = 0.0f;
+        outG = 0.0f;
+        outB = 0.0f;
+        outA = 0.0f;
+        return;
+    }
+
+    float px = u * (float)width - 0.5f;
+    float py = v * (float)height - 0.5f;
+
+    int x0 = (int)floorf(px);
+    int y0 = (int)floorf(py);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    float fx = px - (float)x0;
+    float fy = py - (float)y0;
+
+    // For pixels near edge, check each sample point individually
+    // If a sample point is out of bounds, treat it as black (0,0,0,0)
+    float r00 = 0.0f, g00 = 0.0f, b00 = 0.0f, a00 = 0.0f;
+    float r10 = 0.0f, g10 = 0.0f, b10 = 0.0f, a10 = 0.0f;
+    float r01 = 0.0f, g01 = 0.0f, b01 = 0.0f, a01 = 0.0f;
+    float r11 = 0.0f, g11 = 0.0f, b11 = 0.0f, a11 = 0.0f;
+
+    // Sample only if within bounds
+    if (x0 >= 0 && x0 < width && y0 >= 0 && y0 < height) {
+        int idx = (y0 * pitch + x0) * 4;
+        r00 = src[idx + 0]; g00 = src[idx + 1]; b00 = src[idx + 2]; a00 = src[idx + 3];
+    }
+    if (x1 >= 0 && x1 < width && y0 >= 0 && y0 < height) {
+        int idx = (y0 * pitch + x1) * 4;
+        r10 = src[idx + 0]; g10 = src[idx + 1]; b10 = src[idx + 2]; a10 = src[idx + 3];
+    }
+    if (x0 >= 0 && x0 < width && y1 >= 0 && y1 < height) {
+        int idx = (y1 * pitch + x0) * 4;
+        r01 = src[idx + 0]; g01 = src[idx + 1]; b01 = src[idx + 2]; a01 = src[idx + 3];
+    }
+    if (x1 >= 0 && x1 < width && y1 >= 0 && y1 < height) {
+        int idx = (y1 * pitch + x1) * 4;
+        r11 = src[idx + 0]; g11 = src[idx + 1]; b11 = src[idx + 2]; a11 = src[idx + 3];
+    }
+
+    float w00 = (1.0f - fx) * (1.0f - fy);
+    float w10 = fx * (1.0f - fy);
+    float w01 = (1.0f - fx) * fy;
+    float w11 = fx * fy;
+
+    outR = w00 * r00 + w10 * r10 + w01 * r01 + w11 * r11;
+    outG = w00 * g00 + w10 * g10 + w01 * g01 + w11 * g11;
+    outB = w00 * b00 + w10 * b10 + w01 * b01 + w11 * b11;
+    outA = w00 * a00 + w10 * a10 + w01 * a01 + w11 * a11;
+}
+
+// ============================================================================
 // Soft Threshold (Fixed: threshold 아래 픽셀은 무조건 0)
 // Effective range: [threshold, threshold + 2*knee]
 // - Below threshold: 0
@@ -294,47 +361,36 @@ extern "C" __global__ void PrefilterKernel(
     float Lr, Lg, Lb, La;
     float Mr, Mg, Mb, Ma;
 
+    // =========================================
+    // 13-tap sampling with ZERO PADDING
+    // Uses sampleBilinearZeroPad to return black for out-of-bounds UV
+    // This prevents edge pixel repetition causing light clumping
+    // Samples stay in sRGB/Premultiplied space for now
+    // =========================================
+
     // Outer corners
-    sampleBilinear(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
-    sampleBilinear(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinear(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
-    sampleBilinear(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
+    sampleBilinearZeroPad(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
+    sampleBilinearZeroPad(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinearZeroPad(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
+    sampleBilinearZeroPad(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
 
     // Outer cross
-    sampleBilinear(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
-    sampleBilinear(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
-    sampleBilinear(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
-    sampleBilinear(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinearZeroPad(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinearZeroPad(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
+    sampleBilinearZeroPad(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
+    sampleBilinearZeroPad(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
 
     // Inner corners
-    sampleBilinear(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
-    sampleBilinear(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
-    sampleBilinear(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
-    sampleBilinear(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
+    sampleBilinearZeroPad(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
+    sampleBilinearZeroPad(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
+    sampleBilinearZeroPad(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
+    sampleBilinearZeroPad(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
 
     // Center
-    sampleBilinear(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
+    sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
 
     // =========================================
-    // Convert sRGB to Linear color space (keep premultiplied!)
-    // Do NOT unpremultiply individual samples - causes hot edges
-    // =========================================
-    Ar = srgbToLinear(Ar); Ag = srgbToLinear(Ag); Ab = srgbToLinear(Ab);
-    Br = srgbToLinear(Br); Bg = srgbToLinear(Bg); Bb = srgbToLinear(Bb);
-    Cr = srgbToLinear(Cr); Cg = srgbToLinear(Cg); Cb = srgbToLinear(Cb);
-    Dr = srgbToLinear(Dr); Dg = srgbToLinear(Dg); Db = srgbToLinear(Db);
-    Er = srgbToLinear(Er); Eg = srgbToLinear(Eg); Eb = srgbToLinear(Eb);
-    Fr = srgbToLinear(Fr); Fg = srgbToLinear(Fg); Fb = srgbToLinear(Fb);
-    Gr = srgbToLinear(Gr); Gg = srgbToLinear(Gg); Gb = srgbToLinear(Gb);
-    Hr = srgbToLinear(Hr); Hg = srgbToLinear(Hg); Hb = srgbToLinear(Hb);
-    Ir = srgbToLinear(Ir); Ig = srgbToLinear(Ig); Ib = srgbToLinear(Ib);
-    Jr = srgbToLinear(Jr); Jg = srgbToLinear(Jg); Jb = srgbToLinear(Jb);
-    Kr = srgbToLinear(Kr); Kg = srgbToLinear(Kg); Kb = srgbToLinear(Kb);
-    Lr = srgbToLinear(Lr); Lg = srgbToLinear(Lg); Lb = srgbToLinear(Lb);
-    Mr = srgbToLinear(Mr); Mg = srgbToLinear(Mg); Mb = srgbToLinear(Mb);
-
-    // =========================================
-    // Alpha-Weighted Normalization
+    // Alpha-Weighted Normalization (in sRGB space)
     // Accumulate RGB and Alpha separately, then divide at the end
     // This prevents hot edges from low-alpha pixel amplification
     // =========================================
@@ -402,7 +458,16 @@ extern "C" __global__ void PrefilterKernel(
         resB = 0.0f;
     }
 
-    // Apply soft threshold
+    // =========================================
+    // Convert sRGB to Linear AFTER unpremultiply
+    // sRGB gamma is non-linear, so conversion must happen on unpremultiplied values
+    // linearize(RGB * alpha) ≠ linearize(RGB) * alpha
+    // =========================================
+    resR = srgbToLinear(resR);
+    resG = srgbToLinear(resG);
+    resB = srgbToLinear(resB);
+
+    // Apply soft threshold (now in Linear space)
     softThreshold(resR, resG, resB, threshold, softKnee);
 
     // Write output
