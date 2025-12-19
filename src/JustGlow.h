@@ -199,7 +199,7 @@ namespace Defaults {
     constexpr float Radius          = 100.0f;   // 100% = all MIP levels active
     constexpr float Spread          = 50.0f;    // 50% = balanced blur offset
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
-    constexpr float Threshold       = 70.0f;    // 70% - visible effect on application
+    constexpr float Threshold       = 30.0f;    // 30% - works well with premultiplied values
     constexpr float SoftKnee        = 50.0f;    // 50%
 
     // Blur Options

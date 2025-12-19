@@ -288,6 +288,11 @@ __device__ void softThreshold(
     float& r, float& g, float& b,
     float threshold, float knee)
 {
+    // Threshold 0 = bypass (모든 픽셀 통과)
+    if (threshold <= 0.001f) {
+        return;
+    }
+
     float brightness = fmaxf(fmaxf(r, g), b);
     float contribution;
 
