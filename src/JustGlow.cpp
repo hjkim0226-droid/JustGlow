@@ -970,9 +970,10 @@ PF_Err PreRender(
 
         // blurOffsets: Spread -> per-level pixel offset (decays from spread to 1.5px)
         // Level 0 gets full offset, deeper levels decay toward 1.5px minimum
+        // Scale by downsampleFactor for consistent look at Half/Quarter preview resolution
         float spreadOffset = 1.1f + (preRenderData->spread / 100.0f) * 1.4f; // 1.1 ~ 2.5px
         for (int i = 0; i < preRenderData->mipLevels && i < PRERENDER_MAX_MIP_LEVELS; ++i) {
-            preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset);
+            preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset) * downsampleFactor;
         }
 
         // decayK: Pass falloff directly (0-100), kernel calculates decayRate
