@@ -68,12 +68,13 @@ resource 'PiPL' (16000) {
         },
 
         AE_Effect_Global_OutFlags_2 {
-            0x2A001400  /* PF_OutFlag2_SUPPORTS_SMART_RENDER (0x00000400) |
+            0x2A001480  /* PF_OutFlag2_REVEALS_ZERO_ALPHA (0x00000080) |
+                          PF_OutFlag2_SUPPORTS_SMART_RENDER (0x00000400) |
                           PF_OutFlag2_FLOAT_COLOR_AWARE (0x00001000) |
                           PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 (0x02000000) |
                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING (0x08000000) |
                           PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING (0x20000000) */
-            /* GPU rendering: CUDA via GPU_RENDER_F32, DirectX via DIRECTX_RENDERING */
+            /* Glow extends into transparent areas via REVEALS_ZERO_ALPHA */
         },
 
         AE_Effect_Match_Name {
