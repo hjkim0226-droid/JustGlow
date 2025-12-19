@@ -157,24 +157,24 @@ enum class CompositeMode : int {
 };
 
 // Debug view modes for visualizing pipeline stages
+// Down0 removed (same as Prefilter, which shows MIP[0])
 enum class DebugViewMode : int {
     Final = 1,      // Normal output (source + glow composite)
-    Prefilter = 2,  // Prefilter result (threshold applied)
-    Down0 = 3,      // Downsample level 0 (full res)
-    Down1 = 4,      // Downsample level 1
-    Down2 = 5,      // Downsample level 2
-    Down3 = 6,      // Downsample level 3
-    Down4 = 7,      // Downsample level 4
-    Down5 = 8,      // Downsample level 5
-    Down6 = 9,      // Downsample level 6
-    Up0 = 10,       // Upsample level 0 (full res glow)
-    Up1 = 11,       // Upsample level 1
-    Up2 = 12,       // Upsample level 2
-    Up3 = 13,       // Upsample level 3
-    Up4 = 14,       // Upsample level 4
-    Up5 = 15,       // Upsample level 5
-    Up6 = 16,       // Upsample level 6
-    GlowOnly = 17   // Final glow without source
+    Prefilter = 2,  // Prefilter result (MIP[0], threshold applied)
+    Down1 = 3,      // Downsample level 1 (MIP[1], half res)
+    Down2 = 4,      // Downsample level 2 (MIP[2], quarter res)
+    Down3 = 5,      // Downsample level 3
+    Down4 = 6,      // Downsample level 4
+    Down5 = 7,      // Downsample level 5
+    Down6 = 8,      // Downsample level 6
+    Up0 = 9,        // Upsample level 0 (full res glow)
+    Up1 = 10,       // Upsample level 1
+    Up2 = 11,       // Upsample level 2
+    Up3 = 12,       // Upsample level 3
+    Up4 = 13,       // Upsample level 4
+    Up5 = 14,       // Upsample level 5
+    Up6 = 15,       // Upsample level 6
+    GlowOnly = 16   // Final glow without source
 };
 
 // ============================================================================

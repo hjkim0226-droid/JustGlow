@@ -480,13 +480,13 @@ PF_Err ParamsSetup(
     // Debug Options
     // ===========================================
 
-    // Debug View
+    // Debug View (Down0 removed - same as Prefilter)
     AEFX_CLR_STRUCT(def);
     PF_ADD_POPUP(
         "Debug View",
-        17,  // Number of choices
+        16,  // Number of choices (removed Down0)
         Defaults::DebugView,
-        "Final|Prefilter|Down 0|Down 1|Down 2|Down 3|Down 4|Down 5|Down 6|Up 0|Up 1|Up 2|Up 3|Up 4|Up 5|Up 6|Glow Only",
+        "Final|Prefilter|Down 1|Down 2|Down 3|Down 4|Down 5|Down 6|Up 0|Up 1|Up 2|Up 3|Up 4|Up 5|Up 6|Glow Only",
         DISK_ID_DEBUG_VIEW);
 
     // Source Opacity (0-100%)

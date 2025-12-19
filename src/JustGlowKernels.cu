@@ -70,13 +70,19 @@ __device__ __forceinline__ float linearToSrgb(float c) {
 // Unpremultiply alpha (AE uses premultiplied alpha)
 // Converts from premultiplied to straight alpha for correct threshold calculation
 __device__ __forceinline__ void unpremultiply(float& r, float& g, float& b, float a) {
-    if (a > 0.001f) {
+    // Higher threshold (0.01) to avoid extreme values at anti-aliased edges
+    // Also clamp result to prevent fireflies from edge artifacts
+    if (a > 0.01f) {
         float invA = 1.0f / a;
-        r *= invA;
-        g *= invA;
-        b *= invA;
+        r = fminf(r * invA, 10.0f);  // Clamp to reasonable max
+        g = fminf(g * invA, 10.0f);
+        b = fminf(b * invA, 10.0f);
+    } else {
+        // Very low alpha - treat as transparent (zero contribution)
+        r = 0.0f;
+        g = 0.0f;
+        b = 0.0f;
     }
-    // If alpha is near zero, RGB should already be zero in premultiplied format
 }
 
 // Calculate weight based on level, falloff, and intensity
@@ -310,27 +316,8 @@ extern "C" __global__ void PrefilterKernel(
     sampleBilinear(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
 
     // =========================================
-    // Unpremultiply Alpha (AE uses premultiplied alpha)
-    // Without this, semi-transparent edge pixels have darker RGB values
-    // which causes threshold to fail on anti-aliased edges
-    // =========================================
-    unpremultiply(Ar, Ag, Ab, Aa);
-    unpremultiply(Br, Bg, Bb, Ba);
-    unpremultiply(Cr, Cg, Cb, Ca);
-    unpremultiply(Dr, Dg, Db, Da);
-    unpremultiply(Er, Eg, Eb, Ea);
-    unpremultiply(Fr, Fg, Fb, Fa);
-    unpremultiply(Gr, Gg, Gb, Ga);
-    unpremultiply(Hr, Hg, Hb, Ha);
-    unpremultiply(Ir, Ig, Ib, Ia);
-    unpremultiply(Jr, Jg, Jb, Ja);
-    unpremultiply(Kr, Kg, Kb, Ka);
-    unpremultiply(Lr, Lg, Lb, La);
-    unpremultiply(Mr, Mg, Mb, Ma);
-
-    // =========================================
-    // Convert sRGB to Linear color space
-    // Glow calculation must be done in Linear space for physically correct light blending
+    // Convert sRGB to Linear color space (keep premultiplied!)
+    // Do NOT unpremultiply individual samples - causes hot edges
     // =========================================
     Ar = srgbToLinear(Ar); Ag = srgbToLinear(Ag); Ab = srgbToLinear(Ab);
     Br = srgbToLinear(Br); Bg = srgbToLinear(Bg); Bb = srgbToLinear(Bb);
@@ -346,29 +333,73 @@ extern "C" __global__ void PrefilterKernel(
     Lr = srgbToLinear(Lr); Lg = srgbToLinear(Lg); Lb = srgbToLinear(Lb);
     Mr = srgbToLinear(Mr); Mg = srgbToLinear(Mg); Mb = srgbToLinear(Mb);
 
-    float resR, resG, resB;
+    // =========================================
+    // Alpha-Weighted Normalization
+    // Accumulate RGB and Alpha separately, then divide at the end
+    // This prevents hot edges from low-alpha pixel amplification
+    // =========================================
+    float sumR, sumG, sumB, sumA;
+
+    // Kernel weights (same as before):
+    // Center G: 0.125, Inner DEIJ: 0.03125 each, Outer cross BFHL: 0.015625 each, Outer corners ACKM: 0.0078125 each
+    const float wCenter = 0.125f;
+    const float wInner = 0.03125f;
+    const float wCross = 0.015625f;
+    const float wCorner = 0.0078125f;
 
     if (useHDR) {
-        // Karis average groups
+        // Karis average with alpha weighting
+        // Group 1: Inner corners (D, E, I, J) - weight 0.5
         float g1r, g1g, g1b;
-        float g2r, g2g, g2b;
-        float g3r, g3g, g3b;
-        float g4r, g4g, g4b;
-        float g5r, g5g, g5b;
-
         karisAverage4(Dr, Dg, Db, Er, Eg, Eb, Ir, Ig, Ib, Jr, Jg, Jb, g1r, g1g, g1b);
-        karisAverage4(Ar, Ag, Ab, Br, Bg, Bb, Fr, Fg, Fb, Gr, Gg, Gb, g2r, g2g, g2b);
-        karisAverage4(Br, Bg, Bb, Cr, Cg, Cb, Gr, Gg, Gb, Hr, Hg, Hb, g3r, g3g, g3b);
-        karisAverage4(Fr, Fg, Fb, Gr, Gg, Gb, Kr, Kg, Kb, Lr, Lg, Lb, g4r, g4g, g4b);
-        karisAverage4(Gr, Gg, Gb, Hr, Hg, Hb, Lr, Lg, Lb, Mr, Mg, Mb, g5r, g5g, g5b);
+        float g1a = (Da + Ea + Ia + Ja) * 0.25f;
 
-        resR = g1r * 0.5f + (g2r + g3r + g4r + g5r) * 0.125f;
-        resG = g1g * 0.5f + (g2g + g3g + g4g + g5g) * 0.125f;
-        resB = g1b * 0.5f + (g2b + g3b + g4b + g5b) * 0.125f;
+        // Group 2: Top-left (A, B, F, G) - weight 0.125
+        float g2r, g2g, g2b;
+        karisAverage4(Ar, Ag, Ab, Br, Bg, Bb, Fr, Fg, Fb, Gr, Gg, Gb, g2r, g2g, g2b);
+        float g2a = (Aa + Ba + Fa + Ga) * 0.25f;
+
+        // Group 3: Top-right (B, C, G, H) - weight 0.125
+        float g3r, g3g, g3b;
+        karisAverage4(Br, Bg, Bb, Cr, Cg, Cb, Gr, Gg, Gb, Hr, Hg, Hb, g3r, g3g, g3b);
+        float g3a = (Ba + Ca + Ga + Ha) * 0.25f;
+
+        // Group 4: Bottom-left (F, G, K, L) - weight 0.125
+        float g4r, g4g, g4b;
+        karisAverage4(Fr, Fg, Fb, Gr, Gg, Gb, Kr, Kg, Kb, Lr, Lg, Lb, g4r, g4g, g4b);
+        float g4a = (Fa + Ga + Ka + La) * 0.25f;
+
+        // Group 5: Bottom-right (G, H, L, M) - weight 0.125
+        float g5r, g5g, g5b;
+        karisAverage4(Gr, Gg, Gb, Hr, Hg, Hb, Lr, Lg, Lb, Mr, Mg, Mb, g5r, g5g, g5b);
+        float g5a = (Ga + Ha + La + Ma) * 0.25f;
+
+        // Weighted sum (RGB stays premultiplied through Karis)
+        sumR = g1r * 0.5f + (g2r + g3r + g4r + g5r) * 0.125f;
+        sumG = g1g * 0.5f + (g2g + g3g + g4g + g5g) * 0.125f;
+        sumB = g1b * 0.5f + (g2b + g3b + g4b + g5b) * 0.125f;
+        sumA = g1a * 0.5f + (g2a + g3a + g4a + g5a) * 0.125f;
     } else {
-        resR = Gr * 0.125f + (Dr + Er + Ir + Jr) * 0.125f + (Br + Fr + Hr + Lr) * 0.0625f + (Ar + Cr + Kr + Mr) * 0.03125f;
-        resG = Gg * 0.125f + (Dg + Eg + Ig + Jg) * 0.125f + (Bg + Fg + Hg + Lg) * 0.0625f + (Ag + Cg + Kg + Mg) * 0.03125f;
-        resB = Gb * 0.125f + (Db + Eb + Ib + Jb) * 0.125f + (Bb + Fb + Hb + Lb) * 0.0625f + (Ab + Cb + Kb + Mb) * 0.03125f;
+        // Simple weighted average with alpha accumulation
+        sumR = Gr * wCenter + (Dr + Er + Ir + Jr) * wInner + (Br + Fr + Hr + Lr) * wCross + (Ar + Cr + Kr + Mr) * wCorner;
+        sumG = Gg * wCenter + (Dg + Eg + Ig + Jg) * wInner + (Bg + Fg + Hg + Lg) * wCross + (Ag + Cg + Kg + Mg) * wCorner;
+        sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
+        sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
+    }
+
+    // =========================================
+    // Final Unpremultiply: divide accumulated RGB by accumulated Alpha
+    // This is the industry-standard approach - noise cancels out before division
+    // =========================================
+    float resR, resG, resB;
+    if (sumA > 0.001f) {
+        resR = sumR / sumA;
+        resG = sumG / sumA;
+        resB = sumB / sumA;
+    } else {
+        resR = 0.0f;
+        resG = 0.0f;
+        resB = 0.0f;
     }
 
     // Apply soft threshold
@@ -661,9 +692,9 @@ extern "C" __global__ void UpsampleKernel(
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Fixed 2.0 pixel offset - wider spread for smoother glow
-        // 1.0 caused center clumping (hot spots), 2.0 is standard Dual Kawase upsample
-        const float offset = 2.0f;
+        // Fixed 1.5 pixel offset - balanced spread
+        // 1.0 caused center clumping, 2.0 might be too wide
+        const float offset = 1.5f;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)
@@ -887,7 +918,7 @@ extern "C" __global__ void DebugOutputKernel(
 
     float resR, resG, resB, resA;
 
-    // debugMode: 1=Final, 2=Prefilter, 3-9=Down0-6, 10-16=Up0-6, 17=GlowOnly
+    // debugMode: 1=Final, 2=Prefilter, 3-8=Down1-6, 9-15=Up0-6, 16=GlowOnly
     if (debugMode == 1) {
         // Final: normal composite with opacity controls
         // Glow is already in Linear space (converted in Prefilter)
@@ -931,7 +962,7 @@ extern "C" __global__ void DebugOutputKernel(
         float glowLum = fmaxf(fmaxf(glowR, glowG), glowB);
         resA = fmaxf(origA * sourceOpacity, clampf(glowLum, 0.0f, 1.0f));
     }
-    else if (debugMode == 17) {
+    else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity (already in Linear)
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);

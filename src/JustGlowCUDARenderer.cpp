@@ -553,9 +553,9 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
 // ============================================================================
 
 bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
-    // Hybrid downsample: Gaussian (9-tap separable) for Level 0-2, Kawase for 3+
+    // Hybrid downsample: Gaussian (9-tap separable) for Level 0-4, Kawase for 5+
     // Gaussian preserves near-glow detail, Kawase is faster for deep levels
-    constexpr int GAUSSIAN_LEVELS = 3;  // Use Gaussian for levels 0, 1, 2
+    constexpr int GAUSSIAN_LEVELS = 5;  // Use Gaussian for levels 0, 1, 2, 3, 4
 
     for (int i = 0; i < params.mipLevels - 1; ++i) {
         auto& srcMip = m_mipChain[i];
@@ -788,32 +788,38 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     int glowPitch = m_upsampleChain[0].width;  // Pitch in pixels
 
     // Determine debug buffer based on debugView
-    // debugView: 1=Final, 2=Prefilter, 3-9=Down0-6, 10-16=Up0-6, 17=GlowOnly
+    // debugView: 1=Final, 2=Prefilter, 3-8=Down1-6, 9-15=Up0-6, 16=GlowOnly
     CUdeviceptr debugBuffer = 0;
     int debugWidth = 0, debugHeight = 0, debugPitch = 0;
 
-    if (params.debugView >= 2 && params.debugView <= 9) {
-        // Prefilter (2) or Down0-6 (3-9)
-        // Prefilter result is in m_mipChain[0]
-        // Down0 is also m_mipChain[0], Down1 is m_mipChain[1], etc.
-        int level = (params.debugView == 2) ? 0 : (params.debugView - 3);
+    if (params.debugView == 2) {
+        // Prefilter = MIP[0]
+        debugBuffer = m_mipChain[0].devicePtr;
+        debugWidth = m_mipChain[0].width;
+        debugHeight = m_mipChain[0].height;
+        debugPitch = m_mipChain[0].width;
+        CUDA_LOG("Debug: Prefilter (MIP[0]) %dx%d", debugWidth, debugHeight);
+    }
+    else if (params.debugView >= 3 && params.debugView <= 8) {
+        // Down1-6 (3-8) → MIP[1-6]
+        int level = params.debugView - 2;  // 3→1, 4→2, ..., 8→6
         if (level >= 0 && level < static_cast<int>(m_mipChain.size())) {
             debugBuffer = m_mipChain[level].devicePtr;
             debugWidth = m_mipChain[level].width;
             debugHeight = m_mipChain[level].height;
             debugPitch = m_mipChain[level].width;
-            CUDA_LOG("Debug: Down level %d (%dx%d)", level, debugWidth, debugHeight);
+            CUDA_LOG("Debug: Down%d (MIP[%d]) %dx%d", level, level, debugWidth, debugHeight);
         }
     }
-    else if (params.debugView >= 10 && params.debugView <= 16) {
-        // Up0-6 (10-16)
-        int level = params.debugView - 10;
+    else if (params.debugView >= 9 && params.debugView <= 15) {
+        // Up0-6 (9-15)
+        int level = params.debugView - 9;  // 9→0, 10→1, ..., 15→6
         if (level >= 0 && level < static_cast<int>(m_upsampleChain.size())) {
             debugBuffer = m_upsampleChain[level].devicePtr;
             debugWidth = m_upsampleChain[level].width;
             debugHeight = m_upsampleChain[level].height;
             debugPitch = m_upsampleChain[level].width;
-            CUDA_LOG("Debug: Up level %d (%dx%d)", level, debugWidth, debugHeight);
+            CUDA_LOG("Debug: Up%d %dx%d", level, debugWidth, debugHeight);
         }
     }
 
