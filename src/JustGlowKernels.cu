@@ -786,3 +786,127 @@ extern "C" __global__ void CompositeKernel(
     float expandedAlpha = fmaxf(origA, clampf(glowLum, 0.0f, 1.0f));
     output[outIdx + 3] = expandedAlpha;
 }
+
+// ============================================================================
+// Debug Output Kernel
+// Outputs a specific MIP buffer upsampled to full resolution
+// Used for visualizing individual pipeline stages
+// ============================================================================
+
+extern "C" __global__ void DebugOutputKernel(
+    const float* __restrict__ original,
+    const float* __restrict__ debugBuffer,
+    const float* __restrict__ glow,
+    float* __restrict__ output,
+    int width, int height,
+    int inputWidth, int inputHeight,
+    int originalPitch, int debugWidth, int debugHeight, int debugPitch,
+    int glowWidth, int glowHeight, int glowPitch, int outputPitch,
+    int debugMode,          // DebugViewMode enum value
+    float exposure,
+    float sourceOpacity,    // 0-1
+    float glowOpacity,      // 0-2
+    int compositeMode)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    // Calculate offset for centering original within expanded output
+    int offsetX = (width - inputWidth) / 2;
+    int offsetY = (height - inputHeight) / 2;
+
+    // Read original pixel (with bounds check accounting for expansion offset)
+    float origR = 0.0f, origG = 0.0f, origB = 0.0f, origA = 0.0f;
+    int srcX = x - offsetX;
+    int srcY = y - offsetY;
+
+    if (srcX >= 0 && srcX < inputWidth && srcY >= 0 && srcY < inputHeight) {
+        int origIdx = (srcY * originalPitch + srcX) * 4;
+        origR = original[origIdx + 0];
+        origG = original[origIdx + 1];
+        origB = original[origIdx + 2];
+        origA = original[origIdx + 3];
+    }
+
+    float u = ((float)x + 0.5f) / (float)width;
+    float v = ((float)y + 0.5f) / (float)height;
+
+    float resR, resG, resB, resA;
+
+    // debugMode: 1=Final, 2=Prefilter, 3-9=Down0-6, 10-16=Up0-6, 17=GlowOnly
+    if (debugMode == 1) {
+        // Final: normal composite with opacity controls
+        float glowR, glowG, glowB, glowA;
+        sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+
+        // Apply exposure and glow opacity
+        glowR *= exposure * glowOpacity;
+        glowG *= exposure * glowOpacity;
+        glowB *= exposure * glowOpacity;
+
+        // Apply source opacity
+        float srcR = origR * sourceOpacity;
+        float srcG = origG * sourceOpacity;
+        float srcB = origB * sourceOpacity;
+
+        // Composite modes: 0=Add, 1=Screen, 2=Overlay
+        switch (compositeMode) {
+            case 0: // Add
+                resR = srcR + glowR;
+                resG = srcG + glowG;
+                resB = srcB + glowB;
+                break;
+            case 1: // Screen
+                resR = 1.0f - (1.0f - srcR) * (1.0f - glowR);
+                resG = 1.0f - (1.0f - srcG) * (1.0f - glowG);
+                resB = 1.0f - (1.0f - srcB) * (1.0f - glowB);
+                break;
+            case 2: // Overlay
+                resR = srcR < 0.5f ? 2.0f * srcR * glowR : 1.0f - 2.0f * (1.0f - srcR) * (1.0f - glowR);
+                resG = srcG < 0.5f ? 2.0f * srcG * glowG : 1.0f - 2.0f * (1.0f - srcG) * (1.0f - glowG);
+                resB = srcB < 0.5f ? 2.0f * srcB * glowB : 1.0f - 2.0f * (1.0f - srcB) * (1.0f - glowB);
+                break;
+            default:
+                resR = srcR + glowR;
+                resG = srcG + glowG;
+                resB = srcB + glowB;
+                break;
+        }
+
+        float glowLum = fmaxf(fmaxf(glowR, glowG), glowB);
+        resA = fmaxf(origA * sourceOpacity, clampf(glowLum, 0.0f, 1.0f));
+    }
+    else if (debugMode == 17) {
+        // GlowOnly: just glow with exposure and opacity
+        float glowR, glowG, glowB, glowA;
+        sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+
+        resR = glowR * exposure * glowOpacity;
+        resG = glowG * exposure * glowOpacity;
+        resB = glowB * exposure * glowOpacity;
+
+        float glowLum = fmaxf(fmaxf(resR, resG), resB);
+        resA = clampf(glowLum, 0.0f, 1.0f);
+    }
+    else {
+        // Debug view: show specific buffer (Prefilter, Down0-6, Up0-6)
+        // debugBuffer points to the specific MIP level to visualize
+        float dbgR, dbgG, dbgB, dbgA;
+        sampleBilinear(debugBuffer, u, v, debugWidth, debugHeight, debugPitch, dbgR, dbgG, dbgB, dbgA);
+
+        // For debug views, apply exposure so we can see threshold results
+        resR = dbgR * exposure;
+        resG = dbgG * exposure;
+        resB = dbgB * exposure;
+        resA = 1.0f;
+    }
+
+    int outIdx = (y * outputPitch + x) * 4;
+    output[outIdx + 0] = resR;
+    output[outIdx + 1] = resG;
+    output[outIdx + 2] = resB;
+    output[outIdx + 3] = resA;
+}

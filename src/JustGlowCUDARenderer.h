@@ -59,6 +59,8 @@ private:
     // Gaussian downsample kernels (for Level 0-2)
     CUfunction m_gaussianDownsampleHKernel;
     CUfunction m_gaussianDownsampleVKernel;
+    // Debug output kernel
+    CUfunction m_debugOutputKernel;
 
     // MIP chain buffers (stores downsampled textures - read during upsample)
     std::vector<CUDAMipBuffer> m_mipChain;

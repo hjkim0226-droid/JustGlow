@@ -99,6 +99,11 @@ enum ParamID {
     PARAM_COMPOSITE_MODE,       // Composite mode (Add/Screen/Overlay)
     PARAM_HDR_MODE,             // Enable Karis Average for HDR
 
+    // === Debug Options ===
+    PARAM_DEBUG_VIEW,           // Debug view mode (Final/Prefilter/Down0-6/Up0-6/GlowOnly)
+    PARAM_SOURCE_OPACITY,       // Source layer opacity (0-100%)
+    PARAM_GLOW_OPACITY,         // Glow opacity (0-200%)
+
     PARAM_COUNT
 };
 
@@ -119,7 +124,10 @@ enum ParamDiskID {
     DISK_ID_ANAMORPHIC,
     DISK_ID_ANAMORPHIC_ANGLE,
     DISK_ID_COMPOSITE_MODE,
-    DISK_ID_HDR_MODE
+    DISK_ID_HDR_MODE,
+    DISK_ID_DEBUG_VIEW,
+    DISK_ID_SOURCE_OPACITY,
+    DISK_ID_GLOW_OPACITY
 };
 
 // ============================================================================
@@ -148,6 +156,27 @@ enum class CompositeMode : int {
     Overlay = 3     // Overlay blending (contrast)
 };
 
+// Debug view modes for visualizing pipeline stages
+enum class DebugViewMode : int {
+    Final = 1,      // Normal output (source + glow composite)
+    Prefilter = 2,  // Prefilter result (threshold applied)
+    Down0 = 3,      // Downsample level 0 (full res)
+    Down1 = 4,      // Downsample level 1
+    Down2 = 5,      // Downsample level 2
+    Down3 = 6,      // Downsample level 3
+    Down4 = 7,      // Downsample level 4
+    Down5 = 8,      // Downsample level 5
+    Down6 = 9,      // Downsample level 6
+    Up0 = 10,       // Upsample level 0 (full res glow)
+    Up1 = 11,       // Upsample level 1
+    Up2 = 12,       // Upsample level 2
+    Up3 = 13,       // Upsample level 3
+    Up4 = 14,       // Upsample level 4
+    Up5 = 15,       // Upsample level 5
+    Up6 = 16,       // Upsample level 6
+    GlowOnly = 17   // Final glow without source
+};
+
 // ============================================================================
 // Parameter Defaults & Ranges
 // ============================================================================
@@ -173,8 +202,13 @@ namespace Defaults {
     // Advanced
     constexpr float Anamorphic      = 0.0f;     // Disabled
     constexpr float AnamorphicAngle = 0.0f;     // Horizontal
-    constexpr int   CompositeMode   = static_cast<int>(CompositeMode::Add);
+    constexpr int   CompositeMode   = static_cast<int>(::CompositeMode::Add);
     constexpr bool  HDRMode         = true;
+
+    // Debug
+    constexpr int   DebugView       = static_cast<int>(DebugViewMode::Final);
+    constexpr float SourceOpacity   = 100.0f;   // 100% = full source visibility
+    constexpr float GlowOpacity     = 100.0f;   // 100% = normal glow, up to 200%
 }
 
 namespace Ranges {
@@ -209,6 +243,10 @@ namespace Ranges {
     // Anamorphic Angle
     constexpr float AngleMin        = -90.0f;
     constexpr float AngleMax        = 90.0f;
+
+    // Debug: Glow Opacity
+    constexpr float GlowOpacityMin  = 0.0f;
+    constexpr float GlowOpacityMax  = 200.0f;   // Up to 200% for boosted glow
 }
 
 // ============================================================================
@@ -254,6 +292,11 @@ struct JustGlowPreRenderData {
     float anamorphicAngle;
     CompositeMode compositeMode;
     bool hdrMode;
+
+    // Debug
+    DebugViewMode debugView;
+    float sourceOpacity;        // 0-100%
+    float glowOpacity;          // 0-200%
 
     // Computed values
     int mipLevels;          // Based on quality setting

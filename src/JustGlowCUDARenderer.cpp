@@ -103,6 +103,7 @@ JustGlowCUDARenderer::JustGlowCUDARenderer()
     , m_horizontalBlurKernel(nullptr)
     , m_gaussianDownsampleHKernel(nullptr)
     , m_gaussianDownsampleVKernel(nullptr)
+    , m_debugOutputKernel(nullptr)
     , m_horizontalTemp{}
     , m_gaussianDownsampleTemp{}
     , m_currentMipLevels(0)
@@ -232,6 +233,12 @@ bool JustGlowCUDARenderer::LoadKernels() {
     }
     CUDA_LOG("GaussianDownsampleVKernel loaded");
 
+    err = cuModuleGetFunction(&m_debugOutputKernel, m_module, "DebugOutputKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(DebugOutputKernel)")) {
+        return false;
+    }
+    CUDA_LOG("DebugOutputKernel loaded");
+
     return true;
 }
 
@@ -262,6 +269,7 @@ void JustGlowCUDARenderer::Shutdown() {
     m_horizontalBlurKernel = nullptr;
     m_gaussianDownsampleHKernel = nullptr;
     m_gaussianDownsampleVKernel = nullptr;
+    m_debugOutputKernel = nullptr;
     m_context = nullptr;
     m_stream = nullptr;
     m_initialized = false;
@@ -841,21 +849,53 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     int gridX = (params.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
     int gridY = (params.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-    CUDA_LOG("Composite: %dx%d, grid: %dx%d, exposure: %.2f",
-        params.width, params.height, gridX, gridY, params.exposure);
+    CUDA_LOG("Composite: %dx%d, grid: %dx%d, exposure: %.2f, debugView: %d",
+        params.width, params.height, gridX, gridY, params.exposure, params.debugView);
 
-    // Use upsample result (not mipChain which contains downsampled data)
+    // Use upsample result as final glow
     CUdeviceptr glow = m_upsampleChain[0].devicePtr;
+    int glowWidth = m_upsampleChain[0].width;
+    int glowHeight = m_upsampleChain[0].height;
     int glowPitch = m_upsampleChain[0].width;  // Pitch in pixels
 
-    // Exposure is now applied here (once) instead of in UpsampleKernel
-    // This prevents accumulation explosion when exposure is multiplied at each level
+    // Determine debug buffer based on debugView
+    // debugView: 1=Final, 2=Prefilter, 3-9=Down0-6, 10-16=Up0-6, 17=GlowOnly
+    CUdeviceptr debugBuffer = 0;
+    int debugWidth = 0, debugHeight = 0, debugPitch = 0;
 
-    CUDA_LOG("Composite: output=%dx%d, input=%dx%d",
-        params.width, params.height, params.inputWidth, params.inputHeight);
+    if (params.debugView >= 2 && params.debugView <= 9) {
+        // Prefilter (2) or Down0-6 (3-9)
+        // Prefilter result is in m_mipChain[0]
+        // Down0 is also m_mipChain[0], Down1 is m_mipChain[1], etc.
+        int level = (params.debugView == 2) ? 0 : (params.debugView - 3);
+        if (level >= 0 && level < static_cast<int>(m_mipChain.size())) {
+            debugBuffer = m_mipChain[level].devicePtr;
+            debugWidth = m_mipChain[level].width;
+            debugHeight = m_mipChain[level].height;
+            debugPitch = m_mipChain[level].width;
+            CUDA_LOG("Debug: Down level %d (%dx%d)", level, debugWidth, debugHeight);
+        }
+    }
+    else if (params.debugView >= 10 && params.debugView <= 16) {
+        // Up0-6 (10-16)
+        int level = params.debugView - 10;
+        if (level >= 0 && level < static_cast<int>(m_upsampleChain.size())) {
+            debugBuffer = m_upsampleChain[level].devicePtr;
+            debugWidth = m_upsampleChain[level].width;
+            debugHeight = m_upsampleChain[level].height;
+            debugPitch = m_upsampleChain[level].width;
+            CUDA_LOG("Debug: Up level %d (%dx%d)", level, debugWidth, debugHeight);
+        }
+    }
+
+    // Use DebugOutputKernel for all modes (it handles Final, GlowOnly, and debug views)
+    CUDA_LOG("Composite: output=%dx%d, input=%dx%d, sourceOpacity=%.2f, glowOpacity=%.2f",
+        params.width, params.height, params.inputWidth, params.inputHeight,
+        params.sourceOpacity, params.glowOpacity);
 
     void* kernelParams[] = {
         &original,
+        &debugBuffer,
         &glow,
         &output,
         (void*)&params.width,
@@ -863,20 +903,28 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&params.inputWidth,
         (void*)&params.inputHeight,
         (void*)&params.srcPitch,
+        (void*)&debugWidth,
+        (void*)&debugHeight,
+        (void*)&debugPitch,
+        (void*)&glowWidth,
+        (void*)&glowHeight,
         (void*)&glowPitch,
         (void*)&params.dstPitch,
-        (void*)&params.compositeMode,
-        (void*)&params.exposure
+        (void*)&params.debugView,
+        (void*)&params.exposure,
+        (void*)&params.sourceOpacity,
+        (void*)&params.glowOpacity,
+        (void*)&params.compositeMode
     };
 
     CUresult err = cuLaunchKernel(
-        m_compositeKernel,
+        m_debugOutputKernel,
         gridX, gridY, 1,
         THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
         0, m_stream,
         kernelParams, nullptr);
 
-    return CheckCUDAError(err, "cuLaunchKernel(Composite)");
+    return CheckCUDAError(err, "cuLaunchKernel(DebugOutput)");
 }
 
 #endif // _WIN32

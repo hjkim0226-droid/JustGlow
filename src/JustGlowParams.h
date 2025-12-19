@@ -202,6 +202,11 @@ struct RenderParams {
     int     compositeMode;      // CompositeMode enum value (0=Add, 1=Screen, 2=Overlay)
     bool    hdrMode;
 
+    // Debug
+    int     debugView;          // DebugViewMode enum value
+    float   sourceOpacity;      // 0-1 (from 0-100%)
+    float   glowOpacity;        // 0-2 (from 0-200%)
+
     // Image info (output dimensions - may be expanded for glow)
     int     width;
     int     height;

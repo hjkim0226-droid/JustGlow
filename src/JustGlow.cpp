@@ -475,6 +475,47 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_HDR_MODE);
 
+    // ===========================================
+    // Debug Options
+    // ===========================================
+
+    // Debug View
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_POPUP(
+        "Debug View",
+        17,  // Number of choices
+        Defaults::DebugView,
+        "Final|Prefilter|Down 0|Down 1|Down 2|Down 3|Down 4|Down 5|Down 6|Up 0|Up 1|Up 2|Up 3|Up 4|Up 5|Up 6|Glow Only",
+        DISK_ID_DEBUG_VIEW);
+
+    // Source Opacity (0-100%)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Source Opacity",
+        Ranges::ThresholdMin,   // 0
+        Ranges::ThresholdMax,   // 100
+        Ranges::ThresholdMin,
+        Ranges::ThresholdMax,
+        Defaults::SourceOpacity,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_SOURCE_OPACITY);
+
+    // Glow Opacity (0-200%)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Glow Opacity",
+        Ranges::GlowOpacityMin,
+        Ranges::GlowOpacityMax,
+        Ranges::GlowOpacityMin,
+        Ranges::GlowOpacityMax,
+        Defaults::GlowOpacity,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_GLOW_OPACITY);
+
     out_data->num_params = PARAM_COUNT;
 
     return err;
@@ -894,6 +935,28 @@ PF_Err PreRender(
         preRenderData->hdrMode = (param.u.bd.value != 0);
 
         // ===========================================
+        // Debug Options
+        // ===========================================
+
+        // Debug View
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_DEBUG_VIEW, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->debugView = static_cast<DebugViewMode>(param.u.pd.value);
+
+        // Source Opacity
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_SOURCE_OPACITY, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->sourceOpacity = param.u.fs_d.value;
+
+        // Glow Opacity
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_GLOW_OPACITY, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->glowOpacity = param.u.fs_d.value;
+
+        // ===========================================
         // Computed Values (The Secret Sauce)
         // ===========================================
 
@@ -1068,6 +1131,11 @@ PF_Err SmartRender(
                     rp.anamorphicAngle = preRenderData->anamorphicAngle;
                     rp.compositeMode = static_cast<int>(preRenderData->compositeMode);
                     rp.hdrMode = preRenderData->hdrMode;
+
+                    // Debug
+                    rp.debugView = static_cast<int>(preRenderData->debugView);
+                    rp.sourceOpacity = preRenderData->sourceOpacity / 100.0f;  // 0-1
+                    rp.glowOpacity = preRenderData->glowOpacity / 100.0f;      // 0-2
 
                     // Image info
                     rp.width = output_worldP->width;
