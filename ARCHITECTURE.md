@@ -1,7 +1,8 @@
 # JustGlow Architecture & Technical Documentation
 
-**Version:** 1.1.0
-**Date:** 2025-12-18
+**Version:** 1.3.0
+**Date:** 2025-12-19
+**Last Review:** 코드 검토 완료
 
 ---
 
@@ -186,6 +187,19 @@ shaders/
 
 ## 7. Version History
 
+### v1.3.0 (2025-12-19) - "Documentation Complete"
+- ✅ Full code review completed
+- ✅ CUDA implementation documented
+- ✅ Alpha-weighted normalization (edge artifact fix)
+- ✅ sampleBilinearZeroPad (boundary handling)
+- ✅ sRGB→Linear conversion order fix
+- 📝 Known issues documented (see CODE_REVIEW_REPORT.md)
+
+### v1.2.0 (2025-12-18) - "Edge Fix"
+- ✅ Fixed edge clipping with zero-pad sampling
+- ✅ Fixed alpha channel handling (premultiplied)
+- ✅ Debug view modes for pipeline inspection
+
 ### v1.1.0 (2025-12-18) - "Deep Glow Killer"
 - ✅ Dynamic MIP levels (up to 12, until 16px)
 - ✅ X/+ rotation alternation (rounder glow)
@@ -205,7 +219,118 @@ shaders/
 
 ---
 
-## 8. Build Instructions
+## 8. GPU Rendering Architecture
+
+### 8.1 Supported Frameworks
+
+| Platform | Framework | Status |
+|----------|-----------|--------|
+| Windows | DirectX 12 | ✅ Production |
+| Windows | CUDA | ✅ Production |
+| macOS | Metal | 🔜 Planned |
+
+### 8.2 DirectX 12 vs CUDA Comparison
+
+| Aspect | DirectX 12 | CUDA |
+|--------|------------|------|
+| Shader Format | Compiled CSO | PTX (JIT) |
+| Memory | D3D12 Resources | cuMemAlloc |
+| Synchronization | ID3D12Fence | cuStream |
+| Context | AE-managed Device | AE-managed CUcontext |
+| Texture Sampling | Hardware Samplers | Manual Bilinear |
+
+### 8.3 CUDA Buffer Layout
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CUDA MEMORY LAYOUT                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  INPUT (from AE)                                                 │
+│  └─ CUdeviceptr (RGBA F32, premultiplied alpha)                 │
+│                                                                  │
+│  MIP CHAIN (Downsample Results)                                  │
+│  ├─ m_mipChain[0]: Level 0 prefiltered (full resolution)        │
+│  ├─ m_mipChain[1]: Level 1 (1/2 × 1/2)                          │
+│  ├─ m_mipChain[2]: Level 2 (1/4 × 1/4)                          │
+│  └─ ...up to m_mipChain[11] for Ultra quality                   │
+│                                                                  │
+│  UPSAMPLE CHAIN (Separate from MIP to prevent race conditions)  │
+│  ├─ m_upsampleChain[0]: Final upsampled result                  │
+│  ├─ m_upsampleChain[1]: Upsampled from level 2                  │
+│  └─ ...mirrors MIP chain depth                                   │
+│                                                                  │
+│  TEMP BUFFERS                                                    │
+│  ├─ m_horizontalTemp: Separable Gaussian horizontal pass        │
+│  └─ m_gaussianDownsampleTemp: Gaussian vertical pass            │
+│                                                                  │
+│  OUTPUT (to AE)                                                  │
+│  └─ CUdeviceptr (RGBA F32, composite result)                    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 8.4 CUDA Kernel Pipeline
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        CUDA KERNEL FLOW                               │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  1. PrefilterKernel                                                   │
+│     ├─ Input: AE source buffer                                       │
+│     ├─ Output: m_mipChain[0]                                         │
+│     └─ Operations:                                                    │
+│         • 13-tap circle sampling (sampleBilinearZeroPad)             │
+│         • Soft threshold application                                  │
+│         • Karis Average (HDR firefly prevention)                     │
+│         • Alpha-weighted normalization                                │
+│         • sRGB → Linear conversion                                   │
+│                                                                       │
+│  2. GaussianDownsampleH/VKernel (Levels 0-4)                         │
+│     ├─ Input: Previous MIP level                                     │
+│     ├─ Output: m_horizontalTemp → m_mipChain[level+1]                │
+│     └─ Pattern: 9-tap separable Gaussian                             │
+│                                                                       │
+│  3. DownsampleKernel (Levels 5+)                                     │
+│     ├─ Input: Previous MIP level                                     │
+│     ├─ Output: m_mipChain[level+1]                                   │
+│     └─ Pattern: 5-tap Kawase (X/+ rotation)                          │
+│                                                                       │
+│  4. UpsampleKernel (from deepest to level 0)                         │
+│     ├─ Input: Deeper level + current MIP level                       │
+│     ├─ Output: m_upsampleChain[level]                                │
+│     └─ Operations:                                                    │
+│         • 9-tap tent filter                                           │
+│         • Falloff-weighted blending                                   │
+│                                                                       │
+│  5. DebugOutputKernel                                                 │
+│     ├─ Input: m_upsampleChain[0] + AE source                         │
+│     ├─ Output: AE output buffer                                       │
+│     └─ Operations:                                                    │
+│         • Composite (Add/Screen/Overlay)                              │
+│         • Alpha expansion                                             │
+│         • Linear → sRGB conversion                                   │
+│         • Debug view modes                                            │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.5 Synchronization Requirements
+
+현재 구현은 단일 스트림 직렬화에 의존하지만, 명시적 동기화가 권장됩니다:
+
+```cpp
+// 권장 패턴 (아직 미구현)
+ExecutePrefilter(...);
+cuEventRecord(prefilterDone, m_stream);
+cuStreamWaitEvent(m_stream, prefilterDone, 0);
+ExecuteDownsampleChain(...);
+```
+
+---
+
+## 9. Build Instructions
 
 ```bash
 # Windows (CUDA)
@@ -219,14 +344,29 @@ build/Release/CUDA_Assets/JustGlowKernels.ptx
 
 ---
 
-## 9. Future Improvements
+## 10. Future Improvements
 
 | Feature | Description | Priority |
 |---------|-------------|----------|
-| Dithering | Reduce banding in gradients | Medium |
-| FP16 | Half precision for deep MIP levels | Low |
-| Tone Mapping | HDR to SDR with artistic control | Medium |
 | Metal Support | macOS GPU rendering | High |
+| Kernel Synchronization | Explicit event-based sync | High |
+| CPU Fallback | Proper glow on non-GPU systems | Medium |
+| Dithering | Reduce banding in gradients | Medium |
+| Tone Mapping | HDR to SDR with artistic control | Medium |
+| FP16 | Half precision for deep MIP levels | Low |
+| Shared Memory | Cache optimization for bilinear | Low |
+
+---
+
+## 11. Related Documents
+
+| Document | Description |
+|----------|-------------|
+| `docs/CODE_REVIEW_REPORT.md` | 전체 코드 검토 보고서 |
+| `docs/CUDA_IMPLEMENTATION.md` | CUDA 구현 상세 문서 |
+| `docs/AE_GPU_SDK_REFERENCE.md` | AE GPU SDK 참조 |
+| `docs/AE_GPU_CUDA_TROUBLESHOOTING.md` | CUDA 트러블슈팅 |
+| `CLAUDE.md` | 개발 가이드 |
 
 ---
 

@@ -1184,6 +1184,8 @@ PF_Err SmartRender(
 
                     if (!renderSuccess) {
                         PLUGIN_LOG("ERROR: Render failed!");
+                        strcpy(out_data->return_msg,
+                            "GPU render failed. Check %TEMP%\\JustGlow_CUDA_debug.log");
                         err = PF_Err_INTERNAL_STRUCT_DAMAGED;
                     }
                     else {
@@ -1199,6 +1201,8 @@ PF_Err SmartRender(
         }
         else {
             PLUGIN_LOG("ERROR: GPU data not initialized!");
+            strcpy(out_data->return_msg,
+                "GPU renderer not initialized. Restart After Effects.");
             err = PF_Err_INTERNAL_STRUCT_DAMAGED;
         }
 #else
@@ -1207,10 +1211,14 @@ PF_Err SmartRender(
 #endif
     }
     else {
-        PLUGIN_LOG("CPU Fallback path");
-        // CPU Fallback - simple copy for now
-        // TODO: Implement CPU-based glow if needed
+        // CPU Fallback - GPU is required for JustGlow
+        PLUGIN_LOG("CPU Fallback path - GPU required, showing error");
+        strcpy(out_data->return_msg,
+            "JustGlow requires GPU acceleration. "
+            "Enable GPU in Preferences > Display or check GPU drivers.");
+        // Copy source as-is so user can at least see something
         PF_COPY(input_worldP, output_worldP, nullptr, nullptr);
+        err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
     }
 
     // NOTE: Do NOT delete preRenderData here!

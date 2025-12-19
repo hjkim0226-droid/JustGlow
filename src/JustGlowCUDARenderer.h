@@ -19,10 +19,10 @@
 
 struct CUDAMipBuffer {
     CUdeviceptr devicePtr;
-    int width;
-    int height;
-    size_t pitch;  // In bytes
-    size_t sizeBytes;
+    int width;          // Pixels
+    int height;         // Pixels
+    size_t pitchBytes;  // Row stride in BYTES (width * 4 * sizeof(float) for RGBA F32)
+    size_t sizeBytes;   // Total allocation size
 };
 
 // ============================================================================
@@ -48,6 +48,9 @@ private:
     // CUDA objects from AE
     CUcontext m_context;
     CUstream m_stream;
+
+    // Synchronization event for inter-kernel dependencies
+    CUevent m_syncEvent;
 
     // CUDA modules and kernels
     CUmodule m_module;

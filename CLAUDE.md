@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-JustGlow is a GPU-accelerated glow effect plugin for Adobe After Effects. It uses CUDA on Windows (DirectX 12 planned) with planned Metal support for macOS.
+JustGlow is a GPU-accelerated glow effect plugin for Adobe After Effects.
+
+**지원 GPU 프레임워크:**
+- **Windows:** DirectX 12 (기본) + CUDA (선택)
+- **macOS:** Metal (계획됨)
 
 **Core Algorithm:** Dual Kawase blur with:
 - 13-tap prefilter (Karis Average for HDR firefly prevention)
@@ -25,26 +29,46 @@ cmake --build build --config Release --parallel
 cmake --install build
 ```
 
-The build produces `JustGlow.aex` (plugin) and `DirectX_Assets/*.cso` (compiled shaders).
+**빌드 산출물:**
+- `JustGlow.aex` - 플러그인 DLL
+- `DirectX_Assets/*.cso` - 컴파일된 HLSL 셰이더
+- `CUDA_Assets/JustGlowKernels.ptx` - 컴파일된 CUDA 커널 (CUDA Toolkit 설치 시)
 
 ## Architecture
 
 **Plugin Entry Flow:**
 1. `PluginDataEntryFunction` → registers plugin
 2. `EffectMain` → dispatches AE commands
-3. `GPUDeviceSetup` → creates DirectX 12 renderer
+3. `GPUDeviceSetup` → creates DirectX 12 or CUDA renderer
 4. `SmartRender` → routes to GPU renderer
 
-**GPU Rendering Pipeline (in JustGlowGPURenderer):**
-1. Prefilter → soft threshold + Karis average
-2. Downsample chain → creates MIP pyramid (3-6 levels based on quality)
+**GPU Rendering Pipeline:**
+1. Prefilter → soft threshold + Karis average + sRGB→Linear
+2. Downsample chain → creates MIP pyramid (Level 0-4: Gaussian, 5+: Kawase)
 3. Upsample chain → reconstructs with progressive blur blending
 4. Composite → blends glow with original (Add/Screen/Overlay modes)
 
 **Key Data Structures:**
 - `GlowParams` (b0) - main constant buffer, 16-byte aligned for HLSL
 - `BlurPassParams` (b1) - per-pass blur parameters
-- Descriptor heap layout: slots 0-7 MIP SRVs, 8-15 MIP UAVs, 16+ pass pairs
+- `RenderParams` - CPU→GPU 파라미터 전달 구조체
+
+## CUDA 렌더러
+
+**파일:**
+- `src/JustGlowCUDARenderer.h/cpp` - CUDA Driver API 기반 렌더러
+- `src/JustGlowKernels.cu` - CUDA 커널 구현 (1060줄)
+
+**커널 목록:**
+- `PrefilterKernel` - 13-tap + Soft Threshold + Karis
+- `GaussianDownsampleHKernel` / `GaussianDownsampleVKernel` - Separable Gaussian
+- `DownsampleKernel` - Dual Kawase 5-tap
+- `UpsampleKernel` - 9-tap Tent + Falloff
+- `DebugOutputKernel` - 디버그 뷰 및 최종 합성
+
+**버퍼 구조:**
+- `m_mipChain[]` - 다운샘플 결과 저장
+- `m_upsampleChain[]` - 업샘플 결과 저장 (별도 버퍼로 race condition 방지)
 
 ## Critical Implementation Details
 
@@ -58,33 +82,79 @@ The build produces `JustGlow.aex` (plugin) and `DirectX_Assets/*.cso` (compiled 
 **GPU Flags in PiPL (OutFlags2):**
 - `0x2A001400` enables: GPU_RENDER_F32, SUPPORTS_DIRECTX_RENDERING, SMART_RENDER, THREADED_RENDERING
 
-**Shader Loading:**
-- Shaders are loaded from `DirectX_Assets/` relative to plugin DLL location
-- Uses `GetModuleHandleExW` with static helper to get DLL path
+**Shader/Kernel Loading:**
+- DirectX: `DirectX_Assets/*.cso` (DLL 경로 기준)
+- CUDA: `CUDA_Assets/JustGlowKernels.ptx` (DLL 경로 기준)
 
 ## Debugging
 
-Debug log location: `%TEMP%\JustGlow_debug.log`
+**로그 파일 위치:**
+- DirectX: `%TEMP%\JustGlow_debug.log`
+- CUDA: `%TEMP%\JustGlow_CUDA_debug.log`
 
-Key checkpoints:
+**Key checkpoints:**
 - `SmartRender: isGPU=1` confirms GPU path is active
 - `GPUDeviceSetup` should appear before first render
+- CUDA: `PTX module loaded successfully`
 
 ## Testing
 
-1. Build and copy `.aex` + `DirectX_Assets/` to AE plugins folder
+1. Build and copy `.aex` + `DirectX_Assets/` + `CUDA_Assets/` to AE plugins folder
 2. Apply effect: Effects → Stylize → JustGlow
 3. Check debug log for GPU initialization
+4. Debug View 파라미터로 파이프라인 단계별 확인
 
 ## Parameters
 
-14 UI parameters defined in `JustGlow.h` ParamID enum:
-- **Quality:** Controls MIP chain depth (Low=4, Medium=6, High=8, Ultra=12 levels)
-- **Falloff:** Light decay rate (default 70%, higher = more spread)
-- **Radius:** Scales blur offsets
+**19개 UI 파라미터** (`JustGlow.h` ParamID enum):
+
+| 카테고리 | 파라미터 | 설명 |
+|----------|----------|------|
+| Core | Intensity | Level 1 시작 가중치 (0-100%) |
+| Core | Exposure | 밝기 배수 (0-50x) |
+| Core | Radius | 활성 MIP 레벨 제한 (0-200) |
+| Core | Spread | 블러 오프셋 (0-100%) |
+| Core | Falloff | 레벨당 감쇠율 (0-100%) |
+| Threshold | Threshold | 밝기 임계값 (0-100%) |
+| Threshold | Soft Knee | Soft knee 폭 (0-100%) |
+| Quality | Quality | MIP 깊이 (Low=4, Med=6, High=8, Ultra=12) |
+| Quality | Falloff Type | 감쇠 곡선 (Exp/InvSq/Linear) |
+| Color | Glow Color | 글로우 색상 |
+| Color | Color Temp | 색온도 (-100~+100) |
+| Color | Preserve Color | 원본 색상 보존율 |
+| Advanced | Anamorphic | 방향성 스트레치 |
+| Advanced | Anamorphic Angle | 스트레치 각도 |
+| Advanced | Composite Mode | 합성 모드 (Add/Screen/Overlay) |
+| Advanced | HDR Mode | Karis Average 사용 여부 |
+| Debug | Debug View | 파이프라인 단계 시각화 |
+| Debug | Source Opacity | 원본 불투명도 |
+| Debug | Glow Opacity | 글로우 불투명도 (0-200%) |
 
 ## Key Techniques
 
 1. **X/+ Rotation:** Alternates diagonal (X) and cross (+) sampling patterns during downsample to break boxy artifacts → rounder glow at zero cost
 2. **Dynamic MIP Levels:** Ultra quality goes to 12 levels (until 16px), providing Deep Glow-like "atmosphere" feel
 3. **Falloff Blending:** `levelWeight = pow(falloff, level)` during upsample for physical light decay
+4. **Alpha-Weighted Normalization:** Prefilter에서 premultiplied alpha 처리 시 hot edge 방지
+5. **sampleBilinearZeroPad:** 경계 밖 샘플링 시 0 반환으로 edge clipping 방지
+
+## 알려진 이슈
+
+**Critical:**
+1. **Pitch 모호성** - `JustGlowKernels.cu:147` - pitch가 바이트/픽셀 단위 불명확
+2. **CPU Fallback 미구현** - GPU 미지원 시 단순 복사만 수행
+3. **커널 간 동기화** - 스테이지 간 명시적 동기화 없음 (현재는 스트림 직렬화에 의존)
+
+**Medium:**
+- 에러 발생 시 `out_data->return_msg` 미사용
+- 임시 버퍼 과다 할당
+
+상세 내용: `docs/CODE_REVIEW_REPORT.md`
+
+## 관련 문서
+
+- `docs/CODE_REVIEW_REPORT.md` - 전체 코드 검토 보고서
+- `docs/CUDA_IMPLEMENTATION.md` - CUDA 구현 상세
+- `docs/AE_GPU_SDK_REFERENCE.md` - AE GPU SDK 참조
+- `docs/AE_GPU_CUDA_TROUBLESHOOTING.md` - CUDA 트러블슈팅
+- `ARCHITECTURE.md` - 전체 아키텍처 문서

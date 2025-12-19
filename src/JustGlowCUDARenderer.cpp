@@ -95,6 +95,7 @@ static std::wstring GetPTXPath() {
 JustGlowCUDARenderer::JustGlowCUDARenderer()
     : m_context(nullptr)
     , m_stream(nullptr)
+    , m_syncEvent(nullptr)
     , m_module(nullptr)
     , m_prefilterKernel(nullptr)
     , m_downsampleKernel(nullptr)
@@ -161,6 +162,15 @@ bool JustGlowCUDARenderer::Initialize(CUcontext context, CUstream stream) {
         cuCtxPopCurrent(nullptr);
         return false;
     }
+
+    // Create synchronization event for inter-kernel dependencies
+    CUresult eventErr = cuEventCreate(&m_syncEvent, CU_EVENT_DEFAULT);
+    if (!CheckCUDAError(eventErr, "cuEventCreate")) {
+        CUDA_LOG("ERROR: Failed to create sync event");
+        cuCtxPopCurrent(nullptr);
+        return false;
+    }
+    CUDA_LOG("Sync event created");
 
     // Pop context
     cuCtxPopCurrent(nullptr);
@@ -254,6 +264,13 @@ void JustGlowCUDARenderer::Shutdown() {
 
         ReleaseMipChain();
 
+        // Destroy sync event
+        if (m_syncEvent) {
+            cuEventDestroy(m_syncEvent);
+            m_syncEvent = nullptr;
+            CUDA_LOG("Sync event destroyed");
+        }
+
         if (m_module) {
             cuModuleUnload(m_module);
             m_module = nullptr;
@@ -303,8 +320,8 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
         auto& mip = m_mipChain[i];
         mip.width = w;
         mip.height = h;
-        mip.pitch = w * 4 * sizeof(float);  // RGBA float
-        mip.sizeBytes = mip.pitch * h;
+        mip.pitchBytes = w * 4 * sizeof(float);  // RGBA float (width * 4 channels * 4 bytes)
+        mip.sizeBytes = mip.pitchBytes * h;
 
         CUresult err = cuMemAlloc(&mip.devicePtr, mip.sizeBytes);
         if (!CheckCUDAError(err, "cuMemAlloc for MIP")) {
@@ -318,7 +335,7 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
         auto& upsample = m_upsampleChain[i];
         upsample.width = w;
         upsample.height = h;
-        upsample.pitch = mip.pitch;
+        upsample.pitchBytes = mip.pitchBytes;
         upsample.sizeBytes = mip.sizeBytes;
 
         err = cuMemAlloc(&upsample.devicePtr, upsample.sizeBytes);
@@ -341,7 +358,7 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
     if (levels > 1) {
         m_horizontalTemp.width = m_upsampleChain[1].width;
         m_horizontalTemp.height = m_upsampleChain[1].height;
-        m_horizontalTemp.pitch = m_upsampleChain[1].pitch;
+        m_horizontalTemp.pitchBytes = m_upsampleChain[1].pitchBytes;
         m_horizontalTemp.sizeBytes = m_upsampleChain[1].sizeBytes;
 
         CUresult err = cuMemAlloc(&m_horizontalTemp.devicePtr, m_horizontalTemp.sizeBytes);
@@ -359,7 +376,7 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
     {
         m_gaussianDownsampleTemp.width = m_mipChain[0].width;
         m_gaussianDownsampleTemp.height = m_mipChain[0].height;
-        m_gaussianDownsampleTemp.pitch = m_mipChain[0].pitch;
+        m_gaussianDownsampleTemp.pitchBytes = m_mipChain[0].pitchBytes;
         m_gaussianDownsampleTemp.sizeBytes = m_mipChain[0].sizeBytes;
 
         CUresult err = cuMemAlloc(&m_gaussianDownsampleTemp.devicePtr, m_gaussianDownsampleTemp.sizeBytes);
@@ -453,11 +470,23 @@ bool JustGlowCUDARenderer::Render(
         }
     }
 
+    // Synchronize: Downsample must complete before Upsample reads mipChain
+    if (success) {
+        cuEventRecord(m_syncEvent, m_stream);
+        cuStreamWaitEvent(m_stream, m_syncEvent, 0);
+    }
+
     if (success) {
         CUDA_LOG("--- Upsample Chain ---");
         if (!ExecuteUpsampleChain(params)) {
             success = false;
         }
+    }
+
+    // Synchronize: Upsample must complete before Composite reads upsampleChain
+    if (success) {
+        cuEventRecord(m_syncEvent, m_stream);
+        cuStreamWaitEvent(m_stream, m_syncEvent, 0);
     }
 
     if (success) {
@@ -598,6 +627,10 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
             if (!CheckCUDAError(err, "cuLaunchKernel(GaussianDownsampleH)")) {
                 return false;
             }
+
+            // Synchronize: H-blur must complete before V-blur reads temp buffer
+            cuEventRecord(m_syncEvent, m_stream);
+            cuStreamWaitEvent(m_stream, m_syncEvent, 0);
 
             // Pass 2: Vertical Gaussian blur + 2x downsample (temp -> dst)
             int vGridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
