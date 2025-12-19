@@ -681,8 +681,8 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
 // ============================================================================
 
 bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
-    // Correct upsample logic (from Gemini correction):
-    // Result = BlurUpsample(Previous) + Current × Weight
+    // Correct upsample logic:
+    // Result = GaussianUpsample(Previous) + Current × Weight
     // - Previous = previous upsample result (from deeper level, smaller texture)
     // - Current = stored downsample at current level
     //
@@ -691,9 +691,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
     // - prevLevel (previous upsample result) = m_upsampleChain[i+1] (or nullptr for deepest)
     // - output = m_upsampleChain[i]
     //
-    // Blur modes:
-    // - Level 0-4: 2-pass Separable Gaussian (HorizontalBlur + VerticalUpsample)
-    // - Level 5+:  Single-pass Tent filter (3x3)
+    // All levels use 9-tap Discrete Gaussian (3x3 pattern) with fixed 1.0 offset
+    // NO separable/linear optimization - prevents shift artifacts
 
     for (int i = params.mipLevels - 1; i >= 0; --i) {
         auto& currMip = m_mipChain[i];       // Current level's stored downsample (input)
@@ -702,7 +701,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int gridX = (dstUpsample.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstUpsample.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        // Use per-level blurOffset
+        // blurOffset is ignored by kernel (uses fixed 1.0), but still passed for API compatibility
         float blurOffset = params.blurOffsets[i];
 
         // Level index for weight calculation
@@ -721,116 +720,46 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             prevPitchPixels = prevUpsample.width;
         }
 
-        // Determine blur mode: 0=Tent, 1=Vertical Gaussian (separable)
-        int blurMode = (i <= 4 && prevLevel != 0) ? 1 : 0;
+        // blurMode is ignored by kernel (always uses 9-tap Discrete Gaussian)
+        int blurMode = 0;
 
-        // For levels 0-4 with prevLevel: run 2-pass separable Gaussian
-        if (blurMode == 1) {
-            // Pass 1: Horizontal Gaussian blur on prevLevel → m_horizontalTemp
-            int hGridX = (prevWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int hGridY = (prevHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        CUDA_LOG("Upsample[%d]: 9-tap Discrete Gaussian %dx%d -> %dx%d",
+            i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height);
 
-            void* hBlurParams[] = {
-                &prevLevel,                      // input
-                &m_horizontalTemp.devicePtr,     // output
-                (void*)&prevWidth,
-                (void*)&prevHeight,
-                (void*)&prevPitchPixels,
-                (void*)&blurOffset
-            };
+        int srcPitchPixels = currMip.width;
+        int dstPitchPixels = dstUpsample.width;
 
-            CUresult err = cuLaunchKernel(
-                m_horizontalBlurKernel,
-                hGridX, hGridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                hBlurParams, nullptr);
+        void* kernelParams[] = {
+            &currMip.devicePtr,      // input (current level's stored downsample)
+            &prevLevel,              // prevLevel (previous upsample result, or 0)
+            &dstUpsample.devicePtr,  // output
+            (void*)&currMip.width,
+            (void*)&currMip.height,
+            (void*)&srcPitchPixels,
+            (void*)&prevWidth,
+            (void*)&prevHeight,
+            (void*)&prevPitchPixels,
+            (void*)&dstUpsample.width,
+            (void*)&dstUpsample.height,
+            (void*)&dstPitchPixels,
+            (void*)&blurOffset,
+            (void*)&levelIndex,
+            (void*)&params.activeLimit,
+            (void*)&params.decayK,
+            (void*)&params.level1Weight,
+            (void*)&params.falloffType,
+            (void*)&blurMode
+        };
 
-            if (!CheckCUDAError(err, "cuLaunchKernel(HorizontalBlur)")) {
-                return false;
-            }
+        CUresult err = cuLaunchKernel(
+            m_upsampleKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            kernelParams, nullptr);
 
-            CUDA_LOG("Upsample[%d]: 2-pass Separable Gaussian, H-blur %dx%d", i, prevWidth, prevHeight);
-
-            // Pass 2: Vertical Gaussian upsample from horizontalTemp
-            // Update prevLevel pointer to use the horizontally blurred result
-            CUdeviceptr blurredPrev = m_horizontalTemp.devicePtr;
-
-            int srcPitchPixels = currMip.width;
-            int dstPitchPixels = dstUpsample.width;
-
-            void* kernelParams[] = {
-                &currMip.devicePtr,      // input (current level's stored downsample)
-                &blurredPrev,            // prevLevel (horizontally blurred)
-                &dstUpsample.devicePtr,  // output
-                (void*)&currMip.width,
-                (void*)&currMip.height,
-                (void*)&srcPitchPixels,
-                (void*)&prevWidth,
-                (void*)&prevHeight,
-                (void*)&prevPitchPixels,
-                (void*)&dstUpsample.width,
-                (void*)&dstUpsample.height,
-                (void*)&dstPitchPixels,
-                (void*)&blurOffset,
-                (void*)&levelIndex,
-                (void*)&params.activeLimit,
-                (void*)&params.decayK,
-                (void*)&params.level1Weight,
-                (void*)&params.falloffType,
-                (void*)&blurMode
-            };
-
-            err = cuLaunchKernel(
-                m_upsampleKernel,
-                gridX, gridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                kernelParams, nullptr);
-
-            if (!CheckCUDAError(err, "cuLaunchKernel(Upsample-VerticalGaussian)")) {
-                return false;
-            }
-        } else {
-            // Single-pass Tent filter for levels 5+ or when no prevLevel
-            CUDA_LOG("Upsample[%d]: Tent filter %dx%d -> %dx%d",
-                i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height);
-
-            int srcPitchPixels = currMip.width;
-            int dstPitchPixels = dstUpsample.width;
-
-            void* kernelParams[] = {
-                &currMip.devicePtr,      // input (current level's stored downsample)
-                &prevLevel,              // prevLevel (previous upsample result, or 0)
-                &dstUpsample.devicePtr,  // output
-                (void*)&currMip.width,
-                (void*)&currMip.height,
-                (void*)&srcPitchPixels,
-                (void*)&prevWidth,
-                (void*)&prevHeight,
-                (void*)&prevPitchPixels,
-                (void*)&dstUpsample.width,
-                (void*)&dstUpsample.height,
-                (void*)&dstPitchPixels,
-                (void*)&blurOffset,
-                (void*)&levelIndex,
-                (void*)&params.activeLimit,
-                (void*)&params.decayK,
-                (void*)&params.level1Weight,
-                (void*)&params.falloffType,
-                (void*)&blurMode
-            };
-
-            CUresult err = cuLaunchKernel(
-                m_upsampleKernel,
-                gridX, gridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                kernelParams, nullptr);
-
-            if (!CheckCUDAError(err, "cuLaunchKernel(Upsample-Tent)")) {
-                return false;
-            }
+        if (!CheckCUDAError(err, "cuLaunchKernel(Upsample)")) {
+            return false;
         }
     }
 
