@@ -277,16 +277,17 @@ __device__ void sampleBilinearZeroPad(
 }
 
 // ============================================================================
-// Soft Threshold (Fixed: threshold 아래 픽셀은 무조건 0)
-// Effective range: [threshold, threshold + 2*knee]
-// - Below threshold: 0
-// - threshold ~ threshold+2*knee: quadratic curve
-// - Above threshold+2*knee: linear
+// Soft Threshold (Symmetric around T)
+// Dynamic K: maxK = min(T, 1-T), actualK = maxK * softness
+// Effective range: [T-K, T+K] (symmetric)
+// - Below T-K: contribution = 0
+// - T-K ~ T+K: smooth S-curve
+// - Above T+K: contribution = 1.0 (pass through)
 // ============================================================================
 
 __device__ void softThreshold(
     float& r, float& g, float& b,
-    float threshold, float knee)
+    float threshold, float softness)
 {
     // Threshold 0 = bypass (모든 픽셀 통과)
     if (threshold <= 0.001f) {
@@ -294,36 +295,44 @@ __device__ void softThreshold(
     }
 
     float brightness = fmaxf(fmaxf(r, g), b);
-    float contribution;
 
-    // 1. Knee가 0일 때: hard threshold
-    if (knee <= 0.001f) {
-        contribution = fmaxf(0.0f, brightness - threshold);
-        contribution /= fmaxf(brightness, EPSILON);
-        contribution = fmaxf(contribution, 0.0f);
-        r *= contribution;
-        g *= contribution;
-        b *= contribution;
+    // Dynamic K calculation: maxK = min(T, 1-T), actualK = maxK * softness
+    float maxK = fminf(threshold, 1.0f - threshold);
+    float K = maxK * softness;
+
+    // Threshold range: [T-K, T+K] (symmetric around T)
+    float lowerBound = threshold - K;
+    float upperBound = threshold + K;
+
+    // Below T-K: contribution = 0
+    if (brightness <= lowerBound) {
+        r = 0.0f;
+        g = 0.0f;
+        b = 0.0f;
         return;
     }
 
-    // 2. Threshold 오프셋 (선형 구간 시작점)
-    float curveThreshold = threshold + knee;
+    // Above T+K: contribution = 1.0 (pass through)
+    if (brightness >= upperBound) {
+        return;
+    }
 
-    // 3. Soft curve 계산
-    // brightness < threshold: soft = 0 (clamp)
-    // brightness in [threshold, threshold+2*knee]: quadratic
-    float soft = brightness - threshold;
-    soft = clampf(soft, 0.0f, 2.0f * knee);
-    soft = (soft * soft) / (4.0f * knee);
+    // Hard threshold (no softness)
+    if (K <= 0.001f) {
+        if (brightness < threshold) {
+            r = 0.0f;
+            g = 0.0f;
+            b = 0.0f;
+        }
+        return;
+    }
 
-    // 4. 곡선 vs 선형 중 큰 값 선택
-    // brightness > threshold+2*knee 이면 선형이 더 큼
-    contribution = fmaxf(soft, brightness - curveThreshold);
+    // Soft curve in [T-K, T+K] range
+    // Normalize position: 0 at T-K, 1 at T+K
+    float t = (brightness - lowerBound) / (2.0f * K);
 
-    // 5. 정규화
-    contribution /= fmaxf(brightness, EPSILON);
-    contribution = fmaxf(contribution, 0.0f);
+    // Smooth step curve (S-curve)
+    float contribution = t * t * (3.0f - 2.0f * t);
 
     r *= contribution;
     g *= contribution;

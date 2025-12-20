@@ -356,10 +356,10 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_THRESHOLD);
 
-    // Soft Knee (0-100%)
+    // Threshold Softness (0-100%)
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
-        "Soft Knee",
+        "Threshold Softness",
         Ranges::ThresholdMin,
         Ranges::ThresholdMax,
         Ranges::ThresholdMin,
@@ -878,7 +878,7 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->threshold = param.u.fs_d.value / 100.0f;
 
-        // Soft Knee: UI 0-100 -> internal 0.0-1.0
+        // Threshold Softness: UI 0-100% -> internal 0.0-1.0
         // UI 50 (default) -> 0.5 knee width
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_SOFT_KNEE, in_data->current_time,
