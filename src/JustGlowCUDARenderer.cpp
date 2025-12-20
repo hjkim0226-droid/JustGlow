@@ -728,7 +728,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
     // - prevLevel (previous upsample result) = m_upsampleChain[i+1] (or nullptr for deepest)
     // - output = m_upsampleChain[i]
     //
-    // All levels use 9-tap Discrete Gaussian (3x3 pattern) with fixed 1.0 offset
+    // All levels use 9-tap Discrete Gaussian (3x3 pattern) with dynamic offset
+    // Offset = 1.5 + 0.3*level to prevent center clumping at higher levels
     // NO separable/linear optimization - prevents shift artifacts
 
     for (int i = params.mipLevels - 1; i >= 0; --i) {
@@ -738,7 +739,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int gridX = (dstUpsample.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstUpsample.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        // blurOffset is ignored by kernel (uses fixed 1.0), but still passed for API compatibility
+        // blurOffset from params (kernel uses dynamic offset internally, this is for API compatibility)
         float blurOffset = params.blurOffsets[i];
 
         // Level index for weight calculation
@@ -868,6 +869,11 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     int useLinear = params.linearize ? 1 : 0;
     int inputProfile = params.inputProfile;  // 1=sRGB, 2=Rec709, 3=Gamma2.2
 
+    // Glow tint color (from params.glowColor[3])
+    float glowTintR = params.glowColor[0];
+    float glowTintG = params.glowColor[1];
+    float glowTintB = params.glowColor[2];
+
     void* kernelParams[] = {
         &original,
         &debugBuffer,
@@ -891,7 +897,10 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&params.glowOpacity,
         (void*)&params.compositeMode,
         (void*)&useLinear,
-        (void*)&inputProfile
+        (void*)&inputProfile,
+        (void*)&glowTintR,
+        (void*)&glowTintG,
+        (void*)&glowTintB
     };
 
     CUresult err = cuLaunchKernel(

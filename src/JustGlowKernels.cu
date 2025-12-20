@@ -761,16 +761,18 @@ extern "C" __global__ void UpsampleKernel(
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
     // 9-Tap Discrete Gaussian (3x3 pattern)
-    // Fixed offset 2.0 - spreads blur wider to prevent center clumping
+    // Dynamic offset (1.5 + 0.3*level) - prevents center clumping at higher levels
     // Weights: Center=4/16, Cross=2/16, Diagonal=1/16 (total=16)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Fixed 1.5 pixel offset - balanced spread
-        // 1.0 caused center clumping, 2.0 might be too wide
-        const float offset = 1.5f;
+        // Dynamic offset based on level to prevent center clumping
+        // Higher levels (smaller textures) need wider relative offset
+        // Base 1.5 + 0.3 per level: Level0=1.5, Level2=2.1, Level4=2.7, etc.
+        const float baseOffset = 1.5f;
+        const float offset = baseOffset + (float)levelIndex * 0.3f;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)
@@ -961,7 +963,10 @@ extern "C" __global__ void DebugOutputKernel(
     float glowOpacity,      // 0-2
     int compositeMode,
     int useLinear,          // Enable sRGB to Linear conversion
-    int inputProfile)       // 1=sRGB, 2=Rec709, 3=Gamma2.2
+    int inputProfile,       // 1=sRGB, 2=Rec709, 3=Gamma2.2
+    float glowTintR,        // Glow tint color R
+    float glowTintG,        // Glow tint color G
+    float glowTintB)        // Glow tint color B
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1010,42 +1015,99 @@ extern "C" __global__ void DebugOutputKernel(
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
+        // Apply glow tint color
+        glowR *= glowTintR;
+        glowG *= glowTintG;
+        glowB *= glowTintB;
+
         // Apply exposure and glow opacity
         glowR *= exposure * glowOpacity;
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Apply source opacity
+        // Glow coverage (alpha inferred from RGB brightness)
+        // This is independent of blend mode
+        float glowCoverage = fmaxf(fmaxf(glowR, glowG), glowB);
+
+        // Apply source opacity (premultiplied)
         float srcR = origR * sourceOpacity;
         float srcG = origG * sourceOpacity;
         float srcB = origB * sourceOpacity;
+        float srcA = origA * sourceOpacity;
 
-        // Composite (Add mode works on premultiplied values)
+        // Final alpha (blend mode independent)
+        float finalAlpha = fmaxf(srcA, clampf(glowCoverage, 0.0f, 1.0f));
+
+        // Composite based on mode
         switch (compositeMode) {
-            case 0: // Add
+            case 0: // Add - works directly on premultiplied
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
                 break;
-            case 1: // Screen
-                resR = 1.0f - (1.0f - srcR) * (1.0f - glowR);
-                resG = 1.0f - (1.0f - srcG) * (1.0f - glowG);
-                resB = 1.0f - (1.0f - srcB) * (1.0f - glowB);
+
+            case 1: // Screen - requires Unpremult → Screen → Premult
+                if (srcA > 0.001f) {
+                    // Unpremultiply source to get straight values
+                    float straightSrcR = srcR / srcA;
+                    float straightSrcG = srcG / srcA;
+                    float straightSrcB = srcB / srcA;
+
+                    // Screen formula on straight values (glow is already straight-like)
+                    float screenR = 1.0f - (1.0f - straightSrcR) * (1.0f - glowR);
+                    float screenG = 1.0f - (1.0f - straightSrcG) * (1.0f - glowG);
+                    float screenB = 1.0f - (1.0f - straightSrcB) * (1.0f - glowB);
+
+                    // Premultiply back with final alpha
+                    resR = screenR * finalAlpha;
+                    resG = screenG * finalAlpha;
+                    resB = screenB * finalAlpha;
+                } else {
+                    // Source is transparent, just show glow
+                    resR = glowR * finalAlpha;
+                    resG = glowG * finalAlpha;
+                    resB = glowB * finalAlpha;
+                }
                 break;
-            case 2: // Overlay
-                resR = srcR < 0.5f ? 2.0f * srcR * glowR : 1.0f - 2.0f * (1.0f - srcR) * (1.0f - glowR);
-                resG = srcG < 0.5f ? 2.0f * srcG * glowG : 1.0f - 2.0f * (1.0f - srcG) * (1.0f - glowG);
-                resB = srcB < 0.5f ? 2.0f * srcB * glowB : 1.0f - 2.0f * (1.0f - srcB) * (1.0f - glowB);
+
+            case 2: // Overlay - requires Unpremult → Overlay → Premult
+                if (srcA > 0.001f) {
+                    // Unpremultiply source to get straight values
+                    float straightSrcR = srcR / srcA;
+                    float straightSrcG = srcG / srcA;
+                    float straightSrcB = srcB / srcA;
+
+                    // Overlay formula on straight values
+                    float overlayR = straightSrcR < 0.5f
+                        ? 2.0f * straightSrcR * glowR
+                        : 1.0f - 2.0f * (1.0f - straightSrcR) * (1.0f - glowR);
+                    float overlayG = straightSrcG < 0.5f
+                        ? 2.0f * straightSrcG * glowG
+                        : 1.0f - 2.0f * (1.0f - straightSrcG) * (1.0f - glowG);
+                    float overlayB = straightSrcB < 0.5f
+                        ? 2.0f * straightSrcB * glowB
+                        : 1.0f - 2.0f * (1.0f - straightSrcB) * (1.0f - glowB);
+
+                    // Premultiply back with final alpha
+                    resR = overlayR * finalAlpha;
+                    resG = overlayG * finalAlpha;
+                    resB = overlayB * finalAlpha;
+                } else {
+                    // Source is transparent, just show glow
+                    resR = glowR * finalAlpha;
+                    resG = glowG * finalAlpha;
+                    resB = glowB * finalAlpha;
+                }
                 break;
-            default:
+
+            default: // Fallback to Add
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
                 break;
         }
 
-        float glowLum = fmaxf(fmaxf(glowR, glowG), glowB);
-        resA = fmaxf(origA * sourceOpacity, clampf(glowLum, 0.0f, 1.0f));
+        resA = finalAlpha;
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
@@ -1053,12 +1115,19 @@ extern "C" __global__ void DebugOutputKernel(
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
+        // Apply glow tint color
+        glowR *= glowTintR;
+        glowG *= glowTintG;
+        glowB *= glowTintB;
+
+        // Apply exposure and opacity
         resR = glowR * exposure * glowOpacity;
         resG = glowG * exposure * glowOpacity;
         resB = glowB * exposure * glowOpacity;
 
-        float glowLum = fmaxf(fmaxf(resR, resG), resB);
-        resA = clampf(glowLum, 0.0f, 1.0f);
+        // Alpha from glow coverage
+        float glowCoverage = fmaxf(fmaxf(resR, resG), resB);
+        resA = clampf(glowCoverage, 0.0f, 1.0f);
     }
     else {
         // Debug view: show specific buffer (Prefilter, Down1-6, Up0-6)
