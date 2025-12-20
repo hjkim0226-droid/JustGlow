@@ -1015,10 +1015,9 @@ extern "C" __global__ void DebugOutputKernel(
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
-        // Apply glow tint color
-        glowR *= glowTintR;
-        glowG *= glowTintG;
-        glowB *= glowTintB;
+        // Note: Glow color/tint is already applied in Prefilter stage
+        // (via glowColor with preserveColor blending)
+        // Do NOT apply again here - causes blue channel to zero out completely
 
         // Apply exposure and glow opacity
         glowR *= exposure * glowOpacity;
@@ -1039,65 +1038,25 @@ extern "C" __global__ void DebugOutputKernel(
         float finalAlpha = fmaxf(srcA, clampf(glowCoverage, 0.0f, 1.0f));
 
         // Composite based on mode
+        // Note: Using direct premultiplied math to avoid edge fringing from unpremultiply
         switch (compositeMode) {
-            case 0: // Add - works directly on premultiplied
+            case 0: // Add - additive blending (standard glow)
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
                 break;
 
-            case 1: // Screen - requires Unpremult → Screen → Premult
-                if (srcA > 0.001f) {
-                    // Unpremultiply source to get straight values
-                    float straightSrcR = srcR / srcA;
-                    float straightSrcG = srcG / srcA;
-                    float straightSrcB = srcB / srcA;
-
-                    // Screen formula on straight values (glow is already straight-like)
-                    float screenR = 1.0f - (1.0f - straightSrcR) * (1.0f - glowR);
-                    float screenG = 1.0f - (1.0f - straightSrcG) * (1.0f - glowG);
-                    float screenB = 1.0f - (1.0f - straightSrcB) * (1.0f - glowB);
-
-                    // Premultiply back with final alpha
-                    resR = screenR * finalAlpha;
-                    resG = screenG * finalAlpha;
-                    resB = screenB * finalAlpha;
-                } else {
-                    // Source is transparent, just show glow
-                    resR = glowR * finalAlpha;
-                    resG = glowG * finalAlpha;
-                    resB = glowB * finalAlpha;
-                }
+            case 1: // Screen - 1-(1-src)(1-glow), applied on premultiplied values
+                // Not mathematically perfect but avoids edge fringing
+                resR = 1.0f - (1.0f - srcR) * (1.0f - glowR);
+                resG = 1.0f - (1.0f - srcG) * (1.0f - glowG);
+                resB = 1.0f - (1.0f - srcB) * (1.0f - glowB);
                 break;
 
-            case 2: // Overlay - requires Unpremult → Overlay → Premult
-                if (srcA > 0.001f) {
-                    // Unpremultiply source to get straight values
-                    float straightSrcR = srcR / srcA;
-                    float straightSrcG = srcG / srcA;
-                    float straightSrcB = srcB / srcA;
-
-                    // Overlay formula on straight values
-                    float overlayR = straightSrcR < 0.5f
-                        ? 2.0f * straightSrcR * glowR
-                        : 1.0f - 2.0f * (1.0f - straightSrcR) * (1.0f - glowR);
-                    float overlayG = straightSrcG < 0.5f
-                        ? 2.0f * straightSrcG * glowG
-                        : 1.0f - 2.0f * (1.0f - straightSrcG) * (1.0f - glowG);
-                    float overlayB = straightSrcB < 0.5f
-                        ? 2.0f * straightSrcB * glowB
-                        : 1.0f - 2.0f * (1.0f - straightSrcB) * (1.0f - glowB);
-
-                    // Premultiply back with final alpha
-                    resR = overlayR * finalAlpha;
-                    resG = overlayG * finalAlpha;
-                    resB = overlayB * finalAlpha;
-                } else {
-                    // Source is transparent, just show glow
-                    resR = glowR * finalAlpha;
-                    resG = glowG * finalAlpha;
-                    resB = glowB * finalAlpha;
-                }
+            case 2: // Overlay - conditional blend on premultiplied values
+                resR = srcR < 0.5f ? 2.0f * srcR * glowR : 1.0f - 2.0f * (1.0f - srcR) * (1.0f - glowR);
+                resG = srcG < 0.5f ? 2.0f * srcG * glowG : 1.0f - 2.0f * (1.0f - srcG) * (1.0f - glowG);
+                resB = srcB < 0.5f ? 2.0f * srcB * glowB : 1.0f - 2.0f * (1.0f - srcB) * (1.0f - glowB);
                 break;
 
             default: // Fallback to Add
@@ -1115,10 +1074,7 @@ extern "C" __global__ void DebugOutputKernel(
         float glowR, glowG, glowB, glowA;
         sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
-        // Apply glow tint color
-        glowR *= glowTintR;
-        glowG *= glowTintG;
-        glowB *= glowTintB;
+        // Note: Glow color already applied in Prefilter
 
         // Apply exposure and opacity
         resR = glowR * exposure * glowOpacity;
