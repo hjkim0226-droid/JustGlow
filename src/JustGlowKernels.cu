@@ -365,24 +365,15 @@ extern "C" __global__ void PrefilterKernel(
     int offsetX = (dstWidth - inputWidth) / 2;
     int offsetY = (dstHeight - inputHeight) / 2;
 
-    // Map output coordinates to input coordinates
-    int srcX = x - offsetX;
-    int srcY = y - offsetY;
+    // Map output coordinates to input UV coordinates
+    // No early return - all pixels calculated with ZeroPad sampling
+    // This ensures natural fade-out at edges without stretching
+    float srcX = (float)x - (float)offsetX;
+    float srcY = (float)y - (float)offsetY;
 
-    // Check if this pixel is outside original image bounds
-    // Outside pixels output 0 - glow spreading happens in downsample/upsample chain
-    if (srcX < 0 || srcX >= inputWidth || srcY < 0 || srcY >= inputHeight) {
-        int outIdx = (y * dstPitch + x) * 4;
-        output[outIdx + 0] = 0.0f;
-        output[outIdx + 1] = 0.0f;
-        output[outIdx + 2] = 0.0f;
-        output[outIdx + 3] = 0.0f;
-        return;
-    }
-
-    // UV coordinates for sampling (inside original bounds)
-    float u = ((float)srcX + 0.5f) / (float)inputWidth;
-    float v = ((float)srcY + 0.5f) / (float)inputHeight;
+    // UV coordinates (can be outside [0,1] for padding area)
+    float u = (srcX + 0.5f) / (float)inputWidth;
+    float v = (srcY + 0.5f) / (float)inputHeight;
 
     float texelX = 1.0f / (float)inputWidth;
     float texelY = 1.0f / (float)inputHeight;
@@ -403,32 +394,31 @@ extern "C" __global__ void PrefilterKernel(
     float Mr, Mg, Mb, Ma;
 
     // =========================================
-    // 13-tap sampling with CLAMP
-    // Uses sampleBilinear to clamp out-of-bounds UV to edge pixels
-    // This prevents edge shrinkage from threshold cutting darkened edges
-    // Samples stay in sRGB/Premultiplied space for now
+    // 13-tap sampling with ZERO PADDING
+    // Out-of-bounds samples return 0 for natural edge fade
+    // No edge stretching - pixels blend with black at boundaries
     // =========================================
 
     // Outer corners
-    sampleBilinear(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
-    sampleBilinear(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinear(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
-    sampleBilinear(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
+    sampleBilinearZeroPad(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
+    sampleBilinearZeroPad(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinearZeroPad(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
+    sampleBilinearZeroPad(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
 
     // Outer cross
-    sampleBilinear(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
-    sampleBilinear(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
-    sampleBilinear(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
-    sampleBilinear(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinearZeroPad(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinearZeroPad(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
+    sampleBilinearZeroPad(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
+    sampleBilinearZeroPad(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
 
     // Inner corners
-    sampleBilinear(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
-    sampleBilinear(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
-    sampleBilinear(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
-    sampleBilinear(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
+    sampleBilinearZeroPad(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
+    sampleBilinearZeroPad(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
+    sampleBilinearZeroPad(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
+    sampleBilinearZeroPad(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
 
     // Center
-    sampleBilinear(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
+    sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
 
     // =========================================
     // Weighted Average (kernel weights only)
