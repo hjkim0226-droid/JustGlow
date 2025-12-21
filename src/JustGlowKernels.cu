@@ -821,7 +821,7 @@ extern "C" __global__ void UpsampleKernel(
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
     // 9-Tap Discrete Gaussian (3x3 pattern)
-    // Dynamic offset (1.5 + 0.3*level) - prevents center clumping at higher levels
+    // Fixed offset 1.0 for consistent bilinear sampling across all levels
     // Weights: Center=4/16, Cross=2/16, Diagonal=1/16 (total=16)
     // =========================================================
     if (prevLevel != nullptr) {
