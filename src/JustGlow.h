@@ -100,6 +100,7 @@ enum ParamID {
     PARAM_HDR_MODE,             // Enable Karis Average for HDR
     PARAM_LINEARIZE,            // Enable Linear conversion
     PARAM_INPUT_PROFILE,        // Input color profile (sRGB/Rec709/Gamma2.2)
+    PARAM_DITHER,               // Dithering amount (0-100%) for banding prevention
 
     // === Debug Options ===
     PARAM_DEBUG_VIEW,           // Debug view mode (Final/Prefilter/Down0-6/Up0-6/GlowOnly)
@@ -129,6 +130,7 @@ enum ParamDiskID {
     DISK_ID_HDR_MODE,
     DISK_ID_LINEARIZE,
     DISK_ID_INPUT_PROFILE,
+    DISK_ID_DITHER,
     DISK_ID_DEBUG_VIEW,
     DISK_ID_SOURCE_OPACITY,
     DISK_ID_GLOW_OPACITY
@@ -217,6 +219,7 @@ namespace Defaults {
     constexpr bool  HDRMode         = true;
     constexpr bool  Linearize       = false;  // OFF by default (simpler, no alpha issues)
     constexpr int   InputProfile    = static_cast<int>(::InputProfile::sRGB);
+    constexpr float Dither          = 50.0f;  // 50% dithering for banding prevention
 
     // Debug
     constexpr int   DebugView       = static_cast<int>(DebugViewMode::Final);
@@ -256,6 +259,10 @@ namespace Ranges {
     // Anamorphic Angle
     constexpr float AngleMin        = -90.0f;
     constexpr float AngleMax        = 90.0f;
+
+    // Dither
+    constexpr float DitherMin       = 0.0f;
+    constexpr float DitherMax       = 100.0f;
 
     // Debug: Glow Opacity
     constexpr float GlowOpacityMin  = 0.0f;
@@ -307,6 +314,7 @@ struct JustGlowPreRenderData {
     bool hdrMode;
     bool linearize;         // Enable sRGB to Linear conversion
     InputProfile inputProfile;  // Input color profile (sRGB/Rec709/Gamma2.2)
+    float dither;           // Dithering amount (0-100%)
 
     // Debug
     DebugViewMode debugView;

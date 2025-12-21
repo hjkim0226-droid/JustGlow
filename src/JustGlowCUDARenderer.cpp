@@ -874,6 +874,8 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     float glowTintG = params.glowColor[1];
     float glowTintB = params.glowColor[2];
 
+    float dither = params.dither;
+
     void* kernelParams[] = {
         &original,
         &debugBuffer,
@@ -900,7 +902,8 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&inputProfile,
         (void*)&glowTintR,
         (void*)&glowTintG,
-        (void*)&glowTintB
+        (void*)&glowTintB,
+        (void*)&dither
     };
 
     CUresult err = cuLaunchKernel(

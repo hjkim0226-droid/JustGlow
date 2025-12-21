@@ -961,7 +961,8 @@ extern "C" __global__ void DebugOutputKernel(
     int inputProfile,       // 1=sRGB, 2=Rec709, 3=Gamma2.2
     float glowTintR,        // Glow tint color R
     float glowTintG,        // Glow tint color G
-    float glowTintB)        // Glow tint color B
+    float glowTintB,        // Glow tint color B
+    float dither)           // Dithering amount (0-1)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1189,6 +1190,19 @@ extern "C" __global__ void DebugOutputKernel(
         }
     }
     // When useLinear=false, output stays in Premultiplied (sRGB/Rec709/Gamma2.2)
+
+    // =========================================
+    // Dithering (banding prevention)
+    // =========================================
+    if (dither > 0.0f) {
+        // Pseudo-random noise based on pixel position (fast hash)
+        float noise = fmodf(sinf((float)x * 12.9898f + (float)y * 78.233f) * 43758.5453f, 1.0f) - 0.5f;
+        // Scale to ~1-2 bits range (dither=1.0 -> ~2/255 amplitude)
+        float ditherAmount = dither * (2.0f / 255.0f) * noise;
+        resR += ditherAmount;
+        resG += ditherAmount;
+        resB += ditherAmount;
+    }
 
     int outIdx = (y * outputPitch + x) * 4;
     output[outIdx + 0] = resR;

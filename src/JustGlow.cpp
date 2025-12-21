@@ -494,6 +494,16 @@ PF_Err ParamsSetup(
         "sRGB|Rec.709|Gamma 2.2",
         DISK_ID_INPUT_PROFILE);
 
+    // Dither (banding prevention)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Dither",
+        Ranges::DitherMin, Ranges::DitherMax,
+        Ranges::DitherMin, Ranges::DitherMax,
+        Defaults::Dither,
+        PF_Precision_TENTHS, 0, 0,
+        DISK_ID_DITHER);
+
     // ===========================================
     // Debug Options
     // ===========================================
@@ -965,6 +975,12 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->inputProfile = static_cast<InputProfile>(param.u.pd.value);
 
+        // Dither
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_DITHER, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->dither = static_cast<float>(param.u.fs_d.value);
+
         // ===========================================
         // Debug Options
         // ===========================================
@@ -1165,6 +1181,7 @@ PF_Err SmartRender(
                     rp.hdrMode = preRenderData->hdrMode;
                     rp.linearize = preRenderData->linearize;
                     rp.inputProfile = static_cast<int>(preRenderData->inputProfile);
+                    rp.dither = preRenderData->dither / 100.0f;  // 0-1
 
                     // Debug
                     rp.debugView = static_cast<int>(preRenderData->debugView);

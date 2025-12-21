@@ -203,6 +203,7 @@ struct RenderParams {
     bool    hdrMode;
     bool    linearize;          // Enable sRGB to Linear conversion
     int     inputProfile;       // Input color profile (1=sRGB, 2=Rec709, 3=Gamma2.2)
+    float   dither;             // Dithering amount (0-1, from 0-100%)
 
     // Debug
     int     debugView;          // DebugViewMode enum value
