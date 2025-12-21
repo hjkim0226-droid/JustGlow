@@ -144,18 +144,12 @@ __device__ __forceinline__ float calculatePhysicalWeight(float level, float fall
     if (level < 0.5f) return 1.0f;
 
     // Calculate decayRate from Falloff (0-100, 50=neutral)
-    // Falloff 0%   -> decayRate 1.25 (boost outer levels)
+    // Symmetric around neutral: decayRate = 1.0 - normalizedFalloff * 0.5
+    // Falloff 0%   -> decayRate 1.5  (boost outer levels)
     // Falloff 50%  -> decayRate 1.0  (neutral, natural decay only)
     // Falloff 100% -> decayRate 0.5  (strong decay to core)
     float normalizedFalloff = (falloff - 50.0f) / 50.0f;  // -1 to 1
-    float decayRate;
-    if (normalizedFalloff < 0.0f) {
-        // Boost: 0% -> 1.25, 50% -> 1.0
-        decayRate = 1.0f - normalizedFalloff * 0.25f;
-    } else {
-        // Decay: 50% -> 1.0, 100% -> 0.5
-        decayRate = 1.0f - normalizedFalloff * 0.5f;
-    }
+    float decayRate = 1.0f - normalizedFalloff * 0.5f;    // 0.5 to 1.5
 
     // Level 1 starts at level1Weight, then multiplies by decayRate per level
     // weight = level1Weight * pow(decayRate, level - 1)
