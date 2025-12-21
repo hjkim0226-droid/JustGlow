@@ -1183,10 +1183,10 @@ extern "C" __global__ void DebugOutputKernel(
                 break;
         }
 
-        // Calculate alpha from blended result
-        // Coverage = max RGB of blended result, clamped to [0,1]
-        float blendedCoverage = clampf(fmaxf(fmaxf(resR, resG), resB), 0.0f, 1.0f);
-        resA = fmaxf(srcA, blendedCoverage);
+        // Calculate alpha: if there's any glow, output is opaque
+        // This prevents dim glows from being made even dimmer by low alpha
+        float glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
+        resA = (glowBrightness > 0.001f || srcA > 0.001f) ? 1.0f : 0.0f;
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
@@ -1212,9 +1212,8 @@ extern "C" __global__ void DebugOutputKernel(
             resB = resB + (glowLum - resB) * desatAmount;
         }
 
-        // Alpha from glow coverage
-        float glowCoverage = fmaxf(fmaxf(resR, resG), resB);
-        resA = clampf(glowCoverage, 0.0f, 1.0f);
+        // Alpha: if there's any glow, output is opaque
+        resA = (glowBrightness > 0.001f) ? 1.0f : 0.0f;
     }
     else {
         // Debug view: show specific buffer (Prefilter, Down1-6, Up0-6)
