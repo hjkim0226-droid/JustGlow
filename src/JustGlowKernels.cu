@@ -849,18 +849,18 @@ extern "C" __global__ void UpsampleKernel(
         float Bor, Bog, Bob, Boa;  // Bottom (cross)
         float BRr, BRg, BRb, BRa;  // Bottom-Right (diagonal)
 
-        // Sample all 9 points at fixed 1.0 pixel intervals
-        sampleBilinear(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
-        sampleBilinear(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
-        sampleBilinear(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
+        // Sample all 9 points with ZeroPad (consistent with downsample)
+        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
+        sampleBilinearZeroPad(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
+        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
 
-        sampleBilinear(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
-        sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
-        sampleBilinear(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
+        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
+        sampleBilinearZeroPad(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
+        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
 
-        sampleBilinear(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
-        sampleBilinear(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
-        sampleBilinear(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
+        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
+        sampleBilinearZeroPad(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
+        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
 
         // Gaussian weights: Center=4/16, Cross=2/16, Diagonal=1/16
         // This is the standard "국룰" for smooth upsampling
@@ -884,7 +884,7 @@ extern "C" __global__ void UpsampleKernel(
     // "현재 층의 디테일을 가중치 적용해서 더한다"
     // =========================================================
     float currR, currG, currB, currA;
-    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, currR, currG, currB, currA);
+    sampleBilinearZeroPad(input, u, v, srcWidth, srcHeight, srcPitch, currR, currG, currB, currA);
 
     // Weight calculation for current level
     // A. Physical decay weight (The Shape) - Level 0=100%, Level 1=level1Weight, then decay
