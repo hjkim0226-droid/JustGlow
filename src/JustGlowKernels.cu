@@ -721,10 +721,11 @@ extern "C" __global__ void HorizontalBlurKernel(
 // Standard 3x3 Gaussian Upsample - NO Linear Optimization (prevents shift)
 // Parameters:
 // - levelIndex: current MIP level (0 = core, higher = atmosphere)
-// - activeLimit: Radius-controlled level limit (fade out beyond this)
-// - decayK: Falloff decay constant (0.2-3.0, higher = steeper)
+// - activeLimit: Radius-controlled threshold base (0-1, from radius param)
+// - decayK: Falloff decay constant (0-100, 50=neutral)
 // - falloffType: 0=Exponential, 1=InverseSquare, 2=Linear
-// - blurMode: ignored (kept for API compatibility)
+// - maxLevels: total MIP levels for threshold scaling
+// NEW: Radius now applies soft threshold per level instead of hard cutoff
 // ============================================================================
 
 extern "C" __global__ void UpsampleKernel(
@@ -736,11 +737,12 @@ extern "C" __global__ void UpsampleKernel(
     int dstWidth, int dstHeight, int dstPitch,
     float blurOffset,  // ignored, using fixed 1.0
     int levelIndex,
-    float activeLimit,
+    float activeLimit,  // now 0-1 (radius / 100)
     float decayK,
     float level1Weight,
     int falloffType,
-    int blurMode)  // ignored, always use 9-tap Discrete Gaussian
+    int maxLevels,      // total MIP levels
+    int blurMode)       // ignored, always use 9-tap Discrete Gaussian
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -825,22 +827,53 @@ extern "C" __global__ void UpsampleKernel(
     // A. Physical decay weight (The Shape) - Level 0=100%, Level 1=level1Weight, then decay
     float physicalWeight = calculatePhysicalWeight((float)levelIndex, decayK, falloffType, level1Weight);
 
-    // B. Distance fade weight (The Cutoff)
-    // Smooth fade out for levels beyond activeLimit (controlled by Radius)
-    float fadeWeight = 1.0f - smoothstepf(activeLimit, activeLimit + 1.0f, (float)levelIndex);
+    // Apply physical weight first
+    float contribR = currR * physicalWeight;
+    float contribG = currG * physicalWeight;
+    float contribB = currB * physicalWeight;
 
-    // C. Final weight combines:
-    //    - Physical decay (falloff shape)
-    //    - Distance cutoff (radius control)
-    //    - Exposure is NOW applied in CompositeKernel to prevent accumulation explosion
-    float finalWeight = physicalWeight * fadeWeight;
+    // B. Radius-based Soft Threshold (replaces hard level cutoff)
+    // - Higher level = more threshold applied
+    // - Lower radius = more threshold applied
+    // - Removes "faint" outer glow first, keeps bright core
+    float levelRatio = (float)levelIndex / fmaxf((float)maxLevels, 1.0f);  // 0 to 1
+    float radiusFactor = 1.0f - activeLimit;  // activeLimit is radius/100, so inverted
 
-    // Add weighted current level contribution to upsampled base
-    // Result = TentUpsample(Previous) + Current × Weight
-    // Note: Exposure will be applied once in Composite, not accumulated per level
-    resR = resR + currR * finalWeight;
-    resG = resG + currG * finalWeight;
-    resB = resB + currB * finalWeight;
+    // Threshold increases with level and decreases with radius
+    // At radius=100% (activeLimit=1): threshold = 0 for all levels
+    // At radius=0% (activeLimit=0): threshold = levelRatio (higher for outer levels)
+    float levelThreshold = radiusFactor * levelRatio * 0.5f;  // max threshold = 0.5 at level=max, radius=0
+
+    // Soft knee = 50% of threshold (automatic)
+    float knee = levelThreshold * 0.5f;
+
+    // Apply soft threshold to contribution (per channel)
+    if (levelThreshold > 0.001f) {
+        float brightness = fmaxf(fmaxf(contribR, contribG), contribB);
+
+        float lowerBound = levelThreshold - knee;
+        float upperBound = levelThreshold + knee;
+
+        float contribution = 1.0f;
+        if (brightness <= lowerBound) {
+            contribution = 0.0f;
+        } else if (brightness < upperBound) {
+            // Soft curve in transition zone
+            float t = (brightness - lowerBound) / fmaxf(2.0f * knee, 0.001f);
+            contribution = t * t * (3.0f - 2.0f * t);  // smoothstep
+        }
+        // else contribution = 1.0 (full pass)
+
+        contribR *= contribution;
+        contribG *= contribution;
+        contribB *= contribution;
+    }
+
+    // Add to upsampled base
+    // Result = TentUpsample(Previous) + Current × Weight (after threshold)
+    resR = resR + contribR;
+    resG = resG + contribG;
+    resB = resB + contribB;
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;

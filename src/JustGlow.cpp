@@ -1010,10 +1010,11 @@ PF_Err PreRender(
         // MIP levels from quality setting
         preRenderData->mipLevels = GetQualityLevelCount(preRenderData->quality);
 
-        // activeLimit: Radius -> active MIP level limit
-        // Radius 100 = all levels, Radius 0 = only level 0
-        preRenderData->activeLimit = (preRenderData->radius / 100.0f) *
-                                      static_cast<float>(preRenderData->mipLevels);
+        // activeLimit: Radius -> soft threshold factor (0-1)
+        // Radius 100% = no threshold (all glow passes)
+        // Radius 0% = max threshold (only bright glow core)
+        // Now uses per-level soft threshold instead of hard MIP cutoff
+        preRenderData->activeLimit = preRenderData->radius / 100.0f;
 
         // blurOffsets: Spread -> per-level pixel offset (decays from spread to 1.5px)
         // Level 0 gets full offset, deeper levels decay toward 1.5px minimum

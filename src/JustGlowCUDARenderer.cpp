@@ -767,6 +767,10 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int srcPitchPixels = currMip.width;
         int dstPitchPixels = dstUpsample.width;
 
+        // activeLimit is now 0-1 (radius / 100) for soft threshold
+        float activeLimit = params.activeLimit;
+        int maxLevels = params.mipLevels;
+
         void* kernelParams[] = {
             &currMip.devicePtr,      // input (current level's stored downsample)
             &prevLevel,              // prevLevel (previous upsample result, or 0)
@@ -782,10 +786,11 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             (void*)&dstPitchPixels,
             (void*)&blurOffset,
             (void*)&levelIndex,
-            (void*)&params.activeLimit,
+            (void*)&activeLimit,
             (void*)&params.decayK,
             (void*)&params.level1Weight,
             (void*)&params.falloffType,
+            (void*)&maxLevels,
             (void*)&blurMode
         };
 
