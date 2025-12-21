@@ -828,11 +828,10 @@ extern "C" __global__ void UpsampleKernel(
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Dynamic offset based on level to prevent center clumping
-        // Higher levels (smaller textures) need wider relative offset
-        // Base 1.5 + 0.3 per level: Level0=1.5, Level2=2.1, Level4=2.7, etc.
-        const float baseOffset = 1.5f;
-        const float offset = baseOffset + (float)levelIndex * 0.3f;
+        // Fixed offset for consistent bilinear sampling
+        // 1.0 = sample exactly at neighboring pixel centers
+        // Prevents ghosting at high MIP levels where dynamic offset exceeded texture size
+        const float offset = 1.0f;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)
