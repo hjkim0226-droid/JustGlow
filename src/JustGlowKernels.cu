@@ -420,12 +420,13 @@ extern "C" __global__ void PrefilterKernel(
     // =========================================
     (void)useHDR;  // Suppress unused parameter warning
 
-    // Kernel weights for 13-tap sampling:
-    // Center G: 0.125, Inner DEIJ: 0.03125 each, Outer cross BFHL: 0.015625 each, Outer corners ACKM: 0.0078125 each
-    const float wCenter = 0.125f;
-    const float wInner = 0.03125f;
-    const float wCross = 0.015625f;
-    const float wCorner = 0.0078125f;
+    // Kernel weights for 13-tap sampling (normalized to sum = 1.0):
+    // Center G: 4/11, Inner DEIJ: 1/11 each (4/11 total), Outer cross BFHL: 1/22 each (2/11 total), Corners ACKM: 1/44 each (1/11 total)
+    // Previous weights summed to 0.34375, causing ~66% brightness loss
+    const float wCenter = 4.0f / 11.0f;      // 0.3636
+    const float wInner = 1.0f / 11.0f;       // 0.0909
+    const float wCross = 1.0f / 22.0f;       // 0.0455
+    const float wCorner = 1.0f / 44.0f;      // 0.0227
 
     // Simple weighted average of premultiplied RGB
     // Zero-padded samples contribute 0, which is correct for blur (light spreads into empty space)
