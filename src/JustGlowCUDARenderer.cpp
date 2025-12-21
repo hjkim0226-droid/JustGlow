@@ -595,94 +595,47 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
 // ============================================================================
 
 bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
-    // Unified downsample: 2D Gaussian (9-tap, ZeroPad) for Level 0-4, Kawase for 5+
-    // Uses single-pass 2D Gaussian instead of separable H+V for consistency
+    // All levels use 2D Gaussian (9-tap, ZeroPad) for temporal stability
+    // Kawase removed - caused blur flickering on subpixel movement
     // ZeroPad sampling prevents edge energy concentration across different buffer sizes
-    constexpr int GAUSSIAN_LEVELS = 5;  // Use 2D Gaussian for levels 0, 1, 2, 3, 4
 
     for (int i = 0; i < params.mipLevels - 1; ++i) {
         auto& srcMip = m_mipChain[i];
         auto& dstMip = m_mipChain[i + 1];
 
-        // Use per-level blurOffset (decays from spread to 1.5px for deeper levels)
-        float blurOffset = params.blurOffsets[i];
+        // =========================================
+        // 2D Gaussian 9-tap (single pass, ZeroPad)
+        // Temporally stable - no flickering on movement
+        // =========================================
+        int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        if (i < GAUSSIAN_LEVELS) {
-            // =========================================
-            // 2D Gaussian 9-tap (single pass, ZeroPad)
-            // Replaces separable H+V for buffer-size consistency
-            // =========================================
-            int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int srcPitchPixels = srcMip.width;
+        int dstPitchPixels = dstMip.width;
 
-            int srcPitchPixels = srcMip.width;
-            int dstPitchPixels = dstMip.width;
+        CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad)",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height);
 
-            CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad)",
-                i, srcMip.width, srcMip.height, dstMip.width, dstMip.height);
+        void* kernelParams[] = {
+            &srcMip.devicePtr,
+            &dstMip.devicePtr,
+            (void*)&srcMip.width,
+            (void*)&srcMip.height,
+            (void*)&srcPitchPixels,
+            (void*)&dstMip.width,
+            (void*)&dstMip.height,
+            (void*)&dstPitchPixels
+        };
 
-            void* kernelParams[] = {
-                &srcMip.devicePtr,
-                &dstMip.devicePtr,
-                (void*)&srcMip.width,
-                (void*)&srcMip.height,
-                (void*)&srcPitchPixels,
-                (void*)&dstMip.width,
-                (void*)&dstMip.height,
-                (void*)&dstPitchPixels
-            };
+        CUresult err = cuLaunchKernel(
+            m_gaussian2DDownsampleKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            kernelParams, nullptr);
 
-            CUresult err = cuLaunchKernel(
-                m_gaussian2DDownsampleKernel,
-                gridX, gridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                kernelParams, nullptr);
-
-            if (!CheckCUDAError(err, "cuLaunchKernel(Gaussian2DDownsample)")) {
-                return false;
-            }
-        } else {
-            // =========================================
-            // Kawase 5-tap (single pass, ZeroPad)
-            // =========================================
-            int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-
-            // Alternate between X (diagonal) and + (cross) patterns
-            // This breaks up boxy artifacts -> rounder glow
-            int rotationMode = i % 2;  // 0=X, 1=+
-
-            CUDA_LOG("Downsample[%d]: Kawase %dx%d -> %dx%d, rotation=%s (ZeroPad)",
-                i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
-                rotationMode == 0 ? "X" : "+");
-
-            int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
-            int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
-
-            void* kernelParams[] = {
-                &srcMip.devicePtr,
-                &dstMip.devicePtr,
-                (void*)&srcMip.width,
-                (void*)&srcMip.height,
-                (void*)&srcPitchPixels,
-                (void*)&dstMip.width,
-                (void*)&dstMip.height,
-                (void*)&dstPitchPixels,
-                (void*)&blurOffset,
-                (void*)&rotationMode
-            };
-
-            CUresult err = cuLaunchKernel(
-                m_downsampleKernel,
-                gridX, gridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                kernelParams, nullptr);
-
-            if (!CheckCUDAError(err, "cuLaunchKernel(Downsample)")) {
-                return false;
-            }
+        if (!CheckCUDAError(err, "cuLaunchKernel(Gaussian2DDownsample)")) {
+            return false;
         }
     }
 

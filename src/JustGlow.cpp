@@ -374,13 +374,15 @@ PF_Err ParamsSetup(
     // Blur Options
     // ===========================================
 
-    // Quality (determines max MIP levels)
+    // Quality (MIP levels, 6-12)
     AEFX_CLR_STRUCT(def);
-    PF_ADD_POPUP(
+    PF_ADD_SLIDER(
         "Quality",
-        4,  // Number of choices
-        Defaults::Quality,
-        "Low (4)|Medium (6)|High (8)|Ultra (12)",
+        Ranges::QualityMin,    // 6
+        Ranges::QualityMax,    // 12
+        Ranges::QualityMin,    // slider min
+        Ranges::QualityMax,    // slider max
+        Defaults::Quality,     // 8
         DISK_ID_QUALITY);
 
     // Falloff Type (decay curve shape)
@@ -791,7 +793,7 @@ PF_Err PreRender(
     AEFX_CLR_STRUCT(qualityParam);
     PF_CHECKOUT_PARAM(in_data, PARAM_QUALITY, in_data->current_time,
         in_data->time_step, in_data->time_scale, &qualityParam);
-    BlurQuality quality = static_cast<BlurQuality>(qualityParam.u.pd.value);
+    int quality = qualityParam.u.sd.value;  // Direct integer (6-12)
     int mipLevels = GetQualityLevelCount(quality);
 
     // Get spread for more accurate expansion
@@ -891,11 +893,11 @@ PF_Err PreRender(
         // Blur Options
         // ===========================================
 
-        // Quality
+        // Quality (MIP levels 6-12)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_QUALITY, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->quality = static_cast<BlurQuality>(param.u.pd.value);
+        preRenderData->quality = param.u.sd.value;  // Direct integer
 
         // Falloff Type
         AEFX_CLR_STRUCT(param);
@@ -1157,8 +1159,8 @@ PF_Err SmartRender(
                     rp.threshold = preRenderData->threshold;
                     rp.softKnee = preRenderData->softKnee;
 
-                    // Quality
-                    rp.quality = static_cast<int>(preRenderData->quality);
+                    // Quality (MIP levels)
+                    rp.quality = preRenderData->quality;
 
                     // Color
                     rp.glowColor[0] = preRenderData->glowColorR;

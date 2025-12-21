@@ -63,7 +63,7 @@ constexpr int PRERENDER_MAX_MIP_LEVELS = 12;
 #define PLUGIN_DESCRIPTION      "High-quality GPU Glow Effect with Dual Kawase Blur"
 
 #define MAJOR_VERSION           1
-#define MINOR_VERSION           4
+#define MINOR_VERSION           5
 #define BUG_VERSION             0
 #define STAGE_VERSION           PF_Stage_DEVELOP
 #define BUILD_VERSION           1
@@ -140,13 +140,9 @@ enum ParamDiskID {
 // Enumerations
 // ============================================================================
 
-// Blur quality levels (determines MIP chain depth)
-enum class BlurQuality : int {
-    Low = 1,        // 4 levels - fastest
-    Medium = 2,     // 6 levels - balanced
-    High = 3,       // 8 levels - high quality (default)
-    Ultra = 4       // 12 levels - maximum quality (Deep Glow feel)
-};
+// Quality: MIP chain depth (6-12 levels)
+// Replaced enum with direct integer for finer control
+// 6 = fast, 8 = balanced (default), 12 = maximum quality
 
 // Falloff curve types (decay models)
 enum class FalloffType : int {
@@ -205,8 +201,8 @@ namespace Defaults {
     constexpr float SoftKnee        = 75.0f;    // 75% - softer threshold transition
 
     // Blur Options
-    constexpr int   Quality         = static_cast<int>(BlurQuality::High);
-    constexpr int   FalloffType     = static_cast<int>(FalloffType::Exponential);
+    constexpr int   Quality         = 8;  // MIP levels (6-12), 8 = balanced default
+    constexpr int   FalloffType     = static_cast<int>(::FalloffType::Exponential);
 
     // Color
     constexpr float ColorTemp       = 0.0f;     // Neutral
@@ -243,6 +239,10 @@ namespace Ranges {
 
     constexpr float FalloffMin      = 0.0f;
     constexpr float FalloffMax      = 100.0f;   // 0=boost, 50=neutral, 100=decay
+
+    // Quality (MIP levels)
+    constexpr int   QualityMin      = 6;
+    constexpr int   QualityMax      = 12;
 
     // Threshold & Soft Knee
     constexpr float ThresholdMin    = 0.0f;
@@ -299,7 +299,7 @@ struct JustGlowPreRenderData {
     float softKnee;     // 0-100: soft knee width
 
     // Blur Options
-    BlurQuality quality;
+    int quality;  // MIP levels (6-12)
     FalloffType falloffType;
 
     // Color
@@ -405,15 +405,12 @@ PF_Err SmartRender(
 // ============================================================================
 
 // Get quality level count (number of MIP levels)
-// New system: Quality determines MIP depth, not Radius
-inline int GetQualityLevelCount(BlurQuality quality) {
-    switch (quality) {
-        case BlurQuality::Low:    return 4;   // Fast
-        case BlurQuality::Medium: return 6;   // Balanced
-        case BlurQuality::High:   return 8;   // High quality
-        case BlurQuality::Ultra:  return 12;  // Deep Glow feel
-        default:                  return 8;
-    }
+// Quality is now a direct integer (6-12)
+inline int GetQualityLevelCount(int quality) {
+    // Clamp to valid range
+    if (quality < Ranges::QualityMin) return Ranges::QualityMin;
+    if (quality > Ranges::QualityMax) return Ranges::QualityMax;
+    return quality;
 }
 
 // Color temperature to RGB multipliers

@@ -6,12 +6,14 @@
  *
  * Kernels:
  * - PrefilterKernel: 13-tap downsample + soft threshold + alpha-weighted average
- * - GaussianDownsampleH/VKernel: Separable 5-tap Gaussian (Level 0-4)
- * - DownsampleKernel: Dual Kawase 5-tap with X/+ rotation (Level 5+)
- * - UpsampleKernel: 9-tap tent filter with progressive blend
+ * - Gaussian2DDownsampleKernel: 9-tap 2D Gaussian for ALL levels (temporal stability)
+ * - UpsampleKernel: 9-tap Gaussian with progressive blend
  * - DebugOutputKernel: Final composite + debug view modes
  *
- * Note: Karis Average removed (v1.4.0) - caused artifacts on transparent backgrounds
+ * Notes:
+ * - Karis Average removed (v1.4.0) - caused artifacts on transparent backgrounds
+ * - Kawase downsample removed (v1.5.0) - caused temporal flickering on movement
+ * - All sampling uses ZeroPad for consistent edge behavior
  */
 
 #include <cuda_runtime.h>
@@ -1122,8 +1124,8 @@ extern "C" __global__ void DebugOutputKernel(
             float glowLum = 0.2126f * glowR + 0.7152f * glowG + 0.0722f * glowB;
             // Soft ramp: 0 at brightness=1, 1 at brightness=3
             float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
-            // Apply 30% desaturation (conservative to avoid too white)
-            float desatAmount = desatT * 0.3f;
+            // Apply 50% desaturation for bright highlights
+            float desatAmount = desatT * 0.5f;
             glowR = glowR + (glowLum - glowR) * desatAmount;
             glowG = glowG + (glowLum - glowG) * desatAmount;
             glowB = glowB + (glowLum - glowB) * desatAmount;
@@ -1204,7 +1206,7 @@ extern "C" __global__ void DebugOutputKernel(
         if (glowBrightness > 1.0f) {
             float glowLum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
             float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
-            float desatAmount = desatT * 0.3f;
+            float desatAmount = desatT * 0.5f;
             resR = resR + (glowLum - resR) * desatAmount;
             resG = resG + (glowLum - resG) * desatAmount;
             resB = resB + (glowLum - resB) * desatAmount;
