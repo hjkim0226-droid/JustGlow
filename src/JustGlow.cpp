@@ -801,7 +801,7 @@ PF_Err PreRender(
     // Calculate expansion: base + (spread factor * 2^mipLevels) * radius factor
     // Radius affects how many MIP levels are active, which determines max glow spread
     // radius 0 -> 0.5x, radius 50 -> 0.75x, radius 100 -> 1.0x
-    float radiusFactor = 0.5f + (radius / 200.0f);
+    float radiusFactor = 0.5f + (radius / 100.0f) * 0.5f;
     int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f) * radiusFactor);
     // Scale by downsample factor for preview resolution support
     glowExpansion = static_cast<int>(glowExpansion * downsampleFactor);
