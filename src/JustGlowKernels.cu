@@ -1116,6 +1116,20 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
+        // Highlight desaturation: brightness > 1.0 gradually desaturates toward white
+        // Prevents over-saturated "burning" colors in bright areas
+        float glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
+        if (glowBrightness > 1.0f) {
+            float glowLum = 0.2126f * glowR + 0.7152f * glowG + 0.0722f * glowB;
+            // Soft ramp: 0 at brightness=1, 1 at brightness=3
+            float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
+            // Apply 30% desaturation (conservative to avoid too white)
+            float desatAmount = desatT * 0.3f;
+            glowR = glowR + (glowLum - glowR) * desatAmount;
+            glowG = glowG + (glowLum - glowG) * desatAmount;
+            glowB = glowB + (glowLum - glowB) * desatAmount;
+        }
+
         // Apply source opacity (premultiplied)
         float srcR = origR * sourceOpacity;
         float srcG = origG * sourceOpacity;
@@ -1185,6 +1199,17 @@ extern "C" __global__ void DebugOutputKernel(
         resR = glowR * exposure * glowOpacity;
         resG = glowG * exposure * glowOpacity;
         resB = glowB * exposure * glowOpacity;
+
+        // Highlight desaturation (same as Final mode)
+        float glowBrightness = fmaxf(fmaxf(resR, resG), resB);
+        if (glowBrightness > 1.0f) {
+            float glowLum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
+            float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
+            float desatAmount = desatT * 0.3f;
+            resR = resR + (glowLum - resR) * desatAmount;
+            resG = resG + (glowLum - resG) * desatAmount;
+            resB = resB + (glowLum - resB) * desatAmount;
+        }
 
         // Alpha from glow coverage
         float glowCoverage = fmaxf(fmaxf(resR, resG), resB);
