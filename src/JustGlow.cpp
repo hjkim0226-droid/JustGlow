@@ -1003,6 +1003,7 @@ PF_Err PreRender(
 
         // MIP levels from quality setting
         preRenderData->mipLevels = GetQualityLevelCount(preRenderData->quality);
+        PLUGIN_LOG("PreRender: Quality=%d, MipLevels=%d", preRenderData->quality, preRenderData->mipLevels);
 
         // activeLimit: Radius -> soft threshold factor (0-1)
         // Radius 100% = no threshold (all glow passes)

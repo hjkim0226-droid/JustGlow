@@ -1124,8 +1124,8 @@ extern "C" __global__ void DebugOutputKernel(
             float glowLum = 0.2126f * glowR + 0.7152f * glowG + 0.0722f * glowB;
             // Soft ramp: 0 at brightness=1, 1 at brightness=3
             float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
-            // Apply 50% desaturation for bright highlights
-            float desatAmount = desatT * 0.5f;
+            // Apply 100% desaturation for bright highlights (full white at brightness 3+)
+            float desatAmount = desatT * 1.0f;
             glowR = glowR + (glowLum - glowR) * desatAmount;
             glowG = glowG + (glowLum - glowG) * desatAmount;
             glowB = glowB + (glowLum - glowB) * desatAmount;
@@ -1206,7 +1206,7 @@ extern "C" __global__ void DebugOutputKernel(
         if (glowBrightness > 1.0f) {
             float glowLum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
             float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
-            float desatAmount = desatT * 0.5f;
+            float desatAmount = desatT * 1.0f;  // 100% desaturation
             resR = resR + (glowLum - resR) * desatAmount;
             resG = resG + (glowLum - resG) * desatAmount;
             resB = resB + (glowLum - resB) * desatAmount;
