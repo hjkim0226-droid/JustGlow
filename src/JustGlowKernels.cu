@@ -485,18 +485,91 @@ extern "C" __global__ void PrefilterKernel(
 }
 
 // ============================================================================
-// Gaussian Downsample - Horizontal Pass (5-tap, 3-fetch linear optimized)
-// First pass of separable Gaussian blur for high-quality downsampling
-// Used for Level 0-2 to preserve near-glow detail
-// 5-tap Discrete [1,4,6,4,1]/16 -> 3-fetch Linear
-// Offsets: [0, 1.2] with weights [0.375, 0.3125]
+// 2D Gaussian Downsample (9-tap, single pass with ZeroPad)
+// Replaces separable H+V passes for consistency across different buffer sizes
+// Uses ZeroPad sampling to prevent edge energy concentration
+// 3×3 Gaussian weights: [1,2,1; 2,4,2; 1,2,1] / 16
+// ============================================================================
+
+extern "C" __global__ void Gaussian2DDownsampleKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    // Map destination pixel to source UV (center of the 2x2 block we're downsampling)
+    float u = ((float)x + 0.5f) / (float)dstWidth;
+    float v = ((float)y + 0.5f) / (float)dstHeight;
+
+    float texelX = 1.0f / (float)srcWidth;
+    float texelY = 1.0f / (float)srcHeight;
+
+    // 3×3 Gaussian weights: [1,2,1; 2,4,2; 1,2,1] / 16
+    const float wCenter = 4.0f / 16.0f;    // 0.25
+    const float wCross = 2.0f / 16.0f;     // 0.125
+    const float wDiagonal = 1.0f / 16.0f;  // 0.0625
+
+    // Sample 9 points with ZeroPad (energy escapes at edges instead of being trapped)
+    float TLr, TLg, TLb, TLa;  // Top-Left
+    float Tr, Tg, Tb, Ta;       // Top
+    float TRr, TRg, TRb, TRa;  // Top-Right
+    float Lr, Lg, Lb, La;       // Left
+    float Cr, Cg, Cb, Ca;       // Center
+    float Rr, Rg, Rb, Ra;       // Right
+    float BLr, BLg, BLb, BLa;  // Bottom-Left
+    float Br, Bg, Bb, Ba;       // Bottom
+    float BRr, BRg, BRb, BRa;  // Bottom-Right
+
+    // Sample all 9 points with ZeroPad (out-of-bounds = black)
+    sampleBilinearZeroPad(input, u - texelX, v - texelY, srcWidth, srcHeight, srcPitch, TLr, TLg, TLb, TLa);
+    sampleBilinearZeroPad(input, u,          v - texelY, srcWidth, srcHeight, srcPitch, Tr, Tg, Tb, Ta);
+    sampleBilinearZeroPad(input, u + texelX, v - texelY, srcWidth, srcHeight, srcPitch, TRr, TRg, TRb, TRa);
+
+    sampleBilinearZeroPad(input, u - texelX, v,          srcWidth, srcHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinearZeroPad(input, u,          v,          srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinearZeroPad(input, u + texelX, v,          srcWidth, srcHeight, srcPitch, Rr, Rg, Rb, Ra);
+
+    sampleBilinearZeroPad(input, u - texelX, v + texelY, srcWidth, srcHeight, srcPitch, BLr, BLg, BLb, BLa);
+    sampleBilinearZeroPad(input, u,          v + texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinearZeroPad(input, u + texelX, v + texelY, srcWidth, srcHeight, srcPitch, BRr, BRg, BRb, BRa);
+
+    // Weighted sum
+    float outR = Cr * wCenter +
+                 (Tr + Lr + Rr + Br) * wCross +
+                 (TLr + TRr + BLr + BRr) * wDiagonal;
+    float outG = Cg * wCenter +
+                 (Tg + Lg + Rg + Bg) * wCross +
+                 (TLg + TRg + BLg + BRg) * wDiagonal;
+    float outB = Cb * wCenter +
+                 (Tb + Lb + Rb + Bb) * wCross +
+                 (TLb + TRb + BLb + BRb) * wDiagonal;
+    float outA = Ca * wCenter +
+                 (Ta + La + Ra + Ba) * wCross +
+                 (TLa + TRa + BLa + BRa) * wDiagonal;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = outR;
+    output[outIdx + 1] = outG;
+    output[outIdx + 2] = outB;
+    output[outIdx + 3] = outA;
+}
+
+// ============================================================================
+// [DEPRECATED] Gaussian Downsample - Horizontal Pass
+// Kept for reference, replaced by Gaussian2DDownsampleKernel
 // ============================================================================
 
 extern "C" __global__ void GaussianDownsampleHKernel(
     const float* __restrict__ input,
     float* __restrict__ output,
     int width, int height, int pitch,
-    float blurOffset)  // ignored, using fixed offset
+    float blurOffset)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -509,22 +582,18 @@ extern "C" __global__ void GaussianDownsampleHKernel(
 
     float texelX = 1.0f / (float)width;
 
-    // Linear sampling optimized offsets and weights
-    // 5-tap [1,4,6,4,1]/16 -> 3-fetch
-    const float offset1 = 1.2f;  // Between pixel 1 and 2
-    const float weight0 = 0.375f;     // Center (6/16)
-    const float weight1 = 0.3125f;    // Side pairs (5/16 each side)
+    const float offset1 = 1.2f;
+    const float weight0 = 0.375f;
+    const float weight1 = 0.3125f;
 
-    // Sample 3 points (center + 2 sides with linear interpolation)
-    float cR, cG, cB, cA;  // Center
-    float lR, lG, lB, lA;  // Left
-    float rR, rG, rB, rA;  // Right
+    float cR, cG, cB, cA;
+    float lR, lG, lB, lA;
+    float rR, rG, rB, rA;
 
     sampleBilinear(input, u, v, width, height, pitch, cR, cG, cB, cA);
     sampleBilinear(input, u - offset1 * texelX, v, width, height, pitch, lR, lG, lB, lA);
     sampleBilinear(input, u + offset1 * texelX, v, width, height, pitch, rR, rG, rB, rA);
 
-    // Weighted sum
     float outR = cR * weight0 + (lR + rR) * weight1;
     float outG = cG * weight0 + (lG + rG) * weight1;
     float outB = cB * weight0 + (lB + rB) * weight1;
@@ -538,11 +607,8 @@ extern "C" __global__ void GaussianDownsampleHKernel(
 }
 
 // ============================================================================
-// Gaussian Downsample - Vertical Pass with 2x Downsample (5-tap, 3-fetch linear)
-// Second pass of separable Gaussian + actual downsampling
-// Reads from H-blurred source, writes to half-resolution destination
-// 5-tap Discrete [1,4,6,4,1]/16 -> 3-fetch Linear
-// Offsets: [0, 1.2] with weights [0.375, 0.3125]
+// [DEPRECATED] Gaussian Downsample - Vertical Pass with 2x Downsample
+// Kept for reference, replaced by Gaussian2DDownsampleKernel
 // ============================================================================
 
 extern "C" __global__ void GaussianDownsampleVKernel(
@@ -550,7 +616,7 @@ extern "C" __global__ void GaussianDownsampleVKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float blurOffset)  // ignored, using fixed offset
+    float blurOffset)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -558,28 +624,23 @@ extern "C" __global__ void GaussianDownsampleVKernel(
     if (x >= dstWidth || y >= dstHeight)
         return;
 
-    // Map destination to source (2x)
     float u = ((float)x + 0.5f) / (float)dstWidth;
     float v = ((float)y + 0.5f) / (float)dstHeight;
 
     float texelY = 1.0f / (float)srcHeight;
 
-    // Linear sampling optimized offsets and weights
-    // 5-tap [1,4,6,4,1]/16 -> 3-fetch
-    const float offset1 = 1.2f;  // Between pixel 1 and 2
-    const float weight0 = 0.375f;     // Center (6/16)
-    const float weight1 = 0.3125f;    // Side pairs (5/16 each side)
+    const float offset1 = 1.2f;
+    const float weight0 = 0.375f;
+    const float weight1 = 0.3125f;
 
-    // Sample 3 points (center + 2 sides with linear interpolation)
-    float cR, cG, cB, cA;  // Center
-    float tR, tG, tB, tA;  // Top
-    float bR, bG, bB, bA;  // Bottom
+    float cR, cG, cB, cA;
+    float tR, tG, tB, tA;
+    float bR, bG, bB, bA;
 
     sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, cR, cG, cB, cA);
     sampleBilinear(input, u, v - offset1 * texelY, srcWidth, srcHeight, srcPitch, tR, tG, tB, tA);
     sampleBilinear(input, u, v + offset1 * texelY, srcWidth, srcHeight, srcPitch, bR, bG, bB, bA);
 
-    // Weighted sum
     float outR = cR * weight0 + (tR + bR) * weight1;
     float outG = cG * weight0 + (tG + bG) * weight1;
     float outB = cB * weight0 + (tB + bB) * weight1;
@@ -596,8 +657,8 @@ extern "C" __global__ void GaussianDownsampleVKernel(
 // Downsample Kernel (Dual Kawase 5-Tap with X/+ Rotation)
 // rotationMode: 0 = X (diagonal), 1 = + (cross)
 // Alternating patterns breaks up boxy artifacts -> rounder glow
-// Used for Level 3+ where speed matters more than detail
-// Standard Dual Kawase downsample uses fixed 0.5px offset
+// Used for Level 5+ where speed matters more than detail
+// Uses ZeroPad sampling for consistent edge behavior across buffer sizes
 // ============================================================================
 
 extern "C" __global__ void DownsampleKernel(
@@ -629,23 +690,25 @@ extern "C" __global__ void DownsampleKernel(
     float Dr, Dg, Db, Da;
     float centerR, centerG, centerB, centerA;
 
+    // Use ZeroPad sampling for consistent edge behavior
+    // Energy escapes at edges instead of being trapped (clamped)
     if (rotationMode == 0) {
         // X pattern (diagonal) - default
-        sampleBilinear(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);
-        sampleBilinear(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
-        sampleBilinear(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
-        sampleBilinear(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);
+        sampleBilinearZeroPad(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);
+        sampleBilinearZeroPad(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
+        sampleBilinearZeroPad(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
+        sampleBilinearZeroPad(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);
     } else {
         // + pattern (cross) - 45 degree rotation
         // Slightly larger offset (1.414x) to maintain similar coverage area
         float crossOffset = offset * 1.414f;
-        sampleBilinear(input, u, v - crossOffset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);  // Top
-        sampleBilinear(input, u + crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);  // Right
-        sampleBilinear(input, u, v + crossOffset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);  // Bottom
-        sampleBilinear(input, u - crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);  // Left
+        sampleBilinearZeroPad(input, u, v - crossOffset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);  // Top
+        sampleBilinearZeroPad(input, u + crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);  // Right
+        sampleBilinearZeroPad(input, u, v + crossOffset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);  // Bottom
+        sampleBilinearZeroPad(input, u - crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);  // Left
     }
 
-    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, centerR, centerG, centerB, centerA);
+    sampleBilinearZeroPad(input, u, v, srcWidth, srcHeight, srcPitch, centerR, centerG, centerB, centerA);
 
     float resR = centerR * 0.5f + (Ar + Br + Cr + Dr) * 0.125f;
     float resG = centerG * 0.5f + (Ag + Bg + Cg + Dg) * 0.125f;
