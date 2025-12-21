@@ -1034,18 +1034,11 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Glow coverage (alpha inferred from RGB brightness)
-        // This is independent of blend mode
-        float glowCoverage = fmaxf(fmaxf(glowR, glowG), glowB);
-
         // Apply source opacity (premultiplied)
         float srcR = origR * sourceOpacity;
         float srcG = origG * sourceOpacity;
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
-
-        // Final alpha (blend mode independent)
-        float finalAlpha = fmaxf(srcA, clampf(glowCoverage, 0.0f, 1.0f));
 
         // Composite based on mode
         // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
@@ -1057,45 +1050,32 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = srcB + glowB;
                 break;
 
-            case 2: { // Screen - requires straight alpha for correct blending
-                // Unpremultiply source to get straight RGB
-                float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
-                float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
-                float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
-
-                // Screen blend on straight values: 1 - (1-src)(1-glow)
-                float blendR = 1.0f - (1.0f - straightSrcR) * (1.0f - glowR);
-                float blendG = 1.0f - (1.0f - straightSrcG) * (1.0f - glowG);
-                float blendB = 1.0f - (1.0f - straightSrcB) * (1.0f - glowB);
-
-                // Repremultiply for output
-                resR = blendR * finalAlpha;
-                resG = blendG * finalAlpha;
-                resB = blendB * finalAlpha;
+            case 2: // Screen - premultiplied formula: A + B - AB
+                // Both srcR and glowR are light contributions
+                // Screen combines them: result = A + B - A*B
+                resR = srcR + glowR - srcR * glowR;
+                resG = srcG + glowG - srcG * glowG;
+                resB = srcB + glowB - srcB * glowB;
                 break;
-            }
 
-            case 3: { // Overlay - requires straight alpha for correct blending
-                // Unpremultiply source to get straight RGB
+            case 3: { // Overlay - premultiplied: conditional multiply/screen
+                // Decision based on straight source luminance
                 float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
                 float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
                 float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
 
-                // Overlay blend on straight values
-                float blendR = straightSrcR < 0.5f
-                    ? 2.0f * straightSrcR * glowR
-                    : 1.0f - 2.0f * (1.0f - straightSrcR) * (1.0f - glowR);
-                float blendG = straightSrcG < 0.5f
-                    ? 2.0f * straightSrcG * glowG
-                    : 1.0f - 2.0f * (1.0f - straightSrcG) * (1.0f - glowG);
-                float blendB = straightSrcB < 0.5f
-                    ? 2.0f * straightSrcB * glowB
-                    : 1.0f - 2.0f * (1.0f - straightSrcB) * (1.0f - glowB);
-
-                // Repremultiply for output
-                resR = blendR * finalAlpha;
-                resG = blendG * finalAlpha;
-                resB = blendB * finalAlpha;
+                // Overlay on premultiplied values:
+                // < 0.5: Multiply-like: 2 * src * glow
+                // >= 0.5: Screen-like: src + 2*glow*(1-src)
+                resR = (straightSrcR < 0.5f)
+                    ? 2.0f * srcR * glowR
+                    : srcR + 2.0f * glowR * (1.0f - srcR);
+                resG = (straightSrcG < 0.5f)
+                    ? 2.0f * srcG * glowG
+                    : srcG + 2.0f * glowG * (1.0f - srcG);
+                resB = (straightSrcB < 0.5f)
+                    ? 2.0f * srcB * glowB
+                    : srcB + 2.0f * glowB * (1.0f - srcB);
                 break;
             }
 
@@ -1106,7 +1086,10 @@ extern "C" __global__ void DebugOutputKernel(
                 break;
         }
 
-        resA = finalAlpha;
+        // Calculate alpha from blended result
+        // Coverage = max RGB of blended result, clamped to [0,1]
+        float blendedCoverage = clampf(fmaxf(fmaxf(resR, resG), resB), 0.0f, 1.0f);
+        resA = fmaxf(srcA, blendedCoverage);
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
