@@ -801,25 +801,17 @@ PF_Err PreRender(
         in_data->time_step, in_data->time_scale, &spreadParam);
     float spread = spreadParam.u.fs_d.value;
 
-    // Get radius - higher radius activates more MIP levels = wider glow
-    PF_ParamDef radiusParam;
-    AEFX_CLR_STRUCT(radiusParam);
-    PF_CHECKOUT_PARAM(in_data, PARAM_RADIUS, in_data->current_time,
-        in_data->time_step, in_data->time_scale, &radiusParam);
-    float radius = radiusParam.u.fs_d.value;
-
-    // Calculate expansion: base + (spread factor * 2^mipLevels) * radius factor
-    // Radius affects how many MIP levels are active, which determines max glow spread
-    // radius 0 -> 0.5x, radius 50 -> 0.75x, radius 100 -> 1.0x
-    float radiusFactor = 0.5f + (radius / 100.0f) * 0.5f;
-    int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f) * radiusFactor);
+    // Calculate expansion: base + (spread factor * 2^mipLevels)
+    // NOTE: Use fixed expansion factor (not radius-dependent) to prevent "jumping" artifacts
+    // Always use full expansion (1.0) to ensure Text Layers get enough room for glow spread
+    int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f) * 1.0f);
     // Scale by downsample factor for preview resolution support
     glowExpansion = static_cast<int>(glowExpansion * downsampleFactor);
     // Use parentheses to prevent Windows min/max macro expansion
     glowExpansion = (std::max)(32, (std::min)(glowExpansion, 2048));  // Min 32 for preview
 
-    PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f, radius=%.1f)",
-        glowExpansion, static_cast<int>(quality), mipLevels, spread, radius);
+    PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f)",
+        glowExpansion, static_cast<int>(quality), mipLevels, spread);
 
     // Expand the request rect to get extra pixels for glow spread
     req.rect.left -= glowExpansion;
