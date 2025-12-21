@@ -1048,26 +1048,56 @@ extern "C" __global__ void DebugOutputKernel(
         float finalAlpha = fmaxf(srcA, clampf(glowCoverage, 0.0f, 1.0f));
 
         // Composite based on mode
-        // Note: Using direct premultiplied math to avoid edge fringing from unpremultiply
+        // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
         switch (compositeMode) {
-            case 0: // Add - additive blending (standard glow)
+            case 1: // Add - additive blending (standard glow)
+                // Add works directly on premultiplied values
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
                 break;
 
-            case 1: // Screen - 1-(1-src)(1-glow), applied on premultiplied values
-                // Not mathematically perfect but avoids edge fringing
-                resR = 1.0f - (1.0f - srcR) * (1.0f - glowR);
-                resG = 1.0f - (1.0f - srcG) * (1.0f - glowG);
-                resB = 1.0f - (1.0f - srcB) * (1.0f - glowB);
-                break;
+            case 2: { // Screen - requires straight alpha for correct blending
+                // Unpremultiply source to get straight RGB
+                float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
+                float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
+                float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
 
-            case 2: // Overlay - conditional blend on premultiplied values
-                resR = srcR < 0.5f ? 2.0f * srcR * glowR : 1.0f - 2.0f * (1.0f - srcR) * (1.0f - glowR);
-                resG = srcG < 0.5f ? 2.0f * srcG * glowG : 1.0f - 2.0f * (1.0f - srcG) * (1.0f - glowG);
-                resB = srcB < 0.5f ? 2.0f * srcB * glowB : 1.0f - 2.0f * (1.0f - srcB) * (1.0f - glowB);
+                // Screen blend on straight values: 1 - (1-src)(1-glow)
+                float blendR = 1.0f - (1.0f - straightSrcR) * (1.0f - glowR);
+                float blendG = 1.0f - (1.0f - straightSrcG) * (1.0f - glowG);
+                float blendB = 1.0f - (1.0f - straightSrcB) * (1.0f - glowB);
+
+                // Repremultiply for output
+                resR = blendR * finalAlpha;
+                resG = blendG * finalAlpha;
+                resB = blendB * finalAlpha;
                 break;
+            }
+
+            case 3: { // Overlay - requires straight alpha for correct blending
+                // Unpremultiply source to get straight RGB
+                float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
+                float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
+                float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
+
+                // Overlay blend on straight values
+                float blendR = straightSrcR < 0.5f
+                    ? 2.0f * straightSrcR * glowR
+                    : 1.0f - 2.0f * (1.0f - straightSrcR) * (1.0f - glowR);
+                float blendG = straightSrcG < 0.5f
+                    ? 2.0f * straightSrcG * glowG
+                    : 1.0f - 2.0f * (1.0f - straightSrcG) * (1.0f - glowG);
+                float blendB = straightSrcB < 0.5f
+                    ? 2.0f * straightSrcB * glowB
+                    : 1.0f - 2.0f * (1.0f - straightSrcB) * (1.0f - glowB);
+
+                // Repremultiply for output
+                resR = blendR * finalAlpha;
+                resG = blendG * finalAlpha;
+                resB = blendB * finalAlpha;
+                break;
+            }
 
             default: // Fallback to Add
                 resR = srcR + glowR;
