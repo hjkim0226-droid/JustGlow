@@ -366,12 +366,21 @@ extern "C" __global__ void PrefilterKernel(
     int offsetY = (dstHeight - inputHeight) / 2;
 
     // Map output coordinates to input coordinates
-    // Can be negative or beyond input bounds - that's OK, we use zero-pad sampling
     int srcX = x - offsetX;
     int srcY = y - offsetY;
 
-    // UV coordinates - can be outside [0,1] range
-    // sampleBilinearZeroPad handles out-of-bounds by returning 0
+    // Check if this pixel is outside original image bounds
+    // Outside pixels output 0 - glow spreading happens in downsample/upsample chain
+    if (srcX < 0 || srcX >= inputWidth || srcY < 0 || srcY >= inputHeight) {
+        int outIdx = (y * dstPitch + x) * 4;
+        output[outIdx + 0] = 0.0f;
+        output[outIdx + 1] = 0.0f;
+        output[outIdx + 2] = 0.0f;
+        output[outIdx + 3] = 0.0f;
+        return;
+    }
+
+    // UV coordinates for sampling (inside original bounds)
     float u = ((float)srcX + 0.5f) / (float)inputWidth;
     float v = ((float)srcY + 0.5f) / (float)inputHeight;
 
