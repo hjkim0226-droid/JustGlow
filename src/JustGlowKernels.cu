@@ -394,32 +394,32 @@ extern "C" __global__ void PrefilterKernel(
     float Mr, Mg, Mb, Ma;
 
     // =========================================
-    // 13-tap sampling with ZERO PADDING
-    // Uses sampleBilinearZeroPad to return black for out-of-bounds UV
-    // This prevents edge pixel repetition causing light clumping
+    // 13-tap sampling with CLAMP
+    // Uses sampleBilinear to clamp out-of-bounds UV to edge pixels
+    // This prevents edge shrinkage from threshold cutting darkened edges
     // Samples stay in sRGB/Premultiplied space for now
     // =========================================
 
     // Outer corners
-    sampleBilinearZeroPad(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
-    sampleBilinearZeroPad(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinearZeroPad(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
-    sampleBilinearZeroPad(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
+    sampleBilinear(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
+    sampleBilinear(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinear(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
+    sampleBilinear(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
 
     // Outer cross
-    sampleBilinearZeroPad(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
-    sampleBilinearZeroPad(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
-    sampleBilinearZeroPad(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
-    sampleBilinearZeroPad(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinear(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinear(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
+    sampleBilinear(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
+    sampleBilinear(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
 
     // Inner corners
-    sampleBilinearZeroPad(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
-    sampleBilinearZeroPad(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
-    sampleBilinearZeroPad(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
-    sampleBilinearZeroPad(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
+    sampleBilinear(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
+    sampleBilinear(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
+    sampleBilinear(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
+    sampleBilinear(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
 
     // Center
-    sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
+    sampleBilinear(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
 
     // =========================================
     // Weighted Average (kernel weights only)
@@ -435,6 +435,7 @@ extern "C" __global__ void PrefilterKernel(
     const float wCorner = 0.0078125f;
 
     // Simple weighted average of premultiplied RGB
+    // Zero-padded samples contribute 0, which is correct for blur (light spreads into empty space)
     float sumR = Gr * wCenter + (Dr + Er + Ir + Jr) * wInner + (Br + Fr + Hr + Lr) * wCross + (Ar + Cr + Kr + Mr) * wCorner;
     float sumG = Gg * wCenter + (Dg + Eg + Ig + Jg) * wInner + (Bg + Fg + Hg + Lg) * wCross + (Ag + Cg + Kg + Mg) * wCorner;
     float sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
