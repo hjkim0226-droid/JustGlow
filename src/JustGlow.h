@@ -196,9 +196,9 @@ enum class DebugViewMode : int {
 
 namespace Defaults {
     // Core Parameters (New Order)
-    constexpr float Intensity       = 100.0f;   // 100% = Level 1 starts at 100% weight
+    constexpr float Intensity       = 75.0f;    // 75% = balanced core vs spread
     constexpr float Exposure        = 1.0f;     // 1x brightness multiplier
-    constexpr float Radius          = 100.0f;   // 100% = all MIP levels active
+    constexpr float Radius          = 75.0f;    // 75% = balanced glow reach
     constexpr float Spread          = 50.0f;    // 50% = balanced blur offset
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
     constexpr float Threshold       = 25.0f;    // 25% - lower threshold for more glow
