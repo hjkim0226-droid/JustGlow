@@ -1112,6 +1112,15 @@ extern "C" __global__ void DebugOutputKernel(
         // (via glowColor with preserveColor blending)
         // Do NOT apply again here - causes blue channel to zero out completely
 
+        // Unpremultiply glow to get true glow color
+        // This prevents darkening near transparent edges where alpha < 1
+        // Without this, glow RGB is "diluted" by the blurred alpha
+        if (glowA > 0.001f) {
+            glowR /= glowA;
+            glowG /= glowA;
+            glowB /= glowA;
+        }
+
         // Apply exposure and glow opacity
         glowR *= exposure * glowOpacity;
         glowG *= exposure * glowOpacity;
@@ -1122,9 +1131,9 @@ extern "C" __global__ void DebugOutputKernel(
         float glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
         if (glowBrightness > 1.0f) {
             float glowLum = 0.2126f * glowR + 0.7152f * glowG + 0.0722f * glowB;
-            // Soft ramp: 0 at brightness=1, 1 at brightness=3
-            float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
-            // Apply 100% desaturation for bright highlights (full white at brightness 3+)
+            // Aggressive ramp: 0 at brightness=1, 1 at brightness=2 (was 3)
+            float desatT = fminf((glowBrightness - 1.0f) / 1.0f, 1.0f);
+            // Apply 100% desaturation for bright highlights (full white at brightness 2+)
             float desatAmount = desatT * 1.0f;
             glowR = glowR + (glowLum - glowR) * desatAmount;
             glowG = glowG + (glowLum - glowG) * desatAmount;
@@ -1197,6 +1206,13 @@ extern "C" __global__ void DebugOutputKernel(
 
         // Note: Glow color already applied in Prefilter
 
+        // Unpremultiply glow to get true glow color (same as Final mode)
+        if (glowA > 0.001f) {
+            glowR /= glowA;
+            glowG /= glowA;
+            glowB /= glowA;
+        }
+
         // Apply exposure and opacity
         resR = glowR * exposure * glowOpacity;
         resG = glowG * exposure * glowOpacity;
@@ -1206,8 +1222,9 @@ extern "C" __global__ void DebugOutputKernel(
         float glowBrightness = fmaxf(fmaxf(resR, resG), resB);
         if (glowBrightness > 1.0f) {
             float glowLum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-            float desatT = fminf((glowBrightness - 1.0f) / 2.0f, 1.0f);
-            float desatAmount = desatT * 1.0f;  // 100% desaturation
+            // Aggressive ramp: 0 at brightness=1, 1 at brightness=2 (was 3)
+            float desatT = fminf((glowBrightness - 1.0f) / 1.0f, 1.0f);
+            float desatAmount = desatT * 1.0f;  // 100% desaturation at brightness 2+
             resR = resR + (glowLum - resR) * desatAmount;
             resG = resG + (glowLum - resG) * desatAmount;
             resB = resB + (glowLum - resB) * desatAmount;
