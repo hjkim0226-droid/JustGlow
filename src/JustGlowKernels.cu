@@ -1185,7 +1185,8 @@ extern "C" __global__ void DebugOutputKernel(
 
         // Calculate alpha: if there's any glow, output is opaque
         // This prevents dim glows from being made even dimmer by low alpha
-        float glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
+        // Note: reusing glowBrightness variable (recalculate after desaturation)
+        glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
         resA = (glowBrightness > 0.001f || srcA > 0.001f) ? 1.0f : 0.0f;
     }
     else if (debugMode == 16) {
