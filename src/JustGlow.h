@@ -79,7 +79,8 @@ enum ParamID {
     PARAM_INTENSITY,            // Level 1 starting weight (0-100%) → core concentration
     PARAM_EXPOSURE,             // Brightness multiplier (0-50) → final glow brightness
     PARAM_RADIUS,               // Glow reach distance (0-200) → controls active MIP levels
-    PARAM_SPREAD,               // Blur softness (0-100) → controls blur offset (1.1-2.5px)
+    PARAM_SPREAD_DOWN,          // Downsample spread (0-100) → offset at max MIP level
+    PARAM_SPREAD_UP,            // Upsample spread (0-100) → offset at max MIP level
     PARAM_FALLOFF,              // Decay rate per level (0-100) → weight decay
     PARAM_THRESHOLD,            // Brightness threshold (0-100%)
     PARAM_SOFT_KNEE,            // Soft knee width (0-100%)
@@ -115,7 +116,8 @@ enum ParamDiskID {
     DISK_ID_INTENSITY = 1,
     DISK_ID_EXPOSURE,
     DISK_ID_RADIUS,
-    DISK_ID_SPREAD,
+    DISK_ID_SPREAD_DOWN,
+    DISK_ID_SPREAD_UP,
     DISK_ID_FALLOFF,
     DISK_ID_THRESHOLD,
     DISK_ID_SOFT_KNEE,
@@ -195,7 +197,8 @@ namespace Defaults {
     constexpr float Intensity       = 75.0f;    // 75% = balanced core vs spread
     constexpr float Exposure        = 1.0f;     // 1x brightness multiplier
     constexpr float Radius          = 75.0f;    // 75% = balanced glow reach
-    constexpr float Spread          = 50.0f;    // 50% = balanced blur offset
+    constexpr float SpreadDown      = 50.0f;    // 50% = downsample offset 1.0-2.0
+    constexpr float SpreadUp        = 50.0f;    // 50% = upsample offset 1.0-2.0
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
     constexpr float Threshold       = 25.0f;    // 25% - lower threshold for more glow
     constexpr float SoftKnee        = 75.0f;    // 75% - softer threshold transition
@@ -293,7 +296,8 @@ struct JustGlowPreRenderData {
     float intensity;    // 0-100: Level 1 starting weight (core concentration)
     float exposure;     // 0-50: Brightness multiplier (final glow brightness)
     float radius;       // 0-200: controls active MIP levels
-    float spread;       // 0-100: controls blur offset (1.1-2.5px)
+    float spreadDown;   // 0-100: downsample offset at max MIP (1.0-2.0)
+    float spreadUp;     // 0-100: upsample offset at max MIP (1.0-2.0)
     float falloff;      // 0-100: decay rate per level
     float threshold;    // 0-100: brightness threshold
     float softKnee;     // 0-100: soft knee width

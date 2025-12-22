@@ -497,7 +497,8 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     const float* __restrict__ input,
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
-    int dstWidth, int dstHeight, int dstPitch)
+    int dstWidth, int dstHeight, int dstPitch,
+    float spreadDown, int level, int maxLevels)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -511,6 +512,10 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
 
     float texelX = 1.0f / (float)srcWidth;
     float texelY = 1.0f / (float)srcHeight;
+
+    // Dynamic offset: 1.0 at level 0, 1.0 + spreadDown at max level
+    float levelRatio = (float)level / fmaxf((float)maxLevels, 1.0f);
+    float offset = 1.0f + spreadDown * levelRatio;
 
     // 3×3 Gaussian weights: [1,2,1; 2,4,2; 1,2,1] / 16
     const float wCenter = 4.0f / 16.0f;    // 0.25
@@ -528,18 +533,18 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     float Br, Bg, Bb, Ba;       // Bottom
     float BRr, BRg, BRb, BRa;  // Bottom-Right
 
-    // Sample all 9 points with ZeroPad (out-of-bounds = black)
-    sampleBilinearZeroPad(input, u - texelX, v - texelY, srcWidth, srcHeight, srcPitch, TLr, TLg, TLb, TLa);
-    sampleBilinearZeroPad(input, u,          v - texelY, srcWidth, srcHeight, srcPitch, Tr, Tg, Tb, Ta);
-    sampleBilinearZeroPad(input, u + texelX, v - texelY, srcWidth, srcHeight, srcPitch, TRr, TRg, TRb, TRa);
+    // Sample all 9 points with ZeroPad, using dynamic offset
+    sampleBilinearZeroPad(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, TLr, TLg, TLb, TLa);
+    sampleBilinearZeroPad(input, u,                   v - offset * texelY, srcWidth, srcHeight, srcPitch, Tr, Tg, Tb, Ta);
+    sampleBilinearZeroPad(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, TRr, TRg, TRb, TRa);
 
-    sampleBilinearZeroPad(input, u - texelX, v,          srcWidth, srcHeight, srcPitch, Lr, Lg, Lb, La);
-    sampleBilinearZeroPad(input, u,          v,          srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinearZeroPad(input, u + texelX, v,          srcWidth, srcHeight, srcPitch, Rr, Rg, Rb, Ra);
+    sampleBilinearZeroPad(input, u - offset * texelX, v,                   srcWidth, srcHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinearZeroPad(input, u,                   v,                   srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinearZeroPad(input, u + offset * texelX, v,                   srcWidth, srcHeight, srcPitch, Rr, Rg, Rb, Ra);
 
-    sampleBilinearZeroPad(input, u - texelX, v + texelY, srcWidth, srcHeight, srcPitch, BLr, BLg, BLb, BLa);
-    sampleBilinearZeroPad(input, u,          v + texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
-    sampleBilinearZeroPad(input, u + texelX, v + texelY, srcWidth, srcHeight, srcPitch, BRr, BRg, BRb, BRa);
+    sampleBilinearZeroPad(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, BLr, BLg, BLb, BLa);
+    sampleBilinearZeroPad(input, u,                   v + offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinearZeroPad(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, BRr, BRg, BRb, BRa);
 
     // Weighted sum
     float outR = Cr * wCenter +
@@ -800,7 +805,7 @@ extern "C" __global__ void UpsampleKernel(
     int srcWidth, int srcHeight, int srcPitch,
     int prevWidth, int prevHeight, int prevPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float blurOffset,  // ignored, using fixed 1.0
+    float spreadUp,    // 0-1: dynamic offset (1.0 at level 0, 1.0+spreadUp at max level)
     int levelIndex,
     float activeLimit,  // now 0-1 (radius / 100)
     float decayK,
@@ -823,17 +828,16 @@ extern "C" __global__ void UpsampleKernel(
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
     // 9-Tap Discrete Gaussian (3x3 pattern)
-    // Fixed offset 1.0 for consistent bilinear sampling across all levels
+    // Dynamic offset based on spreadUp: 1.0 at level 0, 1.0+spreadUp at max level
     // Weights: Center=4/16, Cross=2/16, Diagonal=1/16 (total=16)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Fixed offset for consistent bilinear sampling
-        // 1.0 = sample exactly at neighboring pixel centers
-        // Prevents ghosting at high MIP levels where dynamic offset exceeded texture size
-        const float offset = 1.0f;
+        // Dynamic offset: increases with level for softer outer glow
+        float levelRatio = (float)levelIndex / fmaxf((float)maxLevels, 1.0f);
+        float offset = 1.0f + spreadUp * levelRatio;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)

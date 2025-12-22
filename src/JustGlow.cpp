@@ -314,19 +314,33 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_RADIUS);
 
-    // Spread (0-100) - Controls blur softness (offset 1.1-2.5px)
+    // Spread Down (0-100) - Downsample offset at max MIP level
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
-        "Spread",
+        "Spread Down",
         Ranges::SpreadMin,
         Ranges::SpreadMax,
         Ranges::SpreadMin,
         Ranges::SpreadMax,
-        Defaults::Spread,
+        Defaults::SpreadDown,
         PF_Precision_TENTHS,
         0,
         0,
-        DISK_ID_SPREAD);
+        DISK_ID_SPREAD_DOWN);
+
+    // Spread Up (0-100) - Upsample offset at max MIP level
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Spread Up",
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Defaults::SpreadUp,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_SPREAD_UP);
 
     // Falloff (0-100) - Decay rate per level
     AEFX_CLR_STRUCT(def);
@@ -796,12 +810,17 @@ PF_Err PreRender(
     int quality = qualityParam.u.sd.value;  // Direct integer (6-12)
     int mipLevels = GetQualityLevelCount(quality);
 
-    // Get spread for more accurate expansion
-    PF_ParamDef spreadParam;
-    AEFX_CLR_STRUCT(spreadParam);
-    PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD, in_data->current_time,
-        in_data->time_step, in_data->time_scale, &spreadParam);
-    float spread = spreadParam.u.fs_d.value;
+    // Get spread values for more accurate expansion
+    PF_ParamDef spreadDownParam, spreadUpParam;
+    AEFX_CLR_STRUCT(spreadDownParam);
+    AEFX_CLR_STRUCT(spreadUpParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_DOWN, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &spreadDownParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_UP, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &spreadUpParam);
+    float spreadDown = spreadDownParam.u.fs_d.value;
+    float spreadUp = spreadUpParam.u.fs_d.value;
+    float spread = (std::max)(spreadDown, spreadUp);  // Use max for expansion calculation
 
     // Calculate expansion: base + (spread factor * 2^mipLevels)
     // NOTE: Use fixed expansion factor (not radius-dependent) to prevent "jumping" artifacts
@@ -858,11 +877,17 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->radius = param.u.fs_d.value;
 
-        // Spread (0-100)
+        // Spread Down (0-100)
         AEFX_CLR_STRUCT(param);
-        PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD, in_data->current_time,
+        PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_DOWN, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->spread = param.u.fs_d.value;
+        preRenderData->spreadDown = param.u.fs_d.value;
+
+        // Spread Up (0-100)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_UP, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->spreadUp = param.u.fs_d.value;
 
         // Falloff (0-100)
         AEFX_CLR_STRUCT(param);
@@ -1011,12 +1036,11 @@ PF_Err PreRender(
         // Now uses per-level soft threshold instead of hard MIP cutoff
         preRenderData->activeLimit = preRenderData->radius / 100.0f;
 
-        // blurOffsets: Spread -> per-level pixel offset (decays from spread to 1.5px)
-        // Level 0 gets full offset, deeper levels decay toward 1.5px minimum
-        // Scale by downsampleFactor for consistent look at Half/Quarter preview resolution
-        float spreadOffset = 1.1f + (preRenderData->spread / 100.0f) * 1.4f; // 1.1 ~ 2.5px
+        // blurOffsets: Legacy, not used in current kernels
+        // Now using spreadDown/spreadUp directly in kernels with level-based interpolation
+        // offset = 1.0 + spread * (level / maxLevel)
         for (int i = 0; i < preRenderData->mipLevels && i < PRERENDER_MAX_MIP_LEVELS; ++i) {
-            preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset) * downsampleFactor;
+            preRenderData->blurOffsets[i] = 1.0f;  // Legacy placeholder
         }
 
         // decayK: Pass falloff directly (0-100), kernel calculates decayRate
@@ -1155,6 +1179,8 @@ PF_Err SmartRender(
                     rp.exposure = preRenderData->exposure;
                     rp.level1Weight = preRenderData->level1Weight;
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);
+                    rp.spreadDown = preRenderData->spreadDown / 100.0f;  // 0-1
+                    rp.spreadUp = preRenderData->spreadUp / 100.0f;      // 0-1
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;
