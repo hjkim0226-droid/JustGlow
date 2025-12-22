@@ -1144,33 +1144,31 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Composite based on mode
+        // Estimate glow alpha from premultiplied RGB (alpha ≈ max(R,G,B))
+        float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
+
+        // Composite based on mode (RGB and Alpha use same blend formula)
         // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
         switch (compositeMode) {
             case 1: // Add - additive blending (standard glow)
-                // Add works directly on premultiplied values
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
+                resA = fminf(srcA + glowAlpha, 1.0f);
                 break;
 
-            case 2: // Screen - premultiplied formula: A + B - AB
-                // Both srcR and glowR are light contributions
-                // Screen combines them: result = A + B - A*B
+            case 2: // Screen - formula: A + B - A*B
                 resR = srcR + glowR - srcR * glowR;
                 resG = srcG + glowG - srcG * glowG;
                 resB = srcB + glowB - srcB * glowB;
+                resA = srcA + glowAlpha - srcA * glowAlpha;
                 break;
 
             case 3: { // Overlay - premultiplied: conditional multiply/screen
-                // Decision based on straight source luminance
                 float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
                 float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
                 float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
 
-                // Overlay on premultiplied values:
-                // < 0.5: Multiply-like: 2 * src * glow
-                // >= 0.5: Screen-like: src + 2*glow*(1-src)
                 resR = (straightSrcR < 0.5f)
                     ? 2.0f * srcR * glowR
                     : srcR + 2.0f * glowR * (1.0f - srcR);
@@ -1180,6 +1178,7 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = (straightSrcB < 0.5f)
                     ? 2.0f * srcB * glowB
                     : srcB + 2.0f * glowB * (1.0f - srcB);
+                resA = srcA + glowAlpha - srcA * glowAlpha;
                 break;
             }
 
@@ -1187,15 +1186,9 @@ extern "C" __global__ void DebugOutputKernel(
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
+                resA = fminf(srcA + glowAlpha, 1.0f);
                 break;
         }
-
-        // Calculate alpha from premultiplied glow RGB
-        // For premultiplied: RGB = straight_RGB * A, so A ≈ max(R,G,B)
-        // This gives proper transparency falloff at glow edges
-        glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
-        float estimatedGlowAlpha = fminf(glowBrightness, 1.0f);  // Clamp to 1.0
-        resA = fmaxf(estimatedGlowAlpha, srcA);  // Combine with source alpha
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
@@ -1223,7 +1216,8 @@ extern "C" __global__ void DebugOutputKernel(
             resB = resB + (glowLum - resB) * desatT;
         }
 
-        // Alpha from premultiplied glow RGB (same as Final mode)
+        // Alpha for GlowOnly: based on glow brightness
+        // Glow needs alpha to be visible
         resA = fminf(glowBrightness, 1.0f);
     }
     else {
