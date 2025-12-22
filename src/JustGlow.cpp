@@ -1274,8 +1274,11 @@ PF_Err SmartRender(
                     rp.inputHeight = input_worldP->height;
                     rp.mipLevels = preRenderData->mipLevels;
 
-                    PLUGIN_LOG("SmartRender: output=%dx%d, input=%dx%d",
-                        rp.width, rp.height, rp.inputWidth, rp.inputHeight);
+                    PLUGIN_LOG("SmartRender: output=%dx%d, input=%dx%d, srcPitch=%d, dstPitch=%d",
+                        rp.width, rp.height, rp.inputWidth, rp.inputHeight, rp.srcPitch, rp.dstPitch);
+                    PLUGIN_LOG("SmartRender DEBUG: input_world=%dx%d (rowbytes=%d), output_world=%dx%d (rowbytes=%d)",
+                        input_worldP->width, input_worldP->height, input_worldP->rowbytes,
+                        output_worldP->width, output_worldP->height, output_worldP->rowbytes);
 
                     // Execute GPU rendering based on framework
                     bool renderSuccess = false;

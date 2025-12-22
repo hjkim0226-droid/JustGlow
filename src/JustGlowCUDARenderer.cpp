@@ -807,6 +807,11 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     CUDA_LOG("Composite: output=%dx%d, input=%dx%d, sourceOpacity=%.2f, glowOpacity=%.2f",
         params.width, params.height, params.inputWidth, params.inputHeight,
         params.sourceOpacity, params.glowOpacity);
+    CUDA_LOG("Composite DEBUG: width=%d, height=%d, inputW=%d, inputH=%d, glowW=%d, glowH=%d, srcPitch=%d, dstPitch=%d",
+        params.width, params.height, params.inputWidth, params.inputHeight,
+        glowWidth, glowHeight, params.srcPitch, params.dstPitch);
+    CUDA_LOG("Composite DEBUG: offsetX=%d, offsetY=%d",
+        (params.width - params.inputWidth) / 2, (params.height - params.inputHeight) / 2);
 
     int useLinear = params.linearize ? 1 : 0;
     int inputProfile = params.inputProfile;  // 1=sRGB, 2=Rec709, 3=Gamma2.2
