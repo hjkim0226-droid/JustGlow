@@ -97,6 +97,9 @@ enum ParamID {
     // === Advanced Options ===
     PARAM_ANAMORPHIC,           // Anamorphic stretch amount (0-100%)
     PARAM_ANAMORPHIC_ANGLE,     // Anamorphic direction angle
+    PARAM_CHROMATIC_ABERRATION, // Chromatic aberration amount (0-100)
+    PARAM_CA_TINT_R,            // CA Red channel tint color
+    PARAM_CA_TINT_B,            // CA Blue channel tint color
     PARAM_COMPOSITE_MODE,       // Composite mode (Add/Screen/Overlay)
     PARAM_HDR_MODE,             // Enable Karis Average for HDR
     PARAM_LINEARIZE,            // Enable Linear conversion
@@ -128,6 +131,9 @@ enum ParamDiskID {
     DISK_ID_PRESERVE_COLOR,
     DISK_ID_ANAMORPHIC,
     DISK_ID_ANAMORPHIC_ANGLE,
+    DISK_ID_CHROMATIC_ABERRATION,
+    DISK_ID_CA_TINT_R,
+    DISK_ID_CA_TINT_B,
     DISK_ID_COMPOSITE_MODE,
     DISK_ID_HDR_MODE,
     DISK_ID_LINEARIZE,
@@ -214,6 +220,7 @@ namespace Defaults {
     // Advanced
     constexpr float Anamorphic      = 0.0f;     // Disabled
     constexpr float AnamorphicAngle = 0.0f;     // Horizontal
+    constexpr float ChromaticAberration = 0.0f; // Disabled
     constexpr int   CompositeMode   = static_cast<int>(::CompositeMode::Add);
     constexpr bool  HDRMode         = true;
     constexpr bool  Linearize       = false;  // OFF by default (simpler, no alpha issues)
@@ -262,6 +269,10 @@ namespace Ranges {
     // Anamorphic Angle
     constexpr float AngleMin        = -90.0f;
     constexpr float AngleMax        = 90.0f;
+
+    // Chromatic Aberration
+    constexpr float ChromaticAberrationMin = 0.0f;
+    constexpr float ChromaticAberrationMax = 100.0f;
 
     // Dither
     constexpr float DitherMin       = 0.0f;
@@ -314,6 +325,9 @@ struct JustGlowPreRenderData {
     // Advanced
     float anamorphic;
     float anamorphicAngle;
+    float chromaticAberration;
+    float caTintR[3];           // CA Red channel tint (RGB)
+    float caTintB[3];           // CA Blue channel tint (RGB)
     CompositeMode compositeMode;
     bool hdrMode;
     bool linearize;         // Enable sRGB to Linear conversion

@@ -1075,7 +1075,10 @@ extern "C" __global__ void DebugOutputKernel(
     float glowTintR,        // Glow tint color R
     float glowTintG,        // Glow tint color G
     float glowTintB,        // Glow tint color B
-    float dither)           // Dithering amount (0-1)
+    float dither,           // Dithering amount (0-1)
+    float chromaticAberration,  // CA amount (0-100)
+    float caTintRr, float caTintRg, float caTintRb,  // CA Red channel tint
+    float caTintBr, float caTintBg, float caTintBb)  // CA Blue channel tint
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1122,7 +1125,45 @@ extern "C" __global__ void DebugOutputKernel(
         // Final: normal composite with opacity controls
         // Color space: Premultiplied Linear (if useLinear) or Premultiplied sRGB (if not)
         float glowR, glowG, glowB, glowA;
-        sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+
+        if (chromaticAberration > 0.001f) {
+            // Chromatic aberration: sample R/G/B at different UV offsets
+            // R shifts outward (toward edge), B shifts inward (toward center)
+            float caAmount = chromaticAberration * 0.002f;  // Scale factor
+            float dirX = u - 0.5f;
+            float dirY = v - 0.5f;
+
+            // R channel: sample from outer position
+            float uR = u + dirX * caAmount;
+            float vR = v + dirY * caAmount;
+            // B channel: sample from inner position
+            float uB = u - dirX * caAmount;
+            float vB = v - dirY * caAmount;
+
+            // Sample each channel at its offset position
+            float rSampleR, rSampleG, rSampleB, rSampleA;
+            float gSampleR, gSampleG, gSampleB, gSampleA;
+            float bSampleR, bSampleG, bSampleB, bSampleA;
+
+            sampleBilinear(glow, uR, vR, glowWidth, glowHeight, glowPitch, rSampleR, rSampleG, rSampleB, rSampleA);
+            sampleBilinear(glow, u,  v,  glowWidth, glowHeight, glowPitch, gSampleR, gSampleG, gSampleB, gSampleA);
+            sampleBilinear(glow, uB, vB, glowWidth, glowHeight, glowPitch, bSampleR, bSampleG, bSampleB, bSampleA);
+
+            // Take R from outer sample, G from center, B from inner sample
+            // Then apply CA tint colors
+            float rChannel = rSampleR;
+            float gChannel = gSampleG;
+            float bChannel = bSampleB;
+
+            // Apply tint: blend R channel with caTintR color, B channel with caTintB color
+            glowR = rChannel * caTintRr + bChannel * caTintBr;
+            glowG = rChannel * caTintRg + gChannel + bChannel * caTintBg;
+            glowB = rChannel * caTintRb + bChannel * caTintBb;
+            glowA = gSampleA;  // Use center alpha
+        } else {
+            // No chromatic aberration - standard sampling
+            sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+        }
 
         // Note: Glow color/tint is already applied in Prefilter stage
         // (via glowColor with preserveColor blending)
@@ -1194,30 +1235,47 @@ extern "C" __global__ void DebugOutputKernel(
         // GlowOnly: just glow with exposure and opacity
         // Color space: Premultiplied Linear (if useLinear) or Premultiplied sRGB (if not)
         float glowR, glowG, glowB, glowA;
-        sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
-        // Note: Glow color already applied in Prefilter
+        if (chromaticAberration > 0.001f) {
+            // Chromatic aberration (same as Final mode)
+            float caAmount = chromaticAberration * 0.002f;
+            float dirX = u - 0.5f;
+            float dirY = v - 0.5f;
 
-        // Glow stays in premultiplied space (AE native format)
+            float uR = u + dirX * caAmount;
+            float vR = v + dirY * caAmount;
+            float uB = u - dirX * caAmount;
+            float vB = v - dirY * caAmount;
+
+            float rSampleR, rSampleG, rSampleB, rSampleA;
+            float gSampleR, gSampleG, gSampleB, gSampleA;
+            float bSampleR, bSampleG, bSampleB, bSampleA;
+
+            sampleBilinear(glow, uR, vR, glowWidth, glowHeight, glowPitch, rSampleR, rSampleG, rSampleB, rSampleA);
+            sampleBilinear(glow, u,  v,  glowWidth, glowHeight, glowPitch, gSampleR, gSampleG, gSampleB, gSampleA);
+            sampleBilinear(glow, uB, vB, glowWidth, glowHeight, glowPitch, bSampleR, bSampleG, bSampleB, bSampleA);
+
+            float rChannel = rSampleR;
+            float gChannel = gSampleG;
+            float bChannel = bSampleB;
+
+            glowR = rChannel * caTintRr + bChannel * caTintBr;
+            glowG = rChannel * caTintRg + gChannel + bChannel * caTintBg;
+            glowB = rChannel * caTintRb + bChannel * caTintBb;
+            glowA = gSampleA;
+        } else {
+            sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+        }
+
+        // Note: Glow color and desaturation already applied in Prefilter
 
         // Apply exposure and opacity
         resR = glowR * exposure * glowOpacity;
         resG = glowG * exposure * glowOpacity;
         resB = glowB * exposure * glowOpacity;
 
-        // Highlight desaturation (same as Final mode)
-        float glowBrightness = fmaxf(fmaxf(resR, resG), resB);
-        if (glowBrightness > 0.7f) {
-            float glowLum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-            // Ramp: 0 at brightness=0.7, 1 at brightness=2.0
-            float desatT = fminf((glowBrightness - 0.7f) / 1.3f, 1.0f);
-            resR = resR + (glowLum - resR) * desatT;
-            resG = resG + (glowLum - resG) * desatT;
-            resB = resB + (glowLum - resB) * desatT;
-        }
-
         // Alpha for GlowOnly: based on glow brightness
-        // Glow needs alpha to be visible
+        float glowBrightness = fmaxf(fmaxf(resR, resG), resB);
         resA = fminf(glowBrightness, 1.0f);
     }
     else {

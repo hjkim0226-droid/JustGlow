@@ -201,6 +201,9 @@ struct RenderParams {
     // Advanced
     float   anamorphic;
     float   anamorphicAngle;
+    float   chromaticAberration;    // 0-100: Chromatic aberration amount
+    float   caTintR[3];             // CA Red channel tint (RGB)
+    float   caTintB[3];             // CA Blue channel tint (RGB)
     int     compositeMode;      // CompositeMode enum value (0=Add, 1=Screen, 2=Overlay)
     bool    hdrMode;
     bool    linearize;          // Enable sRGB to Linear conversion

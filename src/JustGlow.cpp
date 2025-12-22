@@ -474,6 +474,34 @@ PF_Err ParamsSetup(
         static_cast<PF_Fixed>(Defaults::AnamorphicAngle * 65536),
         DISK_ID_ANAMORPHIC_ANGLE);
 
+    // Chromatic Aberration
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Chromatic Aberration",
+        Ranges::ChromaticAberrationMin, Ranges::ChromaticAberrationMax,
+        Ranges::ChromaticAberrationMin, Ranges::ChromaticAberrationMax,
+        Defaults::ChromaticAberration,
+        PF_Precision_TENTHS, 0, 0,
+        DISK_ID_CHROMATIC_ABERRATION);
+
+    // CA Tint Red (color for R channel shift)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_COLOR(
+        "CA Tint Red",
+        255,  // Red
+        0,    // Green
+        0,    // Blue
+        DISK_ID_CA_TINT_R);
+
+    // CA Tint Blue (color for B channel shift)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_COLOR(
+        "CA Tint Blue",
+        0,    // Red
+        0,    // Green
+        255,  // Blue
+        DISK_ID_CA_TINT_B);
+
     // Composite Mode
     AEFX_CLR_STRUCT(def);
     PF_ADD_POPUP(
@@ -970,6 +998,28 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->anamorphicAngle = FIX_2_FLOAT(param.u.ad.value);
 
+        // Chromatic Aberration
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_CHROMATIC_ABERRATION, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->chromaticAberration = static_cast<float>(param.u.fs_d.value);
+
+        // CA Tint Red
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_CA_TINT_R, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->caTintR[0] = param.u.cd.value.red / 65535.0f;
+        preRenderData->caTintR[1] = param.u.cd.value.green / 65535.0f;
+        preRenderData->caTintR[2] = param.u.cd.value.blue / 65535.0f;
+
+        // CA Tint Blue
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_CA_TINT_B, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->caTintB[0] = param.u.cd.value.red / 65535.0f;
+        preRenderData->caTintB[1] = param.u.cd.value.green / 65535.0f;
+        preRenderData->caTintB[2] = param.u.cd.value.blue / 65535.0f;
+
         // Composite Mode
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_COMPOSITE_MODE, in_data->current_time,
@@ -1199,6 +1249,11 @@ PF_Err SmartRender(
                     // Advanced
                     rp.anamorphic = preRenderData->anamorphic;
                     rp.anamorphicAngle = preRenderData->anamorphicAngle;
+                    rp.chromaticAberration = preRenderData->chromaticAberration;
+                    for (int i = 0; i < 3; ++i) {
+                        rp.caTintR[i] = preRenderData->caTintR[i];
+                        rp.caTintB[i] = preRenderData->caTintB[i];
+                    }
                     rp.compositeMode = static_cast<int>(preRenderData->compositeMode);
                     rp.hdrMode = preRenderData->hdrMode;
                     rp.linearize = preRenderData->linearize;

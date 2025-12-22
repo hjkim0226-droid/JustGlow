@@ -818,6 +818,15 @@ bool JustGlowCUDARenderer::ExecuteComposite(
 
     float dither = params.dither;
 
+    // Chromatic aberration
+    float chromaticAberration = params.chromaticAberration;
+    float caTintRr = params.caTintR[0];
+    float caTintRg = params.caTintR[1];
+    float caTintRb = params.caTintR[2];
+    float caTintBr = params.caTintB[0];
+    float caTintBg = params.caTintB[1];
+    float caTintBb = params.caTintB[2];
+
     void* kernelParams[] = {
         &original,
         &debugBuffer,
@@ -845,7 +854,14 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&glowTintR,
         (void*)&glowTintG,
         (void*)&glowTintB,
-        (void*)&dither
+        (void*)&dither,
+        (void*)&chromaticAberration,
+        (void*)&caTintRr,
+        (void*)&caTintRg,
+        (void*)&caTintRb,
+        (void*)&caTintBr,
+        (void*)&caTintBg,
+        (void*)&caTintBb
     };
 
     CUresult err = cuLaunchKernel(
