@@ -1116,20 +1116,8 @@ extern "C" __global__ void DebugOutputKernel(
         // (via glowColor with preserveColor blending)
         // Do NOT apply again here - causes blue channel to zero out completely
 
-        // Unpremultiply glow to get true glow color
-        // This prevents darkening near transparent edges where alpha < 1
-        // Without this, glow RGB is "diluted" by the blurred alpha
-        if (glowA > 0.001f) {
-            glowR /= glowA;
-            glowG /= glowA;
-            glowB /= glowA;
-        } else {
-            // Very low alpha = transparent = no glow contribution
-            // Don't use premultiplied dark values (causes black circles)
-            glowR = 0.0f;
-            glowG = 0.0f;
-            glowB = 0.0f;
-        }
+        // Glow stays in premultiplied space (AE native format)
+        // Do NOT unpremultiply - causes artifacts at transparent edges
 
         // Apply exposure and glow opacity
         glowR *= exposure * glowOpacity;
@@ -1164,28 +1152,13 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = srcB + glowB;
                 break;
 
-            case 2: { // Screen - HDR-safe version
-                // Standard Screen: A + B - AB works only for 0-1 range
-                // For HDR (>1.0), this causes negative values → black
-                // Solution: clamp inputs to 0-1 for Screen math, then add HDR excess
-                float srcR_clamped = fminf(srcR, 1.0f);
-                float srcG_clamped = fminf(srcG, 1.0f);
-                float srcB_clamped = fminf(srcB, 1.0f);
-                float glowR_clamped = fminf(glowR, 1.0f);
-                float glowG_clamped = fminf(glowG, 1.0f);
-                float glowB_clamped = fminf(glowB, 1.0f);
-
-                // Screen on clamped values
-                float screenR = srcR_clamped + glowR_clamped - srcR_clamped * glowR_clamped;
-                float screenG = srcG_clamped + glowG_clamped - srcG_clamped * glowG_clamped;
-                float screenB = srcB_clamped + glowB_clamped - srcB_clamped * glowB_clamped;
-
-                // Add back HDR excess (values above 1.0)
-                resR = screenR + fmaxf(srcR - 1.0f, 0.0f) + fmaxf(glowR - 1.0f, 0.0f);
-                resG = screenG + fmaxf(srcG - 1.0f, 0.0f) + fmaxf(glowG - 1.0f, 0.0f);
-                resB = screenB + fmaxf(srcB - 1.0f, 0.0f) + fmaxf(glowB - 1.0f, 0.0f);
+            case 2: // Screen - premultiplied formula: A + B - AB
+                // Both srcR and glowR are light contributions
+                // Screen combines them: result = A + B - A*B
+                resR = srcR + glowR - srcR * glowR;
+                resG = srcG + glowG - srcG * glowG;
+                resB = srcB + glowB - srcB * glowB;
                 break;
-            }
 
             case 3: { // Overlay - premultiplied: conditional multiply/screen
                 // Decision based on straight source luminance
@@ -1229,17 +1202,7 @@ extern "C" __global__ void DebugOutputKernel(
 
         // Note: Glow color already applied in Prefilter
 
-        // Unpremultiply glow to get true glow color (same as Final mode)
-        if (glowA > 0.001f) {
-            glowR /= glowA;
-            glowG /= glowA;
-            glowB /= glowA;
-        } else {
-            // Very low alpha = transparent = no glow
-            glowR = 0.0f;
-            glowG = 0.0f;
-            glowB = 0.0f;
-        }
+        // Glow stays in premultiplied space (AE native format)
 
         // Apply exposure and opacity
         resR = glowR * exposure * glowOpacity;
