@@ -1185,16 +1185,14 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Composite based on mode (RGB first, then alpha from result)
+        // Composite based on mode (use glowA directly, no estimation)
         // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
         switch (compositeMode) {
             case 1: { // Add - additive blending (standard glow)
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                // Alpha calculated from blended result RGB
-                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
-                resA = fmaxf(srcA, resultMax);
+                resA = fminf(srcA + glowA, 1.0f);
                 break;
             }
 
@@ -1202,9 +1200,7 @@ extern "C" __global__ void DebugOutputKernel(
                 resR = srcR + glowR - srcR * glowR;
                 resG = srcG + glowG - srcG * glowG;
                 resB = srcB + glowB - srcB * glowB;
-                // Alpha calculated from blended result RGB
-                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
-                resA = fmaxf(srcA, resultMax);
+                resA = srcA + glowA - srcA * glowA;
                 break;
             }
 
@@ -1222,9 +1218,7 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = (straightSrcB < 0.5f)
                     ? 2.0f * srcB * glowB
                     : srcB + 2.0f * glowB * (1.0f - srcB);
-                // Alpha calculated from blended result RGB
-                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
-                resA = fmaxf(srcA, resultMax);
+                resA = srcA + glowA - srcA * glowA;
                 break;
             }
 
@@ -1232,8 +1226,7 @@ extern "C" __global__ void DebugOutputKernel(
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
-                resA = fmaxf(srcA, resultMax);
+                resA = fminf(srcA + glowA, 1.0f);
                 break;
             }
         }
