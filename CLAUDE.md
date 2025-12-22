@@ -117,7 +117,7 @@ cmake --install build
 | Core | Falloff | 레벨당 감쇠율 (0-100%) |
 | Threshold | Threshold | 밝기 임계값 (0-100%) |
 | Threshold | Soft Knee | Soft knee 폭 (0-100%) |
-| Quality | Quality | MIP 깊이 (Low=4, Med=6, High=8, Ultra=12) |
+| Quality | Quality | MIP 깊이 슬라이더 (6-12, 기본값 8) |
 | Quality | Falloff Type | 감쇠 곡선 (Exp/InvSq/Linear) |
 | Color | Glow Color | 글로우 색상 |
 | Color | Color Temp | 색온도 (-100~+100) |
@@ -140,14 +140,13 @@ cmake --install build
 
 ## 알려진 이슈
 
-**Critical:**
-1. **Pitch 모호성** - `JustGlowKernels.cu:147` - pitch가 바이트/픽셀 단위 불명확
-2. **CPU Fallback 미구현** - GPU 미지원 시 단순 복사만 수행
-3. **커널 간 동기화** - 스테이지 간 명시적 동기화 없음 (현재는 스트림 직렬화에 의존)
+**해결됨 (v1.5.3):**
+1. ~~**Pitch 모호성**~~ → `pitchBytes`로 명시적 명명 (`JustGlowCUDARenderer.h`)
+2. ~~**CPU Fallback 미구현**~~ → GPU 미지원 시 에러 메시지 표시 (`JustGlow.cpp:1259`)
+3. ~~**커널 간 동기화**~~ → `CUevent` 기반 명시적 동기화 (`JustGlowCUDARenderer.cpp:484-498`)
 
 **Medium:**
-- 에러 발생 시 `out_data->return_msg` 미사용
-- 임시 버퍼 과다 할당
+- 임시 버퍼 과다 할당 (성능 영향 미미)
 
 상세 내용: `docs/CODE_REVIEW_REPORT.md`
 
