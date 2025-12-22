@@ -479,14 +479,11 @@ extern "C" __global__ void PrefilterKernel(
     softThreshold(resR, resG, resB, threshold, softKnee);
 
     // Desaturation: 밝기에 비례해서 채도 감소 (자연스러운 하이라이트)
-    // 밝기 1.0 이하 → 채도 유지, 밝을수록 채도 감소
+    // 제곱 곡선: 1에 가까워질수록 가파르게 채도 감소
+    // 0→0%, 0.5→25%, 0.8→64%, 1.0→100%
     float brightness = fmaxf(fmaxf(resR, resG), resB);
     float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = 0.0f;
-    if (brightness > 1.0f) {
-        // 1.0→0%, 2.0→50%, 3.0→67%, ...
-        desatAmount = (brightness - 1.0f) / brightness;
-    }
+    float desatAmount = brightness * brightness;
     resR = resR + (lum - resR) * desatAmount;
     resG = resG + (lum - resG) * desatAmount;
     resB = resB + (lum - resB) * desatAmount;
