@@ -1188,11 +1188,12 @@ extern "C" __global__ void DebugOutputKernel(
                 break;
         }
 
-        // Calculate alpha: if there's any glow, output is opaque
-        // This prevents dim glows from being made even dimmer by low alpha
-        // Note: reusing glowBrightness variable (recalculate after desaturation)
+        // Calculate alpha from premultiplied glow RGB
+        // For premultiplied: RGB = straight_RGB * A, so A ≈ max(R,G,B)
+        // This gives proper transparency falloff at glow edges
         glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
-        resA = (glowBrightness > 0.001f || srcA > 0.001f) ? 1.0f : 0.0f;
+        float estimatedGlowAlpha = fminf(glowBrightness, 1.0f);  // Clamp to 1.0
+        resA = fmaxf(estimatedGlowAlpha, srcA);  // Combine with source alpha
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
@@ -1220,8 +1221,8 @@ extern "C" __global__ void DebugOutputKernel(
             resB = resB + (glowLum - resB) * desatT;
         }
 
-        // Alpha: if there's any glow, output is opaque
-        resA = (glowBrightness > 0.001f) ? 1.0f : 0.0f;
+        // Alpha from premultiplied glow RGB (same as Final mode)
+        resA = fminf(glowBrightness, 1.0f);
     }
     else {
         // Debug view: show specific buffer (Prefilter, Down1-6, Up0-6)
