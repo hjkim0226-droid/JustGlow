@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>JustGlow - Glow Buffer Detail (m_upsampleChain[0])</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 40px;
+            margin: 0;
+        }
+        h1 { color: #4fc3f7; text-align: center; }
+        h2 {
+            color: #81c784;
+            margin-top: 40px;
+            border-bottom: 2px solid #81c784;
+            padding-bottom: 10px;
+        }
+        h3 { color: #ffb74d; margin-top: 30px; }
+        .mermaid {
+            background: #252542;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+        }
+        .code-block {
+            background: #1e1e3f;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Consolas', monospace;
+            font-size: 14px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        .highlight { color: #4fc3f7; }
+        .comment { color: #6a9955; }
+        .number { color: #b5cea8; }
+        .issue {
+            background: rgba(255,82,82,0.2);
+            border-left: 4px solid #ff5252;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .note {
+            background: rgba(33,150,243,0.2);
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .success {
+            background: rgba(76,175,80,0.2);
+            border-left: 4px solid #4caf50;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #444;
+            padding: 10px;
+            text-align: left;
+        }
+        th { background: #333; }
+    </style>
+</head>
+<body>
+    <h1>m_upsampleChain[0] 글로우 버퍼 상세</h1>
+
+    <h2>1. 글로우 버퍼 생성 과정</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph ALLOC["버퍼 할당 (AllocateMipChain)"]
+        A1["params.width = output_worldP->width"]
+        A2["params.height = output_worldP->height"]
+        A3["AllocateMipChain(width, height, mipLevels)"]
+        A4["m_upsampleChain[0].width = width<br/>m_upsampleChain[0].height = height"]
+    end
+
+    subgraph UPSAMPLE["Upsample Chain 실행"]
+        U1["Level N-1 → m_upsampleChain[N-1]"]
+        U2["Level N-2 → m_upsampleChain[N-2]"]
+        U3["..."]
+        U4["Level 1 → m_upsampleChain[1]"]
+        U5["Level 0 → m_upsampleChain[0]"]
+    end
+
+    subgraph LEVEL0["Level 0 Upsample 상세"]
+        L1["input: m_mipChain[0]<br/>(Prefilter 결과)"]
+        L2["prevLevel: m_upsampleChain[1]<br/>(Level 1 upsample 결과)"]
+        L3["9-tap Gaussian Upsample(prevLevel)"]
+        L4["+ currLevel × physicalWeight"]
+        L5["output: m_upsampleChain[0]"]
+    end
+
+    A1 --> A2 --> A3 --> A4
+    A4 --> U1
+    U1 --> U2 --> U3 --> U4 --> U5
+    U5 --> L1
+    L1 --> L4
+    L2 --> L3 --> L4
+    L4 --> L5
+
+    style A4 fill:#e91e63
+    style L5 fill:#ff9800
+    </div>
+
+    <h2>2. Composite에서 글로우 샘플링</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph EXEC["ExecuteComposite()"]
+        E1["glow = m_upsampleChain[0].devicePtr"]
+        E2["glowWidth = m_upsampleChain[0].width"]
+        E3["glowHeight = m_upsampleChain[0].height"]
+        E4["glowPitch = m_upsampleChain[0].width"]
+    end
+
+    subgraph KERNEL["DebugOutputKernel"]
+        K1["x, y = 출력 픽셀 좌표<br/>(0 ~ width-1, 0 ~ height-1)"]
+        K2["u = (x + 0.5) / width"]
+        K3["v = (y + 0.5) / height"]
+        K4["sampleBilinear(glow, u, v,<br/>glowWidth, glowHeight, glowPitch)"]
+    end
+
+    subgraph BILINEAR["sampleBilinear() 내부"]
+        B1["u = clamp(u, 0, 1)"]
+        B2["v = clamp(v, 0, 1)"]
+        B3["px = u × glowWidth - 0.5"]
+        B4["py = v × glowHeight - 0.5"]
+        B5["x0 = floor(px), x1 = x0+1"]
+        B6["y0 = floor(py), y1 = y0+1"]
+        B7["4개 픽셀 bilinear 보간"]
+    end
+
+    E1 --> E2 --> E3 --> E4
+    E4 --> K1
+    K1 --> K2 --> K3 --> K4
+    K4 --> B1 --> B2 --> B3 --> B4 --> B5 --> B6 --> B7
+
+    style E1 fill:#e91e63
+    style K4 fill:#4caf50
+    </div>
+
+    <h2>3. UV → 픽셀 좌표 변환 공식</h2>
+
+    <div class="code-block">
+<span class="comment">// DebugOutputKernel에서 UV 계산</span>
+<span class="highlight">float</span> u = ((<span class="highlight">float</span>)x + <span class="number">0.5f</span>) / (<span class="highlight">float</span>)width;
+<span class="highlight">float</span> v = ((<span class="highlight">float</span>)y + <span class="number">0.5f</span>) / (<span class="highlight">float</span>)height;
+
+<span class="comment">// sampleBilinear에서 픽셀 좌표 계산</span>
+<span class="highlight">float</span> px = u * (<span class="highlight">float</span>)glowWidth - <span class="number">0.5f</span>;
+<span class="highlight">float</span> py = v * (<span class="highlight">float</span>)glowHeight - <span class="number">0.5f</span>;
+
+<span class="comment">// 만약 width == glowWidth라면:</span>
+<span class="comment">// px = ((x + 0.5) / width) × width - 0.5 = x + 0.5 - 0.5 = x</span>
+<span class="comment">// → 1:1 매핑 (정확한 픽셀 대응)</span>
+
+<span class="comment">// 만약 width != glowWidth라면:</span>
+<span class="comment">// px = ((x + 0.5) / width) × glowWidth - 0.5</span>
+<span class="comment">// → 스케일링 발생!</span>
+    </div>
+
+    <div class="success">
+        <strong>✅ 정상 케이스 (width == glowWidth):</strong><br/>
+        출력 픽셀 x=100 → u=100.5/width → px=100 → glow 픽셀 100 샘플링<br/>
+        <strong>1:1 대응</strong>
+    </div>
+
+    <div class="issue">
+        <strong>⚠️ 문제 케이스 (width != glowWidth):</strong><br/>
+        출력 픽셀 x=100, width=470, glowWidth=200 → u=100.5/470=0.214 → px=0.214×200-0.5=42.3<br/>
+        <strong>스케일링 발생! 글로우가 축소되어 보임</strong>
+    </div>
+
+    <h2>4. 버퍼 크기 검증 포인트</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph CHECK["🔍 확인 필요"]
+        C1["params.width == output_worldP->width?"]
+        C2["m_upsampleChain[0].width == params.width?"]
+        C3["glowWidth == width?"]
+    end
+
+    subgraph VALUES["실제 값 (로그에서 확인)"]
+        V1["SmartRender DEBUG:<br/>output_world=WxH"]
+        V2["Composite DEBUG:<br/>width, glowW"]
+        V3["width == glowW ?"]
+    end
+
+    C1 --> V1
+    C2 --> V2
+    C3 --> V3
+
+    style C1 fill:#ff9800
+    style C2 fill:#ff9800
+    style C3 fill:#ff9800
+    </div>
+
+    <h2>5. 텍스트 레이어 시나리오</h2>
+    <div class="mermaid">
+flowchart LR
+    subgraph TEXT["텍스트 레이어"]
+        T1["원본: 200×50"]
+        T2["확장 요청: +135px"]
+        T3["output_worldP: 470×320"]
+    end
+
+    subgraph ALLOC2["버퍼 할당"]
+        A1["params.width = 470"]
+        A2["AllocateMipChain(470, 320, 8)"]
+        A3["m_upsampleChain[0] = 470×320"]
+    end
+
+    subgraph COMPOSITE2["Composite"]
+        C1["width = 470"]
+        C2["glowWidth = 470"]
+        C3["1:1 매핑 ✓"]
+    end
+
+    T1 --> T2 --> T3
+    T3 --> A1 --> A2 --> A3
+    A3 --> C2
+    T3 --> C1
+    C1 --> C3
+    C2 --> C3
+
+    style C3 fill:#4caf50
+    </div>
+
+    <div class="note">
+        <strong>📌 이론상:</strong> 텍스트 레이어도 output_worldP가 확장된 크기(470×320)로 설정되면,
+        모든 버퍼가 같은 크기로 할당되어 1:1 매핑이 됨.<br/><br/>
+        <strong>확인 필요:</strong> 로그에서 <code>width == glowWidth</code> 인지 확인!
+    </div>
+
+    <h2>6. 잠재적 문제 시나리오</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph PROBLEM["⚠️ 만약 AE가 확장을 안 해줬다면"]
+        P1["input_worldP = 200×50<br/>(텍스트 원본 크기)"]
+        P2["output_worldP = 200×50<br/>(확장 안됨!)"]
+        P3["params.width = 200"]
+        P4["m_upsampleChain[0] = 200×50"]
+    end
+
+    subgraph RESULT["결과"]
+        R1["글로우가 200×50 버퍼에 생성"]
+        R2["Composite에서 200×50으로 출력"]
+        R3["확장된 영역에 글로우 안 보임!"]
+    end
+
+    P1 --> P2 --> P3 --> P4
+    P4 --> R1 --> R2 --> R3
+
+    style P2 fill:#ff5252
+    style R3 fill:#ff5252
+    </div>
+
+    <h2>7. 디버그 로그에서 확인할 값</h2>
+    <table>
+        <tr>
+            <th>로그 항목</th>
+            <th>조정 레이어 (예상)</th>
+            <th>텍스트 레이어 (예상)</th>
+            <th>텍스트 (문제시)</th>
+        </tr>
+        <tr>
+            <td>output_world</td>
+            <td>2048×1208</td>
+            <td>470×320</td>
+            <td style="color:#ff5252">200×50</td>
+        </tr>
+        <tr>
+            <td>input_world</td>
+            <td>1920×1080</td>
+            <td>200×50</td>
+            <td>200×50</td>
+        </tr>
+        <tr>
+            <td>width (params)</td>
+            <td>2048</td>
+            <td>470</td>
+            <td style="color:#ff5252">200</td>
+        </tr>
+        <tr>
+            <td>glowW</td>
+            <td>2048</td>
+            <td>470</td>
+            <td style="color:#ff5252">200</td>
+        </tr>
+        <tr>
+            <td>offsetX</td>
+            <td>64</td>
+            <td>135</td>
+            <td style="color:#ff5252">0</td>
+        </tr>
+    </table>
+
+    <div class="issue">
+        <strong>🔍 핵심 체크:</strong><br/>
+        <code>offsetX = (width - inputWidth) / 2</code><br/><br/>
+        만약 <code>offsetX == 0</code>이면, <code>width == inputWidth</code>이므로<br/>
+        <strong>AE가 output_worldP를 확장하지 않은 것!</strong>
+    </div>
+
+    <h2>8. 코드 위치 참조</h2>
+    <div class="code-block">
+<span class="comment">// JustGlowCUDARenderer.cpp - ExecuteComposite()</span>
+CUdeviceptr glow = m_upsampleChain[<span class="number">0</span>].devicePtr;  <span class="comment">// Line 765</span>
+<span class="highlight">int</span> glowWidth = m_upsampleChain[<span class="number">0</span>].width;       <span class="comment">// Line 766</span>
+<span class="highlight">int</span> glowHeight = m_upsampleChain[<span class="number">0</span>].height;     <span class="comment">// Line 767</span>
+
+<span class="comment">// JustGlowKernels.cu - DebugOutputKernel()</span>
+<span class="highlight">float</span> u = ((<span class="highlight">float</span>)x + <span class="number">0.5f</span>) / (<span class="highlight">float</span>)width;     <span class="comment">// Line 1118</span>
+<span class="highlight">float</span> v = ((<span class="highlight">float</span>)y + <span class="number">0.5f</span>) / (<span class="highlight">float</span>)height;    <span class="comment">// Line 1119</span>
+sampleBilinear(glow, u, v, glowWidth, glowHeight, ...);  <span class="comment">// Line 1165</span>
+
+<span class="comment">// JustGlowKernels.cu - sampleBilinear()</span>
+<span class="highlight">float</span> px = u * (<span class="highlight">float</span>)width - <span class="number">0.5f</span>;              <span class="comment">// Line 175</span>
+<span class="highlight">float</span> py = v * (<span class="highlight">float</span>)height - <span class="number">0.5f</span>;             <span class="comment">// Line 176</span>
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+    </script>
+</body>
+</html>

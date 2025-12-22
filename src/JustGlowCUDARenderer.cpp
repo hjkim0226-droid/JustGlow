@@ -309,8 +309,13 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
     // Check if we can reuse existing chain
     if (m_currentMipLevels == levels && !m_mipChain.empty()) {
         if (m_mipChain[0].width == width && m_mipChain[0].height == height) {
+            CUDA_LOG("AllocateMipChain: REUSING existing chain %dx%d, %d levels", width, height, levels);
             return true;
         }
+        CUDA_LOG("AllocateMipChain: Size changed %dx%d -> %dx%d, REALLOCATING",
+            m_mipChain[0].width, m_mipChain[0].height, width, height);
+    } else {
+        CUDA_LOG("AllocateMipChain: NEW allocation %dx%d, %d levels", width, height, levels);
     }
 
     ReleaseMipChain();
@@ -766,6 +771,10 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     int glowWidth = m_upsampleChain[0].width;
     int glowHeight = m_upsampleChain[0].height;
     int glowPitch = m_upsampleChain[0].width;  // Pitch in pixels
+
+    // Critical check: glowWidth must equal params.width for 1:1 UV mapping
+    CUDA_LOG("Composite GLOW CHECK: params.width=%d, glowWidth=%d, match=%s",
+        params.width, glowWidth, (params.width == glowWidth) ? "YES" : "NO!!!");
 
     // Determine debug buffer based on debugView
     // debugView: 1=Final, 2=Prefilter, 3-8=Down1-6, 9-15=Up0-6, 16=GlowOnly

@@ -824,12 +824,6 @@ PF_Err PreRender(
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
 
-    // Calculate glow expansion based on quality and spread
-    // Glow can spread approximately: sum of (blurOffset * 2^level) for all levels
-    // Simplified: use quality level as multiplier (more levels = more spread)
-    // Base expansion: ~64px for Low, ~128px for Medium, ~256px for High, ~512px for Ultra
-    int qualityMultiplier = 16;  // Base pixels per level
-
     // Get quality parameter early for extent calculation
     PF_ParamDef qualityParam;
     AEFX_CLR_STRUCT(qualityParam);
@@ -850,23 +844,53 @@ PF_Err PreRender(
     float spreadUp = spreadUpParam.u.fs_d.value;
     float spread = (std::max)(spreadDown, spreadUp);  // Use max for expansion calculation
 
-    // Calculate expansion: base + (spread factor * 2^mipLevels)
-    // NOTE: Use fixed expansion factor (not radius-dependent) to prevent "jumping" artifacts
-    // Always use full expansion (1.0) to ensure Text Layers get enough room for glow spread
-    int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f) * 1.0f);
+    // Calculate glow expansion based on MIP levels and spread parameters
+    //
+    // The blur spread is approximately 2^mipLevels pixels at maximum.
+    // Each MIP level doubles the effective blur radius:
+    //   Level 6: 64px, Level 7: 128px, Level 8: 256px, Level 9: 512px, etc.
+    //
+    // Spread parameter (1.0-5.0) affects how far the blur actually spreads
+    // at each downsample/upsample step.
+    //
+    // Expected expansion values:
+    //   Quality 6 (mipLevels=6): spread=1→51px,  spread=5→96px
+    //   Quality 7 (mipLevels=7): spread=1→102px, spread=5→192px
+    //   Quality 8 (mipLevels=8): spread=1→205px, spread=5→384px
+    //   Quality 9 (mipLevels=9): spread=1→410px, spread=5→768px
+    //   Quality 10+: scales accordingly up to 4096px max
+
+    // Base expansion: 2^mipLevels (theoretical maximum blur spread)
+    int baseExpansion = 1 << mipLevels;
+
+    // Spread factor: scales expansion based on spread parameter
+    // spread=1.0 → 0.8x (conservative), spread=5.0 → 1.5x (full spread)
+    float spreadFactor = 0.625f + spread * 0.175f;
+
+    // Calculate expansion
+    int glowExpansion = static_cast<int>(baseExpansion * spreadFactor);
+
     // Scale by downsample factor for preview resolution support
     glowExpansion = static_cast<int>(glowExpansion * downsampleFactor);
-    // Use parentheses to prevent Windows min/max macro expansion
-    glowExpansion = (std::max)(32, (std::min)(glowExpansion, 2048));  // Min 32 for preview
+
+    // Clamp to reasonable range (64 minimum for preview, 4096 maximum)
+    glowExpansion = (std::max)(64, (std::min)(glowExpansion, 4096));
 
     PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f)",
         glowExpansion, static_cast<int>(quality), mipLevels, spread);
+    PLUGIN_LOG("PreRender: Original req.rect = (%d,%d,%d,%d) size=%dx%d",
+        req.rect.left, req.rect.top, req.rect.right, req.rect.bottom,
+        req.rect.right - req.rect.left, req.rect.bottom - req.rect.top);
 
     // Expand the request rect to get extra pixels for glow spread
     req.rect.left -= glowExpansion;
     req.rect.top -= glowExpansion;
     req.rect.right += glowExpansion;
     req.rect.bottom += glowExpansion;
+
+    PLUGIN_LOG("PreRender: Expanded req.rect = (%d,%d,%d,%d) size=%dx%d",
+        req.rect.left, req.rect.top, req.rect.right, req.rect.bottom,
+        req.rect.right - req.rect.left, req.rect.bottom - req.rect.top);
 
     // Checkout input layer at current time (with expanded request)
     err = extra->cb->checkout_layer(
@@ -878,6 +902,12 @@ PF_Err PreRender(
         in_data->time_step,
         in_data->time_scale,
         &in_result);
+
+    PLUGIN_LOG("PreRender: in_result.result_rect = (%d,%d,%d,%d) size=%dx%d",
+        in_result.result_rect.left, in_result.result_rect.top,
+        in_result.result_rect.right, in_result.result_rect.bottom,
+        in_result.result_rect.right - in_result.result_rect.left,
+        in_result.result_rect.bottom - in_result.result_rect.top);
 
     if (!err) {
         // Get parameter values
@@ -1118,6 +1148,12 @@ PF_Err PreRender(
     extra->output->max_result_rect.top -= glowExpansion;
     extra->output->max_result_rect.right += glowExpansion;
     extra->output->max_result_rect.bottom += glowExpansion;
+
+    PLUGIN_LOG("PreRender: Final output->result_rect = (%d,%d,%d,%d) size=%dx%d",
+        extra->output->result_rect.left, extra->output->result_rect.top,
+        extra->output->result_rect.right, extra->output->result_rect.bottom,
+        extra->output->result_rect.right - extra->output->result_rect.left,
+        extra->output->result_rect.bottom - extra->output->result_rect.top);
 
     extra->output->solid = FALSE;
     extra->output->pre_render_data = preRenderData;

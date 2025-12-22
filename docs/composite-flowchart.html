@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>JustGlow - Full Pipeline Flowchart</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 40px;
+            margin: 0;
+        }
+        h1 { color: #4fc3f7; text-align: center; }
+        h2 {
+            color: #81c784;
+            margin-top: 40px;
+            border-bottom: 2px solid #81c784;
+            padding-bottom: 10px;
+        }
+        h3 { color: #ffb74d; margin-top: 30px; }
+        .mermaid {
+            background: #252542;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+        }
+        .legend {
+            background: rgba(255,255,255,0.05);
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .legend-item { margin: 8px 0; }
+        .code { color: #4fc3f7; font-family: monospace; }
+        .file { color: #ffb74d; font-family: monospace; }
+        .issue {
+            background: rgba(255,82,82,0.2);
+            border-left: 4px solid #ff5252;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .note {
+            background: rgba(33,150,243,0.2);
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #444;
+            padding: 10px;
+            text-align: left;
+        }
+        th { background: #333; }
+    </style>
+</head>
+<body>
+    <h1>JustGlow - Full Rendering Pipeline</h1>
+
+    <div class="legend">
+        <strong>범례:</strong>
+        <div class="legend-item">🟦 파란색 = 입력 버퍼 (Input Buffer)</div>
+        <div class="legend-item">🟩 초록색 = 처리 (Process)</div>
+        <div class="legend-item">🟧 주황색 = 출력 버퍼 (Output Buffer)</div>
+        <div class="legend-item">🟪 보라색 = 조건/분기 (Condition)</div>
+        <div class="legend-item">🟥 빨간색 = 중간 버퍼 (Intermediate Buffer)</div>
+    </div>
+
+    <h2>1. 전체 파이프라인 개요</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph AE["After Effects"]
+        INPUT[("inputBuffer<br/>(AE GPU World)")]
+        OUTPUT[("outputBuffer<br/>(AE GPU World)")]
+    end
+
+    subgraph PIPELINE["JustGlow Pipeline"]
+        P1["1. Prefilter<br/>13-tap + Threshold"]
+        P2["2. Downsample Chain<br/>9-tap Gaussian × N levels"]
+        P3["3. Upsample Chain<br/>9-tap + Falloff Blend"]
+        P4["4. Composite<br/>DebugOutputKernel"]
+    end
+
+    subgraph BUFFERS["GPU 버퍼"]
+        M0["m_mipChain[0]"]
+        M1["m_mipChain[1..N]"]
+        U0["m_upsampleChain[0]"]
+        UN["m_upsampleChain[N..1]"]
+    end
+
+    INPUT -->|"params.inputWidth×inputHeight"| P1
+    P1 -->|"threshold, softKnee"| M0
+    M0 --> P2
+    P2 -->|"2x downsample each"| M1
+    M1 --> P3
+    P3 -->|"blend levels"| UN
+    UN -->|"accumulate"| U0
+    U0 -->|"glow texture"| P4
+    INPUT -->|"original texture"| P4
+    P4 -->|"final composite"| OUTPUT
+
+    style INPUT fill:#2196f3
+    style OUTPUT fill:#ff9800
+    style M0 fill:#e91e63
+    style M1 fill:#e91e63
+    style U0 fill:#e91e63
+    style UN fill:#e91e63
+    </div>
+
+    <h2>2. Stage 1: Prefilter (PrefilterKernel)</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph INPUT["입력"]
+        I1["inputBuffer<br/>(AE에서 받은 GPU 버퍼)"]
+        I2["params.inputWidth × inputHeight"]
+    end
+
+    subgraph OFFSET["오프셋 계산 ⚠️"]
+        O1["dstWidth = params.width (확장된 출력)"]
+        O2["offsetX = (dstWidth - inputWidth) / 2"]
+        O3["srcX = x - offsetX"]
+        O4["UV 계산: u = srcX / inputWidth"]
+    end
+
+    subgraph SAMPLE["13-tap 샘플링"]
+        S1["ZeroPad 샘플링<br/>(경계 밖 = 0)"]
+        S2["Weighted Average<br/>Center=4/11, Inner=1/11, ..."]
+    end
+
+    subgraph PROCESS["처리"]
+        P1["sRGB → Linear<br/>(if linearize)"]
+        P2["Soft Threshold<br/>threshold, softKnee"]
+        P3["Desaturation<br/>1 - exp(-brightness × 0.5)"]
+    end
+
+    subgraph OUTPUT["출력"]
+        O["m_mipChain[0]<br/>width × height"]
+    end
+
+    I1 --> O1
+    I2 --> O2
+    O1 --> O2 --> O3 --> O4
+    O4 --> S1 --> S2
+    S2 --> P1 --> P2 --> P3
+    P3 --> O
+
+    style I1 fill:#2196f3
+    style O fill:#e91e63
+    style O2 fill:#ff9800
+    </div>
+
+    <div class="note">
+        <strong>📌 핵심:</strong> Prefilter는 <code>inputWidth×inputHeight</code> 크기의 입력을
+        <code>width×height</code> (확장된) 크기의 출력으로 변환합니다.<br/>
+        <code>offsetX/Y</code>로 입력을 중앙에 배치하고, 경계 밖은 ZeroPad로 0값 반환.
+    </div>
+
+    <h2>3. Stage 2: Downsample Chain</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph DS["Downsample Loop (i = 0 to mipLevels-2)"]
+        D0["m_mipChain[0]<br/>width × height"]
+        D1["m_mipChain[1]<br/>width/2 × height/2"]
+        D2["m_mipChain[2]<br/>width/4 × height/4"]
+        DN["m_mipChain[N-1]<br/>~16 × ~16"]
+    end
+
+    subgraph KERNEL["Gaussian2DDownsampleKernel"]
+        K1["9-tap 2D Gaussian"]
+        K2["ZeroPad 샘플링"]
+        K3["2x 축소"]
+    end
+
+    D0 -->|"Gaussian 9-tap"| K1
+    K1 --> D1
+    D1 --> K1
+    K1 --> D2
+    D2 -->|"..."| DN
+
+    style D0 fill:#e91e63
+    style D1 fill:#e91e63
+    style D2 fill:#e91e63
+    style DN fill:#e91e63
+    </div>
+
+    <h2>4. Stage 3: Upsample Chain (가장 복잡!) ⭐</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph LOOP["Upsample Loop (i = mipLevels-1 down to 0)"]
+        direction TB
+
+        subgraph LEVEL_N["Level N-1 (가장 깊은 레벨)"]
+            LN1["input: m_mipChain[N-1]"]
+            LN2["prevLevel: nullptr"]
+            LN3["output: m_upsampleChain[N-1]"]
+            LN4["결과 = currLevel × weight"]
+        end
+
+        subgraph LEVEL_MID["Level i (중간 레벨)"]
+            LM1["input: m_mipChain[i]"]
+            LM2["prevLevel: m_upsampleChain[i+1]"]
+            LM3["output: m_upsampleChain[i]"]
+            LM4["결과 = Upsample(prev) + curr × weight"]
+        end
+
+        subgraph LEVEL_0["Level 0 (최종)"]
+            L01["input: m_mipChain[0]"]
+            L02["prevLevel: m_upsampleChain[1]"]
+            L03["output: m_upsampleChain[0]"]
+            L04["최종 글로우 텍스처"]
+        end
+    end
+
+    LN1 --> LN4
+    LN4 --> LN3
+    LN3 -->|"as prevLevel"| LM2
+    LM1 --> LM4
+    LM2 -->|"9-tap Upsample"| LM4
+    LM4 --> LM3
+    LM3 -->|"as prevLevel"| L02
+    L01 --> L04
+    L02 -->|"9-tap Upsample"| L04
+    L04 --> L03
+
+    style LN3 fill:#e91e63
+    style LM3 fill:#e91e63
+    style L03 fill:#ff9800
+    </div>
+
+    <h3>UpsampleKernel 내부 로직</h3>
+    <div class="mermaid">
+flowchart TD
+    subgraph STEP1["STEP 1: Previous Level Upsample"]
+        S1A["prevLevel 존재?"]
+        S1B["9-tap Gaussian Upsample<br/>Center=4/16, Cross=2/16, Diag=1/16"]
+        S1C["resR/G/B = upsampled result"]
+        S1D["resR/G/B = 0 (첫 레벨)"]
+    end
+
+    subgraph STEP2["STEP 2: Current Level Contribution"]
+        S2A["currMip 샘플링"]
+        S2B["physicalWeight 계산<br/>calculatePhysicalWeight()"]
+        S2C["contrib = curr × physicalWeight"]
+    end
+
+    subgraph STEP3["STEP 3: Radius-based Threshold"]
+        S3A["levelThreshold = (1-activeLimit) × levelRatio × 0.5"]
+        S3B["brightness < threshold?"]
+        S3C["contribution = smoothstep curve"]
+        S3D["contrib *= contribution"]
+    end
+
+    subgraph STEP4["STEP 4: Final Blend"]
+        S4A["result = resR + contribR"]
+        S4B["output → m_upsampleChain[i]"]
+    end
+
+    S1A -->|Yes| S1B --> S1C
+    S1A -->|No| S1D
+    S1C --> S4A
+    S1D --> S4A
+
+    S2A --> S2B --> S2C
+    S2C --> S3A --> S3B
+    S3B -->|Yes| S3C --> S3D
+    S3B -->|No| S3D
+    S3D --> S4A
+    S4A --> S4B
+
+    style S1C fill:#4caf50
+    style S3D fill:#4caf50
+    style S4B fill:#ff9800
+    </div>
+
+    <h2>5. Stage 4: Composite (DebugOutputKernel)</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph INPUT["입력 버퍼"]
+        I1["original: inputBuffer<br/>(AE 원본)"]
+        I2["glow: m_upsampleChain[0]<br/>(글로우 결과)"]
+    end
+
+    subgraph OFFSET["오프셋 계산"]
+        O1["offsetX = (width - inputWidth) / 2"]
+        O2["srcX = x - offsetX"]
+        O3["bounds check"]
+    end
+
+    subgraph SAMPLE_ORIG["원본 샘플링"]
+        SO1{srcX, srcY in bounds?}
+        SO2["origRGBA = read(original)"]
+        SO3["origRGBA = 0,0,0,0"]
+        SO4["Linear 변환 (if useLinear)"]
+    end
+
+    subgraph SAMPLE_GLOW["글로우 샘플링"]
+        SG1["u = (x + 0.5) / width"]
+        SG2["v = (y + 0.5) / height"]
+        SG3{CA enabled?}
+        SG4["3-point CA sampling<br/>uR, u, uB"]
+        SG5["standard bilinear"]
+        SG6["× exposure × glowOpacity"]
+    end
+
+    subgraph COMPOSITE["합성"]
+        C1["srcRGBA × sourceOpacity"]
+        C2["glowAlpha = max(glowR,G,B)"]
+        C3{compositeMode}
+        C4["Add: src + glow"]
+        C5["Screen: src + glow - src×glow"]
+        C6["Overlay: conditional"]
+        C7["Alpha blend"]
+    end
+
+    subgraph OUTPUT["출력"]
+        OUT["outputBuffer"]
+    end
+
+    I1 --> O1 --> O2 --> O3 --> SO1
+    SO1 -->|Yes| SO2 --> SO4
+    SO1 -->|No| SO3
+    SO4 --> C1
+    SO3 --> C1
+
+    I2 --> SG1 --> SG2 --> SG3
+    SG3 -->|Yes| SG4 --> SG6
+    SG3 -->|No| SG5 --> SG6
+    SG6 --> C2
+
+    C1 --> C3
+    C2 --> C3
+    C3 -->|Add| C4 --> C7
+    C3 -->|Screen| C5 --> C7
+    C3 -->|Overlay| C6 --> C7
+    C7 --> OUT
+
+    style I1 fill:#2196f3
+    style I2 fill:#e91e63
+    style OUT fill:#ff9800
+    </div>
+
+    <h2>6. 버퍼 크기 관계</h2>
+    <table>
+        <tr>
+            <th>버퍼</th>
+            <th>크기</th>
+            <th>설명</th>
+        </tr>
+        <tr>
+            <td><code>inputBuffer</code></td>
+            <td>inputWidth × inputHeight</td>
+            <td>AE에서 받은 원본 (텍스트 레이어: 작음)</td>
+        </tr>
+        <tr>
+            <td><code>outputBuffer</code></td>
+            <td>width × height</td>
+            <td>AE 출력 (확장된 크기)</td>
+        </tr>
+        <tr>
+            <td><code>m_mipChain[0]</code></td>
+            <td>width × height</td>
+            <td>Prefilter 출력 = output 크기</td>
+        </tr>
+        <tr>
+            <td><code>m_upsampleChain[0]</code></td>
+            <td>width × height</td>
+            <td>최종 글로우 = output 크기</td>
+        </tr>
+    </table>
+
+    <div class="note">
+        <strong>📌 중요:</strong> 모든 내부 버퍼(mipChain, upsampleChain)는 <code>params.width × height</code>
+        (확장된 출력 크기) 기준으로 할당됩니다.<br/>
+        <code>AllocateMipChain(params.width, params.height, params.mipLevels)</code>
+    </div>
+
+    <h2>7. 텍스트 레이어 이슈 체크포인트</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph CHECK["🔍 확인 필요 사항"]
+        C1["1. Prefilter offset 계산<br/>inputWidth vs width"]
+        C2["2. MIP chain 크기<br/>width 기준으로 할당?"]
+        C3["3. Upsample 결과 크기<br/>m_upsampleChain[0].width == width?"]
+        C4["4. Composite glow 샘플링<br/>glowWidth == width?"]
+        C5["5. AE input_worldP 크기<br/>확장 요청이 반영됐나?"]
+    end
+
+    C1 --> C2 --> C3 --> C4 --> C5
+
+    style C1 fill:#ff5252
+    style C2 fill:#ff5252
+    style C3 fill:#ff5252
+    style C4 fill:#ff5252
+    style C5 fill:#ff5252
+    </div>
+
+    <div class="issue">
+        <strong>🔍 가장 의심되는 부분:</strong><br/>
+        <ol>
+            <li><code>input_worldP->width</code>가 텍스트 레이어에서 확장 안 됐을 가능성</li>
+            <li>Prefilter의 offset 계산이 작은 inputWidth에서 이상하게 작동</li>
+            <li>글로우가 생성되지만 Composite에서 잘못된 위치에 합성</li>
+        </ol>
+    </div>
+
+    <h2>파일 참조</h2>
+    <div class="legend">
+        <div class="legend-item"><span class="file">src/JustGlowKernels.cu</span></div>
+        <ul>
+            <li>PrefilterKernel: Line 343-497</li>
+            <li>Gaussian2DDownsampleKernel: Line 506-590</li>
+            <li>UpsampleKernel: Line 812-963</li>
+            <li>DebugOutputKernel: Line 1059-1350</li>
+        </ul>
+        <div class="legend-item"><span class="file">src/JustGlowCUDARenderer.cpp</span></div>
+        <ul>
+            <li>Render(): Line 440-517</li>
+            <li>ExecutePrefilter(): Line 523-591</li>
+            <li>ExecuteDownsampleChain(): Line 597-650</li>
+            <li>ExecuteUpsampleChain(): Line 652-747</li>
+            <li>ExecuteComposite(): Line 753-875</li>
+        </ul>
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+    </script>
+</body>
+</html>
