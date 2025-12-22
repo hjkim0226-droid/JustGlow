@@ -1123,6 +1123,12 @@ extern "C" __global__ void DebugOutputKernel(
             glowR /= glowA;
             glowG /= glowA;
             glowB /= glowA;
+        } else {
+            // Very low alpha = transparent = no glow contribution
+            // Don't use premultiplied dark values (causes black circles)
+            glowR = 0.0f;
+            glowG = 0.0f;
+            glowB = 0.0f;
         }
 
         // Apply exposure and glow opacity
@@ -1130,18 +1136,16 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Highlight desaturation: brightness > 1.0 gradually desaturates toward white
+        // Highlight desaturation: brightness > 0.7 gradually desaturates toward white
         // Prevents over-saturated "burning" colors in bright areas
         float glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
-        if (glowBrightness > 1.0f) {
+        if (glowBrightness > 0.7f) {
             float glowLum = 0.2126f * glowR + 0.7152f * glowG + 0.0722f * glowB;
-            // Aggressive ramp: 0 at brightness=1, 1 at brightness=2 (was 3)
-            float desatT = fminf((glowBrightness - 1.0f) / 1.0f, 1.0f);
-            // Apply 100% desaturation for bright highlights (full white at brightness 2+)
-            float desatAmount = desatT * 1.0f;
-            glowR = glowR + (glowLum - glowR) * desatAmount;
-            glowG = glowG + (glowLum - glowG) * desatAmount;
-            glowB = glowB + (glowLum - glowB) * desatAmount;
+            // Ramp: 0 at brightness=0.7, 1 at brightness=2.0
+            float desatT = fminf((glowBrightness - 0.7f) / 1.3f, 1.0f);
+            glowR = glowR + (glowLum - glowR) * desatT;
+            glowG = glowG + (glowLum - glowG) * desatT;
+            glowB = glowB + (glowLum - glowB) * desatT;
         }
 
         // Apply source opacity (premultiplied)
@@ -1160,13 +1164,28 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = srcB + glowB;
                 break;
 
-            case 2: // Screen - premultiplied formula: A + B - AB
-                // Both srcR and glowR are light contributions
-                // Screen combines them: result = A + B - A*B
-                resR = srcR + glowR - srcR * glowR;
-                resG = srcG + glowG - srcG * glowG;
-                resB = srcB + glowB - srcB * glowB;
+            case 2: { // Screen - HDR-safe version
+                // Standard Screen: A + B - AB works only for 0-1 range
+                // For HDR (>1.0), this causes negative values → black
+                // Solution: clamp inputs to 0-1 for Screen math, then add HDR excess
+                float srcR_clamped = fminf(srcR, 1.0f);
+                float srcG_clamped = fminf(srcG, 1.0f);
+                float srcB_clamped = fminf(srcB, 1.0f);
+                float glowR_clamped = fminf(glowR, 1.0f);
+                float glowG_clamped = fminf(glowG, 1.0f);
+                float glowB_clamped = fminf(glowB, 1.0f);
+
+                // Screen on clamped values
+                float screenR = srcR_clamped + glowR_clamped - srcR_clamped * glowR_clamped;
+                float screenG = srcG_clamped + glowG_clamped - srcG_clamped * glowG_clamped;
+                float screenB = srcB_clamped + glowB_clamped - srcB_clamped * glowB_clamped;
+
+                // Add back HDR excess (values above 1.0)
+                resR = screenR + fmaxf(srcR - 1.0f, 0.0f) + fmaxf(glowR - 1.0f, 0.0f);
+                resG = screenG + fmaxf(srcG - 1.0f, 0.0f) + fmaxf(glowG - 1.0f, 0.0f);
+                resB = screenB + fmaxf(srcB - 1.0f, 0.0f) + fmaxf(glowB - 1.0f, 0.0f);
                 break;
+            }
 
             case 3: { // Overlay - premultiplied: conditional multiply/screen
                 // Decision based on straight source luminance
@@ -1215,6 +1234,11 @@ extern "C" __global__ void DebugOutputKernel(
             glowR /= glowA;
             glowG /= glowA;
             glowB /= glowA;
+        } else {
+            // Very low alpha = transparent = no glow
+            glowR = 0.0f;
+            glowG = 0.0f;
+            glowB = 0.0f;
         }
 
         // Apply exposure and opacity
@@ -1224,14 +1248,13 @@ extern "C" __global__ void DebugOutputKernel(
 
         // Highlight desaturation (same as Final mode)
         float glowBrightness = fmaxf(fmaxf(resR, resG), resB);
-        if (glowBrightness > 1.0f) {
+        if (glowBrightness > 0.7f) {
             float glowLum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-            // Aggressive ramp: 0 at brightness=1, 1 at brightness=2 (was 3)
-            float desatT = fminf((glowBrightness - 1.0f) / 1.0f, 1.0f);
-            float desatAmount = desatT * 1.0f;  // 100% desaturation at brightness 2+
-            resR = resR + (glowLum - resR) * desatAmount;
-            resG = resG + (glowLum - resG) * desatAmount;
-            resB = resB + (glowLum - resB) * desatAmount;
+            // Ramp: 0 at brightness=0.7, 1 at brightness=2.0
+            float desatT = fminf((glowBrightness - 0.7f) / 1.3f, 1.0f);
+            resR = resR + (glowLum - resR) * desatT;
+            resG = resG + (glowLum - resG) * desatT;
+            resB = resB + (glowLum - resB) * desatT;
         }
 
         // Alpha: if there's any glow, output is opaque
