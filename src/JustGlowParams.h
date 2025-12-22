@@ -183,8 +183,8 @@ struct RenderParams {
     float   exposure;           // Exposure -> brightness multiplier
     float   level1Weight;       // Intensity -> Level 1 starting weight (0.5-1.0)
     int     falloffType;        // Decay curve type (0=Exponential, 1=InverseSquare, 2=Linear)
-    float   spreadDown;         // 0-1: Downsample spread (offset = 1.0 + spreadDown at max MIP)
-    float   spreadUp;           // 0-1: Upsample spread (offset = 1.0 + spreadUp at max MIP)
+    float   spreadDown;         // 1-5: Downsample spread (offset = spreadDown at max MIP)
+    float   spreadUp;           // 1-5: Upsample spread (offset = spreadUp at max MIP)
 
     // Threshold
     float   threshold;

@@ -197,8 +197,8 @@ namespace Defaults {
     constexpr float Intensity       = 75.0f;    // 75% = balanced core vs spread
     constexpr float Exposure        = 1.0f;     // 1x brightness multiplier
     constexpr float Radius          = 75.0f;    // 75% = balanced glow reach
-    constexpr float SpreadDown      = 50.0f;    // 50% = downsample offset 1.0-2.0
-    constexpr float SpreadUp        = 50.0f;    // 50% = upsample offset 1.0-2.0
+    constexpr float SpreadDown      = 1.0f;     // 1.0 = minimal blur offset
+    constexpr float SpreadUp        = 1.0f;     // 1.0 = minimal blur offset
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
     constexpr float Threshold       = 25.0f;    // 25% - lower threshold for more glow
     constexpr float SoftKnee        = 75.0f;    // 75% - softer threshold transition
@@ -237,8 +237,8 @@ namespace Ranges {
     constexpr float RadiusMin       = 0.0f;
     constexpr float RadiusMax       = 100.0f;   // 100% = all MIP levels active
 
-    constexpr float SpreadMin       = 0.0f;
-    constexpr float SpreadMax       = 100.0f;   // Maps to 1.1-2.5px offset
+    constexpr float SpreadMin       = 1.0f;
+    constexpr float SpreadMax       = 5.0f;     // Offset at max MIP level (1.0-5.0)
 
     constexpr float FalloffMin      = 0.0f;
     constexpr float FalloffMax      = 100.0f;   // 0=boost, 50=neutral, 100=decay
@@ -296,8 +296,8 @@ struct JustGlowPreRenderData {
     float intensity;    // 0-100: Level 1 starting weight (core concentration)
     float exposure;     // 0-50: Brightness multiplier (final glow brightness)
     float radius;       // 0-200: controls active MIP levels
-    float spreadDown;   // 0-100: downsample offset at max MIP (1.0-2.0)
-    float spreadUp;     // 0-100: upsample offset at max MIP (1.0-2.0)
+    float spreadDown;   // 1-5: downsample offset at max MIP level
+    float spreadUp;     // 1-5: upsample offset at max MIP level
     float falloff;      // 0-100: decay rate per level
     float threshold;    // 0-100: brightness threshold
     float softKnee;     // 0-100: soft knee width

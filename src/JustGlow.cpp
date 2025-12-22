@@ -314,7 +314,7 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_RADIUS);
 
-    // Spread Down (0-100) - Downsample offset at max MIP level
+    // Spread Down (1-5) - Downsample offset at max MIP level
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
         "Spread Down",
@@ -328,7 +328,7 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_SPREAD_DOWN);
 
-    // Spread Up (0-100) - Upsample offset at max MIP level
+    // Spread Up (1-5) - Upsample offset at max MIP level
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
         "Spread Up",
@@ -877,13 +877,13 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->radius = param.u.fs_d.value;
 
-        // Spread Down (0-100)
+        // Spread Down (1-5)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_DOWN, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->spreadDown = param.u.fs_d.value;
 
-        // Spread Up (0-100)
+        // Spread Up (1-5)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_UP, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
@@ -1179,8 +1179,8 @@ PF_Err SmartRender(
                     rp.exposure = preRenderData->exposure;
                     rp.level1Weight = preRenderData->level1Weight;
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);
-                    rp.spreadDown = preRenderData->spreadDown / 100.0f;  // 0-1
-                    rp.spreadUp = preRenderData->spreadUp / 100.0f;      // 0-1
+                    rp.spreadDown = preRenderData->spreadDown;  // 1-5 direct
+                    rp.spreadUp = preRenderData->spreadUp;      // 1-5 direct
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;
