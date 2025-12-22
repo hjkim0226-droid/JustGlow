@@ -1185,25 +1185,28 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Estimate glow alpha from premultiplied RGB (alpha ≈ max(R,G,B))
-        float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
-
-        // Composite based on mode (RGB and Alpha use same blend formula)
+        // Composite based on mode (RGB first, then alpha from result)
         // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
         switch (compositeMode) {
-            case 1: // Add - additive blending (standard glow)
+            case 1: { // Add - additive blending (standard glow)
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                resA = fminf(srcA + glowAlpha, 1.0f);
+                // Alpha calculated from blended result RGB
+                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
+                resA = fmaxf(srcA, resultMax);
                 break;
+            }
 
-            case 2: // Screen - formula: A + B - A*B
+            case 2: { // Screen - formula: A + B - A*B
                 resR = srcR + glowR - srcR * glowR;
                 resG = srcG + glowG - srcG * glowG;
                 resB = srcB + glowB - srcB * glowB;
-                resA = srcA + glowAlpha - srcA * glowAlpha;
+                // Alpha calculated from blended result RGB
+                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
+                resA = fmaxf(srcA, resultMax);
                 break;
+            }
 
             case 3: { // Overlay - premultiplied: conditional multiply/screen
                 float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
@@ -1219,16 +1222,20 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = (straightSrcB < 0.5f)
                     ? 2.0f * srcB * glowB
                     : srcB + 2.0f * glowB * (1.0f - srcB);
-                resA = srcA + glowAlpha - srcA * glowAlpha;
+                // Alpha calculated from blended result RGB
+                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
+                resA = fmaxf(srcA, resultMax);
                 break;
             }
 
-            default: // Fallback to Add
+            default: { // Fallback to Add
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                resA = fminf(srcA + glowAlpha, 1.0f);
+                float resultMax = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
+                resA = fmaxf(srcA, resultMax);
                 break;
+            }
         }
     }
     else if (debugMode == 16) {
