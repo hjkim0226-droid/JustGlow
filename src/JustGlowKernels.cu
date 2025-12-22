@@ -513,9 +513,10 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     float texelX = 1.0f / (float)srcWidth;
     float texelY = 1.0f / (float)srcHeight;
 
-    // Dynamic offset: 1.0 at level 0, spreadDown (1-5) at max level
+    // Dynamic offset: 1.0 at level 0, 1.0 + spreadDown at max level
+    // spreadDown range: 0-10
     float levelRatio = (float)level / fmaxf((float)(maxLevels - 1), 1.0f);
-    float offset = 1.0f + (spreadDown - 1.0f) * levelRatio;
+    float offset = 1.0f + spreadDown * levelRatio;
 
     // 3×3 Gaussian weights: [1,2,1; 2,4,2; 1,2,1] / 16
     const float wCenter = 4.0f / 16.0f;    // 0.25
@@ -835,9 +836,10 @@ extern "C" __global__ void UpsampleKernel(
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Dynamic offset: 1.0 at level 0, spreadUp (1-5) at max level
+        // Dynamic offset: 1.0 at level 0, 1.0 + spreadUp at max level
+        // spreadUp range: 0-10
         float levelRatio = (float)levelIndex / fmaxf((float)(maxLevels - 1), 1.0f);
-        float offset = 1.0f + (spreadUp - 1.0f) * levelRatio;
+        float offset = 1.0f + spreadUp * levelRatio;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)

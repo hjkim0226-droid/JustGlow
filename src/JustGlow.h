@@ -237,8 +237,8 @@ namespace Ranges {
     constexpr float RadiusMin       = 0.0f;
     constexpr float RadiusMax       = 100.0f;   // 100% = all MIP levels active
 
-    constexpr float SpreadMin       = 1.0f;
-    constexpr float SpreadMax       = 5.0f;     // Offset at max MIP level (1.0-5.0)
+    constexpr float SpreadMin       = 0.0f;
+    constexpr float SpreadMax       = 10.0f;    // Offset at max MIP level (0-10)
 
     constexpr float FalloffMin      = 0.0f;
     constexpr float FalloffMax      = 100.0f;   // 0=boost, 50=neutral, 100=decay
