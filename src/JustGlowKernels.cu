@@ -478,6 +478,19 @@ extern "C" __global__ void PrefilterKernel(
     // Soft threshold on Premultiplied (통일된 위치)
     softThreshold(resR, resG, resB, threshold, softKnee);
 
+    // Desaturation: 밝기에 비례해서 채도 감소 (자연스러운 하이라이트)
+    // 밝기 1.0 이하 → 채도 유지, 밝을수록 채도 감소
+    float brightness = fmaxf(fmaxf(resR, resG), resB);
+    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
+    float desatAmount = 0.0f;
+    if (brightness > 1.0f) {
+        // 1.0→0%, 2.0→50%, 3.0→67%, ...
+        desatAmount = (brightness - 1.0f) / brightness;
+    }
+    resR = resR + (lum - resR) * desatAmount;
+    resG = resG + (lum - resG) * desatAmount;
+    resB = resB + (lum - resB) * desatAmount;
+
     // Write output
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -1126,17 +1139,7 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Highlight desaturation: brightness > 0.7 gradually desaturates toward white
-        // Prevents over-saturated "burning" colors in bright areas
-        float glowBrightness = fmaxf(fmaxf(glowR, glowG), glowB);
-        if (glowBrightness > 0.7f) {
-            float glowLum = 0.2126f * glowR + 0.7152f * glowG + 0.0722f * glowB;
-            // Ramp: 0 at brightness=0.7, 1 at brightness=2.0
-            float desatT = fminf((glowBrightness - 0.7f) / 1.3f, 1.0f);
-            glowR = glowR + (glowLum - glowR) * desatT;
-            glowG = glowG + (glowLum - glowG) * desatT;
-            glowB = glowB + (glowLum - glowB) * desatT;
-        }
+        // Note: Desaturation now applied in Prefilter stage (채도 30% 고정)
 
         // Apply source opacity (premultiplied)
         float srcR = origR * sourceOpacity;
