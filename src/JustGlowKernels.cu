@@ -1190,7 +1190,11 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Composite based on mode (assume alpha = 1 for both src and glow)
+        // Estimate glow alpha first (for proper Over compositing)
+        float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
+
+        // Composite based on mode using Over formula
+        // Over: result = glow + src × (1 - glowAlpha)
         // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
         switch (compositeMode) {
             case 1: { // Add - additive blending (standard glow)
@@ -1232,9 +1236,8 @@ extern "C" __global__ void DebugOutputKernel(
             }
         }
 
-        // Estimate alpha from blended result RGB, take max with source alpha
-        float resultAlpha = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
-        resA = fmaxf(srcA, resultAlpha);
+        // Alpha: Over formula
+        resA = glowAlpha + srcA * (1.0f - glowAlpha);
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
