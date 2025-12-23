@@ -1021,6 +1021,7 @@ PF_Err PreRender(
         PF_CHECKOUT_PARAM(in_data, PARAM_PREFILTER_QUALITY, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->prefilterQuality = static_cast<PrefilterQuality>(param.u.pd.value);
+        PLUGIN_LOG("PreRender: prefilterQuality param.u.pd.value = %d", param.u.pd.value);
 
         // Falloff (0-100)
         AEFX_CLR_STRUCT(param);
@@ -1346,6 +1347,7 @@ PF_Err SmartRender(
                     rp.offsetUp = preRenderData->offsetUp;      // 0-10 direct
                     rp.offsetPrefilter = preRenderData->offsetPrefilter;  // 0-10 direct
                     rp.prefilterQuality = static_cast<int>(preRenderData->prefilterQuality);
+                    PLUGIN_LOG("SmartRender: prefilterQuality = %d", rp.prefilterQuality);
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;
