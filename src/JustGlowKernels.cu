@@ -1190,25 +1190,26 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Estimate glow alpha from premultiplied RGB
+        // 1. Estimate glow alpha from matted-with-black RGB
         float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
 
-        // Blend premultiplied glow with premultiplied src
-        // Alpha uses same blend formula as RGB
+        // 2. Calculate result alpha: max of src and glow
+        resA = fmaxf(srcA, glowAlpha);
+
+        // 3. Blend assuming alpha=1 (both are matted with black)
+        float tempR, tempG, tempB;
         switch (compositeMode) {
             case 1: { // Add
-                resR = srcR + glowR;
-                resG = srcG + glowG;
-                resB = srcB + glowB;
-                resA = srcA + glowAlpha;
+                tempR = srcR + glowR;
+                tempG = srcG + glowG;
+                tempB = srcB + glowB;
                 break;
             }
 
             case 2: { // Screen: A + B - A*B
-                resR = srcR + glowR - srcR * glowR;
-                resG = srcG + glowG - srcG * glowG;
-                resB = srcB + glowB - srcB * glowB;
-                resA = srcA + glowAlpha - srcA * glowAlpha;
+                tempR = srcR + glowR - srcR * glowR;
+                tempG = srcG + glowG - srcG * glowG;
+                tempB = srcB + glowB - srcB * glowB;
                 break;
             }
 
@@ -1217,27 +1218,30 @@ extern "C" __global__ void DebugOutputKernel(
                 float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
                 float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
 
-                resR = (straightSrcR < 0.5f)
+                tempR = (straightSrcR < 0.5f)
                     ? 2.0f * srcR * glowR
                     : srcR + 2.0f * glowR * (1.0f - srcR);
-                resG = (straightSrcG < 0.5f)
+                tempG = (straightSrcG < 0.5f)
                     ? 2.0f * srcG * glowG
                     : srcG + 2.0f * glowG * (1.0f - srcG);
-                resB = (straightSrcB < 0.5f)
+                tempB = (straightSrcB < 0.5f)
                     ? 2.0f * srcB * glowB
                     : srcB + 2.0f * glowB * (1.0f - srcB);
-                resA = srcA + glowAlpha - srcA * glowAlpha;  // Screen for alpha
                 break;
             }
 
             default: { // Fallback to Add
-                resR = srcR + glowR;
-                resG = srcG + glowG;
-                resB = srcB + glowB;
-                resA = srcA + glowAlpha;
+                tempR = srcR + glowR;
+                tempG = srcG + glowG;
+                tempB = srcB + glowB;
                 break;
             }
         }
+
+        // 4. Unmult: divide by resA to get normalized premultiplied RGB
+        resR = (resA > 0.001f) ? tempR / resA : 0.0f;
+        resG = (resA > 0.001f) ? tempG / resA : 0.0f;
+        resB = (resA > 0.001f) ? tempB / resA : 0.0f;
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
