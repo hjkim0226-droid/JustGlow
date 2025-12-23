@@ -1190,17 +1190,13 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Estimate glow alpha from RGB (premultiplied: alpha >= max(R,G,B))
-        float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
-
-        // Composite based on mode
+        // Composite based on mode (assume alpha = 1 for both src and glow)
         // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
         switch (compositeMode) {
             case 1: { // Add - additive blending (standard glow)
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                resA = fminf(srcA + glowAlpha, 1.0f);
                 break;
             }
 
@@ -1208,7 +1204,6 @@ extern "C" __global__ void DebugOutputKernel(
                 resR = srcR + glowR - srcR * glowR;
                 resG = srcG + glowG - srcG * glowG;
                 resB = srcB + glowB - srcB * glowB;
-                resA = srcA + glowAlpha - srcA * glowAlpha;
                 break;
             }
 
@@ -1226,7 +1221,6 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = (straightSrcB < 0.5f)
                     ? 2.0f * srcB * glowB
                     : srcB + 2.0f * glowB * (1.0f - srcB);
-                resA = srcA + glowAlpha - srcA * glowAlpha;
                 break;
             }
 
@@ -1234,10 +1228,12 @@ extern "C" __global__ void DebugOutputKernel(
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                resA = fminf(srcA + glowAlpha, 1.0f);
                 break;
             }
         }
+
+        // Estimate alpha from blended result RGB (at the end)
+        resA = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
