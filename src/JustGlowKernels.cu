@@ -346,7 +346,8 @@ extern "C" __global__ void PrefilterKernel(
     float threshold, float softKnee, float intensity,
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
-    float preserveColor, int useHDR, int useLinear, int inputProfile)
+    float preserveColor, int useHDR, int useLinear, int inputProfile,
+    float offsetPrefilter)  // 0-10: sampling offset multiplier
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -390,25 +391,28 @@ extern "C" __global__ void PrefilterKernel(
     // 13-tap sampling with ZERO PADDING
     // Out-of-bounds samples return 0 for natural edge fade
     // No edge stretching - pixels blend with black at boundaries
+    // offsetPrefilter controls the sampling distance (default 1.0)
     // =========================================
+    float outerOffset = 2.0f * offsetPrefilter;
+    float innerOffset = 1.0f * offsetPrefilter;
 
     // Outer corners
-    sampleBilinearZeroPad(input, u - 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
-    sampleBilinearZeroPad(input, u + 2.0f * texelX, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
-    sampleBilinearZeroPad(input, u - 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
-    sampleBilinearZeroPad(input, u + 2.0f * texelX, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
+    sampleBilinearZeroPad(input, u - outerOffset * texelX, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
+    sampleBilinearZeroPad(input, u + outerOffset * texelX, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinearZeroPad(input, u - outerOffset * texelX, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
+    sampleBilinearZeroPad(input, u + outerOffset * texelX, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
 
     // Outer cross
-    sampleBilinearZeroPad(input, u, v - 2.0f * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
-    sampleBilinearZeroPad(input, u - 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
-    sampleBilinearZeroPad(input, u + 2.0f * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
-    sampleBilinearZeroPad(input, u, v + 2.0f * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinearZeroPad(input, u, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinearZeroPad(input, u - outerOffset * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
+    sampleBilinearZeroPad(input, u + outerOffset * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
+    sampleBilinearZeroPad(input, u, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
 
     // Inner corners
-    sampleBilinearZeroPad(input, u - texelX, v - texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
-    sampleBilinearZeroPad(input, u + texelX, v - texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
-    sampleBilinearZeroPad(input, u - texelX, v + texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
-    sampleBilinearZeroPad(input, u + texelX, v + texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
+    sampleBilinearZeroPad(input, u - innerOffset * texelX, v - innerOffset * texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
+    sampleBilinearZeroPad(input, u + innerOffset * texelX, v - innerOffset * texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
+    sampleBilinearZeroPad(input, u - innerOffset * texelX, v + innerOffset * texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
+    sampleBilinearZeroPad(input, u + innerOffset * texelX, v + innerOffset * texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
 
     // Center
     sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);

@@ -83,6 +83,7 @@ enum ParamID {
     PARAM_SPREAD_UP,            // Upsample spread (-10 to 10) → added to offset at max MIP level
     PARAM_OFFSET_DOWN,          // Downsample base offset (0-10) → base sampling distance
     PARAM_OFFSET_UP,            // Upsample base offset (0-10) → base sampling distance
+    PARAM_OFFSET_PREFILTER,     // Prefilter offset (0-10) → prefilter sampling distance
     PARAM_FALLOFF,              // Decay rate per level (0-100) → weight decay
     PARAM_THRESHOLD,            // Brightness threshold (0-100%)
     PARAM_SOFT_KNEE,            // Soft knee width (0-100%)
@@ -125,6 +126,7 @@ enum ParamDiskID {
     DISK_ID_SPREAD_UP,
     DISK_ID_OFFSET_DOWN,
     DISK_ID_OFFSET_UP,
+    DISK_ID_OFFSET_PREFILTER,
     DISK_ID_FALLOFF,
     DISK_ID_THRESHOLD,
     DISK_ID_SOFT_KNEE,
@@ -211,6 +213,7 @@ namespace Defaults {
     constexpr float SpreadUp        = 1.0f;     // 1.0 = minimal blur offset
     constexpr float OffsetDown      = 1.0f;     // 1.0 = standard base offset
     constexpr float OffsetUp        = 1.0f;     // 1.0 = standard base offset
+    constexpr float OffsetPrefilter = 1.0f;     // 1.0 = standard prefilter offset
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
     constexpr float Threshold       = 25.0f;    // 25% - lower threshold for more glow
     constexpr float SoftKnee        = 75.0f;    // 75% - softer threshold transition
@@ -320,6 +323,7 @@ struct JustGlowPreRenderData {
     float spreadUp;     // -10 to 10: upsample spread at max MIP level
     float offsetDown;   // 0-10: downsample base offset
     float offsetUp;     // 0-10: upsample base offset
+    float offsetPrefilter; // 0-10: prefilter sampling offset
     float falloff;      // 0-100: decay rate per level
     float threshold;    // 0-100: brightness threshold
     float softKnee;     // 0-100: soft knee width

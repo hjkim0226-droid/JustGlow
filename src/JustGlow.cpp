@@ -370,6 +370,20 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_OFFSET_UP);
 
+    // Offset Prefilter (0-10) - Prefilter sampling offset
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Offset Prefilter",
+        Ranges::OffsetMin,
+        Ranges::OffsetMax,
+        Ranges::OffsetMin,
+        Ranges::OffsetMax,
+        Defaults::OffsetPrefilter,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_OFFSET_PREFILTER);
+
     // Falloff (0-100) - Decay rate per level
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
@@ -981,11 +995,17 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->offsetDown = param.u.fs_d.value;
 
-        // Offset Up (0-3)
+        // Offset Up (0-10)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_OFFSET_UP, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->offsetUp = param.u.fs_d.value;
+
+        // Offset Prefilter (0-10)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_OFFSET_PREFILTER, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->offsetPrefilter = param.u.fs_d.value;
 
         // Falloff (0-100)
         AEFX_CLR_STRUCT(param);
@@ -1307,8 +1327,9 @@ PF_Err SmartRender(
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);
                     rp.spreadDown = preRenderData->spreadDown;  // 0-10 direct
                     rp.spreadUp = preRenderData->spreadUp;      // 0-10 direct
-                    rp.offsetDown = preRenderData->offsetDown;  // 0-3 direct
-                    rp.offsetUp = preRenderData->offsetUp;      // 0-3 direct
+                    rp.offsetDown = preRenderData->offsetDown;  // 0-10 direct
+                    rp.offsetUp = preRenderData->offsetUp;      // 0-10 direct
+                    rp.offsetPrefilter = preRenderData->offsetPrefilter;  // 0-10 direct
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;

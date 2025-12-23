@@ -187,6 +187,7 @@ struct RenderParams {
     float   spreadUp;           // -10 to 10: Upsample spread (added to base offset at max MIP)
     float   offsetDown;         // 0-10: Downsample base offset (default 1.0)
     float   offsetUp;           // 0-10: Upsample base offset (default 1.0)
+    float   offsetPrefilter;    // 0-10: Prefilter sampling offset (default 1.0)
 
     // Threshold
     float   threshold;
