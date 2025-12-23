@@ -59,9 +59,10 @@ private:
     CUfunction m_upsampleKernel;
     CUfunction m_compositeKernel;
     CUfunction m_horizontalBlurKernel;
-    // Gaussian downsample kernels (for Level 0-2)
-    CUfunction m_gaussianDownsampleHKernel;
-    CUfunction m_gaussianDownsampleVKernel;
+    // Gaussian downsample kernels
+    CUfunction m_gaussian2DDownsampleKernel;  // 9-tap 2D + ZeroPad (primary)
+    CUfunction m_gaussianDownsampleHKernel;   // [deprecated] kept for fallback
+    CUfunction m_gaussianDownsampleVKernel;   // [deprecated] kept for fallback
     // Debug output kernel
     CUfunction m_debugOutputKernel;
 

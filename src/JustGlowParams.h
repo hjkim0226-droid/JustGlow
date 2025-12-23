@@ -178,11 +178,13 @@ inline float GetLevelBlurOffset(int level, float spreadOffset) {
 struct RenderParams {
     // Core computed values
     float   activeLimit;        // Radius -> MIP level limit (0 to mipLevels)
-    float   blurOffsets[MAX_MIP_LEVELS]; // Spread -> per-level pixel offset
+    float   blurOffsets[MAX_MIP_LEVELS]; // Spread -> per-level pixel offset (legacy, unused)
     float   decayK;             // Falloff value (0-100, 50=neutral)
     float   exposure;           // Exposure -> brightness multiplier
     float   level1Weight;       // Intensity -> Level 1 starting weight (0.5-1.0)
     int     falloffType;        // Decay curve type (0=Exponential, 1=InverseSquare, 2=Linear)
+    float   spreadDown;         // 1-5: Downsample spread (offset = spreadDown at max MIP)
+    float   spreadUp;           // 1-5: Upsample spread (offset = spreadUp at max MIP)
 
     // Threshold
     float   threshold;
@@ -199,6 +201,9 @@ struct RenderParams {
     // Advanced
     float   anamorphic;
     float   anamorphicAngle;
+    float   chromaticAberration;    // 0-100: Chromatic aberration amount
+    float   caTintR[3];             // CA Red channel tint (RGB)
+    float   caTintB[3];             // CA Blue channel tint (RGB)
     int     compositeMode;      // CompositeMode enum value (0=Add, 1=Screen, 2=Overlay)
     bool    hdrMode;
     bool    linearize;          // Enable sRGB to Linear conversion

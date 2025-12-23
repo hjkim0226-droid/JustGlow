@@ -11,8 +11,8 @@ JustGlow is a GPU-accelerated glow effect plugin for Adobe After Effects.
 - **macOS:** Metal (계획됨)
 
 **Core Algorithm:** Dual Kawase blur with:
-- 13-tap prefilter (Karis Average for HDR firefly prevention)
-- 5-tap downsample with X/+ rotation alternation (rounder glow)
+- 13-tap prefilter with ZeroPad (HDR firefly prevention)
+- 9-tap 2D Gaussian downsample (Level 0-4) + 5-tap Kawase (Level 5+), all ZeroPad
 - 9-tap tent upsample with falloff-based blending (physical light decay)
 - Dynamic MIP levels (up to 12, until min dimension < 16px)
 
@@ -43,8 +43,8 @@ cmake --install build
 4. `SmartRender` → routes to GPU renderer
 
 **GPU Rendering Pipeline:**
-1. Prefilter → soft threshold + Karis average + sRGB→Linear
-2. Downsample chain → creates MIP pyramid (Level 0-4: Gaussian, 5+: Kawase)
+1. Prefilter → soft threshold + ZeroPad sampling + sRGB→Linear
+2. Downsample chain → creates MIP pyramid (Level 0-4: 2D Gaussian, 5+: Kawase, all ZeroPad)
 3. Upsample chain → reconstructs with progressive blur blending
 4. Composite → blends glow with original (Add/Screen/Overlay modes)
 
@@ -60,9 +60,9 @@ cmake --install build
 - `src/JustGlowKernels.cu` - CUDA 커널 구현 (1060줄)
 
 **커널 목록:**
-- `PrefilterKernel` - 13-tap + Soft Threshold + Karis
-- `GaussianDownsampleHKernel` / `GaussianDownsampleVKernel` - Separable Gaussian
-- `DownsampleKernel` - Dual Kawase 5-tap
+- `PrefilterKernel` - 13-tap + Soft Threshold + ZeroPad
+- `Gaussian2DDownsampleKernel` - 9-tap 2D Gaussian + ZeroPad (Level 0-4)
+- `DownsampleKernel` - Dual Kawase 5-tap + ZeroPad (Level 5+)
 - `UpsampleKernel` - 9-tap Tent + Falloff
 - `DebugOutputKernel` - 디버그 뷰 및 최종 합성
 
@@ -117,7 +117,7 @@ cmake --install build
 | Core | Falloff | 레벨당 감쇠율 (0-100%) |
 | Threshold | Threshold | 밝기 임계값 (0-100%) |
 | Threshold | Soft Knee | Soft knee 폭 (0-100%) |
-| Quality | Quality | MIP 깊이 (Low=4, Med=6, High=8, Ultra=12) |
+| Quality | Quality | MIP 깊이 슬라이더 (6-12, 기본값 8) |
 | Quality | Falloff Type | 감쇠 곡선 (Exp/InvSq/Linear) |
 | Color | Glow Color | 글로우 색상 |
 | Color | Color Temp | 색온도 (-100~+100) |
@@ -132,22 +132,21 @@ cmake --install build
 
 ## Key Techniques
 
-1. **X/+ Rotation:** Alternates diagonal (X) and cross (+) sampling patterns during downsample to break boxy artifacts → rounder glow at zero cost
-2. **Dynamic MIP Levels:** Ultra quality goes to 12 levels (until 16px), providing Deep Glow-like "atmosphere" feel
-3. **Falloff Blending:** `levelWeight = pow(falloff, level)` during upsample for physical light decay
-4. **Alpha-Weighted Normalization:** Prefilter에서 premultiplied alpha 처리 시 hot edge 방지
-5. **sampleBilinearZeroPad:** 경계 밖 샘플링 시 0 반환으로 edge clipping 방지
+1. **ZeroPad Sampling:** All downsampling uses ZeroPad (out-of-bounds = 0) for consistent glow across different buffer sizes. Prevents edge energy concentration that caused brightness differences between Adjustment and Text layers.
+2. **2D Gaussian Downsample:** Single-pass 9-tap 2D Gaussian replaces separable H+V for Level 0-4. No temp buffer needed, no H→V sync required.
+3. **X/+ Rotation:** Alternates diagonal (X) and cross (+) sampling patterns during Kawase downsample (Level 5+) to break boxy artifacts → rounder glow
+4. **Dynamic MIP Levels:** Ultra quality goes to 12 levels (until 16px), providing Deep Glow-like "atmosphere" feel
+5. **Falloff Blending:** `levelWeight = pow(falloff, level)` during upsample for physical light decay
 
 ## 알려진 이슈
 
-**Critical:**
-1. **Pitch 모호성** - `JustGlowKernels.cu:147` - pitch가 바이트/픽셀 단위 불명확
-2. **CPU Fallback 미구현** - GPU 미지원 시 단순 복사만 수행
-3. **커널 간 동기화** - 스테이지 간 명시적 동기화 없음 (현재는 스트림 직렬화에 의존)
+**해결됨 (v1.5.3):**
+1. ~~**Pitch 모호성**~~ → `pitchBytes`로 명시적 명명 (`JustGlowCUDARenderer.h`)
+2. ~~**CPU Fallback 미구현**~~ → GPU 미지원 시 에러 메시지 표시 (`JustGlow.cpp:1259`)
+3. ~~**커널 간 동기화**~~ → `CUevent` 기반 명시적 동기화 (`JustGlowCUDARenderer.cpp:484-498`)
 
 **Medium:**
-- 에러 발생 시 `out_data->return_msg` 미사용
-- 임시 버퍼 과다 할당
+- 임시 버퍼 과다 할당 (성능 영향 미미)
 
 상세 내용: `docs/CODE_REVIEW_REPORT.md`
 

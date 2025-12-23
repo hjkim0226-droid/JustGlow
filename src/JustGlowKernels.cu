@@ -6,12 +6,14 @@
  *
  * Kernels:
  * - PrefilterKernel: 13-tap downsample + soft threshold + alpha-weighted average
- * - GaussianDownsampleH/VKernel: Separable 5-tap Gaussian (Level 0-4)
- * - DownsampleKernel: Dual Kawase 5-tap with X/+ rotation (Level 5+)
- * - UpsampleKernel: 9-tap tent filter with progressive blend
+ * - Gaussian2DDownsampleKernel: 9-tap 2D Gaussian for ALL levels (temporal stability)
+ * - UpsampleKernel: 9-tap Gaussian with progressive blend
  * - DebugOutputKernel: Final composite + debug view modes
  *
- * Note: Karis Average removed (v1.4.0) - caused artifacts on transparent backgrounds
+ * Notes:
+ * - Karis Average removed (v1.4.0) - caused artifacts on transparent backgrounds
+ * - Kawase downsample removed (v1.5.0) - caused temporal flickering on movement
+ * - All sampling uses ZeroPad for consistent edge behavior
  */
 
 #include <cuda_runtime.h>
@@ -435,6 +437,11 @@ extern "C" __global__ void PrefilterKernel(
     float sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
     float sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
 
+    // Clamp to 1.0 for consistency (text layer vs adjustment layer)
+    sumR = fminf(sumR, 1.0f);
+    sumG = fminf(sumG, 1.0f);
+    sumB = fminf(sumB, 1.0f);
+
     // =========================================
     // Color Space Conversion
     // OFF: Premultiplied sRGB/Rec709/Gamma2.2 유지
@@ -476,6 +483,16 @@ extern "C" __global__ void PrefilterKernel(
     // Soft threshold on Premultiplied (통일된 위치)
     softThreshold(resR, resG, resB, threshold, softKnee);
 
+    // Desaturation: 밝기에 비례해서 채도 감소 (자연스러운 하이라이트)
+    // 지수 곡선: 부드럽게 수렴, 최대 ~40% desaturation
+    // 0→0%, 0.5→22%, 1.0→39%
+    float brightness = fmaxf(fmaxf(resR, resG), resB);
+    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
+    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    resR = resR + (lum - resR) * desatAmount;
+    resG = resG + (lum - resG) * desatAmount;
+    resB = resB + (lum - resB) * desatAmount;
+
     // Write output
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -485,18 +502,97 @@ extern "C" __global__ void PrefilterKernel(
 }
 
 // ============================================================================
-// Gaussian Downsample - Horizontal Pass (5-tap, 3-fetch linear optimized)
-// First pass of separable Gaussian blur for high-quality downsampling
-// Used for Level 0-2 to preserve near-glow detail
-// 5-tap Discrete [1,4,6,4,1]/16 -> 3-fetch Linear
-// Offsets: [0, 1.2] with weights [0.375, 0.3125]
+// 2D Gaussian Downsample (9-tap, single pass with ZeroPad)
+// Replaces separable H+V passes for consistency across different buffer sizes
+// Uses ZeroPad sampling to prevent edge energy concentration
+// 3×3 Gaussian weights: [1,2,1; 2,4,2; 1,2,1] / 16
+// ============================================================================
+
+extern "C" __global__ void Gaussian2DDownsampleKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch,
+    float spreadDown, int level, int maxLevels)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    // Map destination pixel to source UV (center of the 2x2 block we're downsampling)
+    float u = ((float)x + 0.5f) / (float)dstWidth;
+    float v = ((float)y + 0.5f) / (float)dstHeight;
+
+    float texelX = 1.0f / (float)srcWidth;
+    float texelY = 1.0f / (float)srcHeight;
+
+    // Dynamic offset: 1.0 at level 0, 1.0 + spreadDown at max level
+    // spreadDown range: 0-10
+    float levelRatio = (float)level / fmaxf((float)(maxLevels - 1), 1.0f);
+    float offset = 1.0f + spreadDown * levelRatio;
+
+    // 3×3 Gaussian weights: [1,2,1; 2,4,2; 1,2,1] / 16
+    const float wCenter = 4.0f / 16.0f;    // 0.25
+    const float wCross = 2.0f / 16.0f;     // 0.125
+    const float wDiagonal = 1.0f / 16.0f;  // 0.0625
+
+    // Sample 9 points with ZeroPad (energy escapes at edges instead of being trapped)
+    float TLr, TLg, TLb, TLa;  // Top-Left
+    float Tr, Tg, Tb, Ta;       // Top
+    float TRr, TRg, TRb, TRa;  // Top-Right
+    float Lr, Lg, Lb, La;       // Left
+    float Cr, Cg, Cb, Ca;       // Center
+    float Rr, Rg, Rb, Ra;       // Right
+    float BLr, BLg, BLb, BLa;  // Bottom-Left
+    float Br, Bg, Bb, Ba;       // Bottom
+    float BRr, BRg, BRb, BRa;  // Bottom-Right
+
+    // Sample all 9 points with ZeroPad, using dynamic offset
+    sampleBilinearZeroPad(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, TLr, TLg, TLb, TLa);
+    sampleBilinearZeroPad(input, u,                   v - offset * texelY, srcWidth, srcHeight, srcPitch, Tr, Tg, Tb, Ta);
+    sampleBilinearZeroPad(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, TRr, TRg, TRb, TRa);
+
+    sampleBilinearZeroPad(input, u - offset * texelX, v,                   srcWidth, srcHeight, srcPitch, Lr, Lg, Lb, La);
+    sampleBilinearZeroPad(input, u,                   v,                   srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
+    sampleBilinearZeroPad(input, u + offset * texelX, v,                   srcWidth, srcHeight, srcPitch, Rr, Rg, Rb, Ra);
+
+    sampleBilinearZeroPad(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, BLr, BLg, BLb, BLa);
+    sampleBilinearZeroPad(input, u,                   v + offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
+    sampleBilinearZeroPad(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, BRr, BRg, BRb, BRa);
+
+    // Weighted sum
+    float outR = Cr * wCenter +
+                 (Tr + Lr + Rr + Br) * wCross +
+                 (TLr + TRr + BLr + BRr) * wDiagonal;
+    float outG = Cg * wCenter +
+                 (Tg + Lg + Rg + Bg) * wCross +
+                 (TLg + TRg + BLg + BRg) * wDiagonal;
+    float outB = Cb * wCenter +
+                 (Tb + Lb + Rb + Bb) * wCross +
+                 (TLb + TRb + BLb + BRb) * wDiagonal;
+    float outA = Ca * wCenter +
+                 (Ta + La + Ra + Ba) * wCross +
+                 (TLa + TRa + BLa + BRa) * wDiagonal;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = outR;
+    output[outIdx + 1] = outG;
+    output[outIdx + 2] = outB;
+    output[outIdx + 3] = outA;
+}
+
+// ============================================================================
+// [DEPRECATED] Gaussian Downsample - Horizontal Pass
+// Kept for reference, replaced by Gaussian2DDownsampleKernel
 // ============================================================================
 
 extern "C" __global__ void GaussianDownsampleHKernel(
     const float* __restrict__ input,
     float* __restrict__ output,
     int width, int height, int pitch,
-    float blurOffset)  // ignored, using fixed offset
+    float blurOffset)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -509,22 +605,18 @@ extern "C" __global__ void GaussianDownsampleHKernel(
 
     float texelX = 1.0f / (float)width;
 
-    // Linear sampling optimized offsets and weights
-    // 5-tap [1,4,6,4,1]/16 -> 3-fetch
-    const float offset1 = 1.2f;  // Between pixel 1 and 2
-    const float weight0 = 0.375f;     // Center (6/16)
-    const float weight1 = 0.3125f;    // Side pairs (5/16 each side)
+    const float offset1 = 1.2f;
+    const float weight0 = 0.375f;
+    const float weight1 = 0.3125f;
 
-    // Sample 3 points (center + 2 sides with linear interpolation)
-    float cR, cG, cB, cA;  // Center
-    float lR, lG, lB, lA;  // Left
-    float rR, rG, rB, rA;  // Right
+    float cR, cG, cB, cA;
+    float lR, lG, lB, lA;
+    float rR, rG, rB, rA;
 
     sampleBilinear(input, u, v, width, height, pitch, cR, cG, cB, cA);
     sampleBilinear(input, u - offset1 * texelX, v, width, height, pitch, lR, lG, lB, lA);
     sampleBilinear(input, u + offset1 * texelX, v, width, height, pitch, rR, rG, rB, rA);
 
-    // Weighted sum
     float outR = cR * weight0 + (lR + rR) * weight1;
     float outG = cG * weight0 + (lG + rG) * weight1;
     float outB = cB * weight0 + (lB + rB) * weight1;
@@ -538,11 +630,8 @@ extern "C" __global__ void GaussianDownsampleHKernel(
 }
 
 // ============================================================================
-// Gaussian Downsample - Vertical Pass with 2x Downsample (5-tap, 3-fetch linear)
-// Second pass of separable Gaussian + actual downsampling
-// Reads from H-blurred source, writes to half-resolution destination
-// 5-tap Discrete [1,4,6,4,1]/16 -> 3-fetch Linear
-// Offsets: [0, 1.2] with weights [0.375, 0.3125]
+// [DEPRECATED] Gaussian Downsample - Vertical Pass with 2x Downsample
+// Kept for reference, replaced by Gaussian2DDownsampleKernel
 // ============================================================================
 
 extern "C" __global__ void GaussianDownsampleVKernel(
@@ -550,7 +639,7 @@ extern "C" __global__ void GaussianDownsampleVKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float blurOffset)  // ignored, using fixed offset
+    float blurOffset)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -558,28 +647,23 @@ extern "C" __global__ void GaussianDownsampleVKernel(
     if (x >= dstWidth || y >= dstHeight)
         return;
 
-    // Map destination to source (2x)
     float u = ((float)x + 0.5f) / (float)dstWidth;
     float v = ((float)y + 0.5f) / (float)dstHeight;
 
     float texelY = 1.0f / (float)srcHeight;
 
-    // Linear sampling optimized offsets and weights
-    // 5-tap [1,4,6,4,1]/16 -> 3-fetch
-    const float offset1 = 1.2f;  // Between pixel 1 and 2
-    const float weight0 = 0.375f;     // Center (6/16)
-    const float weight1 = 0.3125f;    // Side pairs (5/16 each side)
+    const float offset1 = 1.2f;
+    const float weight0 = 0.375f;
+    const float weight1 = 0.3125f;
 
-    // Sample 3 points (center + 2 sides with linear interpolation)
-    float cR, cG, cB, cA;  // Center
-    float tR, tG, tB, tA;  // Top
-    float bR, bG, bB, bA;  // Bottom
+    float cR, cG, cB, cA;
+    float tR, tG, tB, tA;
+    float bR, bG, bB, bA;
 
     sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, cR, cG, cB, cA);
     sampleBilinear(input, u, v - offset1 * texelY, srcWidth, srcHeight, srcPitch, tR, tG, tB, tA);
     sampleBilinear(input, u, v + offset1 * texelY, srcWidth, srcHeight, srcPitch, bR, bG, bB, bA);
 
-    // Weighted sum
     float outR = cR * weight0 + (tR + bR) * weight1;
     float outG = cG * weight0 + (tG + bG) * weight1;
     float outB = cB * weight0 + (tB + bB) * weight1;
@@ -596,8 +680,8 @@ extern "C" __global__ void GaussianDownsampleVKernel(
 // Downsample Kernel (Dual Kawase 5-Tap with X/+ Rotation)
 // rotationMode: 0 = X (diagonal), 1 = + (cross)
 // Alternating patterns breaks up boxy artifacts -> rounder glow
-// Used for Level 3+ where speed matters more than detail
-// Standard Dual Kawase downsample uses fixed 0.5px offset
+// Used for Level 5+ where speed matters more than detail
+// Uses ZeroPad sampling for consistent edge behavior across buffer sizes
 // ============================================================================
 
 extern "C" __global__ void DownsampleKernel(
@@ -629,23 +713,25 @@ extern "C" __global__ void DownsampleKernel(
     float Dr, Dg, Db, Da;
     float centerR, centerG, centerB, centerA;
 
+    // Use ZeroPad sampling for consistent edge behavior
+    // Energy escapes at edges instead of being trapped (clamped)
     if (rotationMode == 0) {
         // X pattern (diagonal) - default
-        sampleBilinear(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);
-        sampleBilinear(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
-        sampleBilinear(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
-        sampleBilinear(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);
+        sampleBilinearZeroPad(input, u - offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);
+        sampleBilinearZeroPad(input, u + offset * texelX, v - offset * texelY, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);
+        sampleBilinearZeroPad(input, u - offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);
+        sampleBilinearZeroPad(input, u + offset * texelX, v + offset * texelY, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);
     } else {
         // + pattern (cross) - 45 degree rotation
         // Slightly larger offset (1.414x) to maintain similar coverage area
         float crossOffset = offset * 1.414f;
-        sampleBilinear(input, u, v - crossOffset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);  // Top
-        sampleBilinear(input, u + crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);  // Right
-        sampleBilinear(input, u, v + crossOffset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);  // Bottom
-        sampleBilinear(input, u - crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);  // Left
+        sampleBilinearZeroPad(input, u, v - crossOffset * texelY, srcWidth, srcHeight, srcPitch, Ar, Ag, Ab, Aa);  // Top
+        sampleBilinearZeroPad(input, u + crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Br, Bg, Bb, Ba);  // Right
+        sampleBilinearZeroPad(input, u, v + crossOffset * texelY, srcWidth, srcHeight, srcPitch, Cr, Cg, Cb, Ca);  // Bottom
+        sampleBilinearZeroPad(input, u - crossOffset * texelX, v, srcWidth, srcHeight, srcPitch, Dr, Dg, Db, Da);  // Left
     }
 
-    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, centerR, centerG, centerB, centerA);
+    sampleBilinearZeroPad(input, u, v, srcWidth, srcHeight, srcPitch, centerR, centerG, centerB, centerA);
 
     float resR = centerR * 0.5f + (Ar + Br + Cr + Dr) * 0.125f;
     float resG = centerG * 0.5f + (Ag + Bg + Cg + Dg) * 0.125f;
@@ -735,7 +821,7 @@ extern "C" __global__ void UpsampleKernel(
     int srcWidth, int srcHeight, int srcPitch,
     int prevWidth, int prevHeight, int prevPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float blurOffset,  // ignored, using fixed 1.0
+    float spreadUp,    // 0-1: dynamic offset (1.0 at level 0, 1.0+spreadUp at max level)
     int levelIndex,
     float activeLimit,  // now 0-1 (radius / 100)
     float decayK,
@@ -758,18 +844,17 @@ extern "C" __global__ void UpsampleKernel(
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
     // 9-Tap Discrete Gaussian (3x3 pattern)
-    // Dynamic offset (1.5 + 0.3*level) - prevents center clumping at higher levels
+    // Dynamic offset based on spreadUp: 1.0 at level 0, 1.0+spreadUp at max level
     // Weights: Center=4/16, Cross=2/16, Diagonal=1/16 (total=16)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Dynamic offset based on level to prevent center clumping
-        // Higher levels (smaller textures) need wider relative offset
-        // Base 1.5 + 0.3 per level: Level0=1.5, Level2=2.1, Level4=2.7, etc.
-        const float baseOffset = 1.5f;
-        const float offset = baseOffset + (float)levelIndex * 0.3f;
+        // Dynamic offset: 1.0 at level 0, 1.0 + spreadUp at max level
+        // spreadUp range: 0-10
+        float levelRatio = (float)levelIndex / fmaxf((float)(maxLevels - 1), 1.0f);
+        float offset = 1.0f + spreadUp * levelRatio;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)
@@ -786,18 +871,18 @@ extern "C" __global__ void UpsampleKernel(
         float Bor, Bog, Bob, Boa;  // Bottom (cross)
         float BRr, BRg, BRb, BRa;  // Bottom-Right (diagonal)
 
-        // Sample all 9 points at fixed 1.0 pixel intervals
-        sampleBilinear(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
-        sampleBilinear(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
-        sampleBilinear(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
+        // Sample all 9 points with ZeroPad (consistent with downsample)
+        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
+        sampleBilinearZeroPad(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
+        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
 
-        sampleBilinear(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
-        sampleBilinear(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
-        sampleBilinear(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
+        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
+        sampleBilinearZeroPad(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
+        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
 
-        sampleBilinear(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
-        sampleBilinear(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
-        sampleBilinear(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
+        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
+        sampleBilinearZeroPad(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
+        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
 
         // Gaussian weights: Center=4/16, Cross=2/16, Diagonal=1/16
         // This is the standard "국룰" for smooth upsampling
@@ -821,7 +906,7 @@ extern "C" __global__ void UpsampleKernel(
     // "현재 층의 디테일을 가중치 적용해서 더한다"
     // =========================================================
     float currR, currG, currB, currA;
-    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, currR, currG, currB, currA);
+    sampleBilinearZeroPad(input, u, v, srcWidth, srcHeight, srcPitch, currR, currG, currB, currA);
 
     // Weight calculation for current level
     // A. Physical decay weight (The Shape) - Level 0=100%, Level 1=level1Weight, then decay
@@ -995,7 +1080,10 @@ extern "C" __global__ void DebugOutputKernel(
     float glowTintR,        // Glow tint color R
     float glowTintG,        // Glow tint color G
     float glowTintB,        // Glow tint color B
-    float dither)           // Dithering amount (0-1)
+    float dither,           // Dithering amount (0-1)
+    float chromaticAberration,  // CA amount (0-100)
+    float caTintRr, float caTintRg, float caTintRb,  // CA Red channel tint
+    float caTintBr, float caTintBg, float caTintBb)  // CA Blue channel tint
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1042,16 +1130,59 @@ extern "C" __global__ void DebugOutputKernel(
         // Final: normal composite with opacity controls
         // Color space: Premultiplied Linear (if useLinear) or Premultiplied sRGB (if not)
         float glowR, glowG, glowB, glowA;
-        sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+
+        if (chromaticAberration > 0.001f) {
+            // Chromatic aberration: sample R/G/B at different UV offsets
+            // R shifts outward (toward edge), B shifts inward (toward center)
+            float caAmount = chromaticAberration * 0.002f;  // Scale factor
+            float dirX = u - 0.5f;
+            float dirY = v - 0.5f;
+
+            // R channel: sample from outer position
+            float uR = u + dirX * caAmount;
+            float vR = v + dirY * caAmount;
+            // B channel: sample from inner position
+            float uB = u - dirX * caAmount;
+            float vB = v - dirY * caAmount;
+
+            // Sample each channel at its offset position
+            float rSampleR, rSampleG, rSampleB, rSampleA;
+            float gSampleR, gSampleG, gSampleB, gSampleA;
+            float bSampleR, bSampleG, bSampleB, bSampleA;
+
+            sampleBilinear(glow, uR, vR, glowWidth, glowHeight, glowPitch, rSampleR, rSampleG, rSampleB, rSampleA);
+            sampleBilinear(glow, u,  v,  glowWidth, glowHeight, glowPitch, gSampleR, gSampleG, gSampleB, gSampleA);
+            sampleBilinear(glow, uB, vB, glowWidth, glowHeight, glowPitch, bSampleR, bSampleG, bSampleB, bSampleA);
+
+            // Take R from outer sample, G from center, B from inner sample
+            // Then apply CA tint colors
+            float rChannel = rSampleR;
+            float gChannel = gSampleG;
+            float bChannel = bSampleB;
+
+            // Apply tint: blend R channel with caTintR color, B channel with caTintB color
+            glowR = rChannel * caTintRr + bChannel * caTintBr;
+            glowG = rChannel * caTintRg + gChannel + bChannel * caTintBg;
+            glowB = rChannel * caTintRb + bChannel * caTintBb;
+            glowA = gSampleA;  // Use center alpha
+        } else {
+            // No chromatic aberration - standard sampling
+            sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+        }
 
         // Note: Glow color/tint is already applied in Prefilter stage
         // (via glowColor with preserveColor blending)
         // Do NOT apply again here - causes blue channel to zero out completely
 
+        // Glow stays in premultiplied space (AE native format)
+        // Do NOT unpremultiply - causes artifacts at transparent edges
+
         // Apply exposure and glow opacity
         glowR *= exposure * glowOpacity;
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
+
+        // Note: Desaturation now applied in Prefilter stage (채도 30% 고정)
 
         // Apply source opacity (premultiplied)
         float srcR = origR * sourceOpacity;
@@ -1059,73 +1190,105 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Composite based on mode
-        // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
+        // 1. Estimate glow alpha from matted-with-black RGB
+        float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
+
+        // 2. Calculate result alpha: max of src and glow
+        resA = fmaxf(srcA, glowAlpha);
+
+        // 3. Blend assuming alpha=1 (both are matted with black)
+        float tempR, tempG, tempB;
         switch (compositeMode) {
-            case 1: // Add - additive blending (standard glow)
-                // Add works directly on premultiplied values
-                resR = srcR + glowR;
-                resG = srcG + glowG;
-                resB = srcB + glowB;
+            case 1: { // Add
+                tempR = srcR + glowR;
+                tempG = srcG + glowG;
+                tempB = srcB + glowB;
                 break;
+            }
 
-            case 2: // Screen - premultiplied formula: A + B - AB
-                // Both srcR and glowR are light contributions
-                // Screen combines them: result = A + B - A*B
-                resR = srcR + glowR - srcR * glowR;
-                resG = srcG + glowG - srcG * glowG;
-                resB = srcB + glowB - srcB * glowB;
+            case 2: { // Screen: A + B - A*B
+                tempR = srcR + glowR - srcR * glowR;
+                tempG = srcG + glowG - srcG * glowG;
+                tempB = srcB + glowB - srcB * glowB;
                 break;
+            }
 
-            case 3: { // Overlay - premultiplied: conditional multiply/screen
-                // Decision based on straight source luminance
+            case 3: { // Overlay
                 float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
                 float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
                 float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
 
-                // Overlay on premultiplied values:
-                // < 0.5: Multiply-like: 2 * src * glow
-                // >= 0.5: Screen-like: src + 2*glow*(1-src)
-                resR = (straightSrcR < 0.5f)
+                tempR = (straightSrcR < 0.5f)
                     ? 2.0f * srcR * glowR
                     : srcR + 2.0f * glowR * (1.0f - srcR);
-                resG = (straightSrcG < 0.5f)
+                tempG = (straightSrcG < 0.5f)
                     ? 2.0f * srcG * glowG
                     : srcG + 2.0f * glowG * (1.0f - srcG);
-                resB = (straightSrcB < 0.5f)
+                tempB = (straightSrcB < 0.5f)
                     ? 2.0f * srcB * glowB
                     : srcB + 2.0f * glowB * (1.0f - srcB);
                 break;
             }
 
-            default: // Fallback to Add
-                resR = srcR + glowR;
-                resG = srcG + glowG;
-                resB = srcB + glowB;
+            default: { // Fallback to Add
+                tempR = srcR + glowR;
+                tempG = srcG + glowG;
+                tempB = srcB + glowB;
                 break;
+            }
         }
 
-        // Calculate alpha from blended result
-        // Coverage = max RGB of blended result, clamped to [0,1]
-        float blendedCoverage = clampf(fmaxf(fmaxf(resR, resG), resB), 0.0f, 1.0f);
-        resA = fmaxf(srcA, blendedCoverage);
+        // 4. Unmult: divide by resA to get normalized premultiplied RGB
+        resR = (resA > 0.001f) ? tempR / resA : 0.0f;
+        resG = (resA > 0.001f) ? tempG / resA : 0.0f;
+        resB = (resA > 0.001f) ? tempB / resA : 0.0f;
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
         // Color space: Premultiplied Linear (if useLinear) or Premultiplied sRGB (if not)
         float glowR, glowG, glowB, glowA;
-        sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
 
-        // Note: Glow color already applied in Prefilter
+        if (chromaticAberration > 0.001f) {
+            // Chromatic aberration (same as Final mode)
+            float caAmount = chromaticAberration * 0.002f;
+            float dirX = u - 0.5f;
+            float dirY = v - 0.5f;
+
+            float uR = u + dirX * caAmount;
+            float vR = v + dirY * caAmount;
+            float uB = u - dirX * caAmount;
+            float vB = v - dirY * caAmount;
+
+            float rSampleR, rSampleG, rSampleB, rSampleA;
+            float gSampleR, gSampleG, gSampleB, gSampleA;
+            float bSampleR, bSampleG, bSampleB, bSampleA;
+
+            sampleBilinear(glow, uR, vR, glowWidth, glowHeight, glowPitch, rSampleR, rSampleG, rSampleB, rSampleA);
+            sampleBilinear(glow, u,  v,  glowWidth, glowHeight, glowPitch, gSampleR, gSampleG, gSampleB, gSampleA);
+            sampleBilinear(glow, uB, vB, glowWidth, glowHeight, glowPitch, bSampleR, bSampleG, bSampleB, bSampleA);
+
+            float rChannel = rSampleR;
+            float gChannel = gSampleG;
+            float bChannel = bSampleB;
+
+            glowR = rChannel * caTintRr + bChannel * caTintBr;
+            glowG = rChannel * caTintRg + gChannel + bChannel * caTintBg;
+            glowB = rChannel * caTintRb + bChannel * caTintBb;
+            glowA = gSampleA;
+        } else {
+            sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+        }
+
+        // Note: Glow color and desaturation already applied in Prefilter
 
         // Apply exposure and opacity
         resR = glowR * exposure * glowOpacity;
         resG = glowG * exposure * glowOpacity;
         resB = glowB * exposure * glowOpacity;
 
-        // Alpha from glow coverage
-        float glowCoverage = fmaxf(fmaxf(resR, resG), resB);
-        resA = clampf(glowCoverage, 0.0f, 1.0f);
+        // Alpha for GlowOnly: based on glow brightness
+        float glowBrightness = fmaxf(fmaxf(resR, resG), resB);
+        resA = fminf(glowBrightness, 1.0f);
     }
     else {
         // Debug view: show specific buffer (Prefilter, Down1-6, Up0-6)

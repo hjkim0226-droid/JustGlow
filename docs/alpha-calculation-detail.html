@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>JustGlow - Alpha Calculation Detail</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 40px;
+            margin: 0;
+        }
+        h1 { color: #4fc3f7; text-align: center; }
+        h2 {
+            color: #81c784;
+            margin-top: 40px;
+            border-bottom: 2px solid #81c784;
+            padding-bottom: 10px;
+        }
+        h3 { color: #ffb74d; margin-top: 30px; }
+        .mermaid {
+            background: #252542;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+        }
+        .code-block {
+            background: #1e1e3f;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Consolas', monospace;
+            font-size: 14px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        .highlight { color: #4fc3f7; }
+        .comment { color: #6a9955; }
+        .number { color: #b5cea8; }
+        .issue {
+            background: rgba(255,82,82,0.2);
+            border-left: 4px solid #ff5252;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .note {
+            background: rgba(33,150,243,0.2);
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .success {
+            background: rgba(76,175,80,0.2);
+            border-left: 4px solid #4caf50;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #444;
+            padding: 10px;
+            text-align: left;
+        }
+        th { background: #333; }
+    </style>
+</head>
+<body>
+    <h1>Alpha Calculation Flow</h1>
+
+    <h2>1. 전체 알파 흐름</h2>
+    <div class="mermaid">
+flowchart TB
+    subgraph INPUT["입력 (AE Premultiplied)"]
+        I1["input RGBA<br/>(premultiplied)"]
+    end
+
+    subgraph PREFILTER["Prefilter"]
+        P1["13-tap ZeroPad Sampling"]
+        P2["Weighted Average<br/>sumA = Σ(Ai × wi)"]
+        P3["Alpha 그대로 전달"]
+        P4["softThreshold(RGB만)"]
+    end
+
+    subgraph DOWNSAMPLE["Downsample Chain"]
+        D1["2D Gaussian 블러"]
+        D2["Alpha도 함께 블러됨"]
+        D3["m_mipChain[0..N]"]
+    end
+
+    subgraph UPSAMPLE["Upsample Chain"]
+        U1["9-tap Tent Upsample"]
+        U2["Alpha 블러 누적"]
+        U3["m_upsampleChain[0]<br/>(최종 Glow)"]
+    end
+
+    subgraph COMPOSITE["Composite"]
+        C1["sampleBilinear(glow)"]
+        C2["glowR, glowG, glowB, glowA"]
+        C3["⚠️ glowAlpha 재계산!<br/>max(R, G, B)"]
+        C4["Blend Mode 적용"]
+        C5["resA = srcA + glowAlpha"]
+    end
+
+    I1 --> P1 --> P2 --> P3 --> P4
+    P4 --> D1 --> D2 --> D3
+    D3 --> U1 --> U2 --> U3
+    U3 --> C1 --> C2 --> C3 --> C4 --> C5
+
+    style C3 fill:#ff5252
+    </div>
+
+    <h2>2. Prefilter 알파 처리</h2>
+    <div class="mermaid">
+flowchart LR
+    subgraph SAMPLE["13-tap Sampling"]
+        S1["sampleBilinearZeroPad()"]
+        S2["13개 샘플 × RGBA"]
+        S3["경계 밖 = (0,0,0,0)"]
+    end
+
+    subgraph AVERAGE["Weighted Average"]
+        A1["sumA = Ga×wCenter +<br/>(Da+Ea+Ia+Ja)×wInner +<br/>(Ba+Fa+Ha+La)×wCross +<br/>(Aa+Ca+Ka+Ma)×wCorner"]
+    end
+
+    subgraph THRESHOLD["Soft Threshold"]
+        T1["softThreshold(R,G,B)"]
+        T2["Alpha는 변경 안함!"]
+    end
+
+    subgraph OUTPUT["출력"]
+        O1["output = (resR, resG, resB, sumA)"]
+    end
+
+    S1 --> S2 --> S3 --> A1
+    A1 --> T1 --> T2 --> O1
+
+    style T2 fill:#4caf50
+    </div>
+
+    <div class="code-block">
+<span class="comment">// Prefilter: Alpha weighted average (Line 438)</span>
+<span class="highlight">float</span> sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner
+           + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
+
+<span class="comment">// Soft threshold는 RGB만 (Line 479)</span>
+softThreshold(resR, resG, resB, threshold, softKnee);
+
+<span class="comment">// 출력: Alpha는 sumA 그대로</span>
+output[outIdx + 3] = sumA;  <span class="comment">// ✓ 정상</span>
+    </div>
+
+    <h2>3. Composite 알파 계산 (문제 지점)</h2>
+    <div class="mermaid">
+flowchart TB
+    subgraph GLOW_SAMPLE["Glow 샘플링"]
+        G1["sampleBilinear(glow, u, v, ...)"]
+        G2["glowR, glowG, glowB, glowA"]
+    end
+
+    subgraph ALPHA_CALC["⚠️ Alpha 재계산"]
+        A1["glowA (실제 알파) 사용 안함!"]
+        A2["glowAlpha = max(R, G, B)"]
+        A3["glowAlpha = min(max(R,G,B), 1.0)"]
+    end
+
+    subgraph BLEND["Blend Mode"]
+        B1["Add: resA = srcA + glowAlpha"]
+        B2["Screen: resA = srcA + glowAlpha - srcA×glowAlpha"]
+    end
+
+    G1 --> G2
+    G2 --> A1
+    A1 --> A2 --> A3 --> B1
+    A3 --> B2
+
+    style A1 fill:#ff5252
+    style A2 fill:#ff9800
+    </div>
+
+    <div class="code-block">
+<span class="comment">// DebugOutputKernel (Line 1188-1189)</span>
+
+<span class="comment">// glowA가 있는데 사용 안함!</span>
+<span class="highlight">float</span> glowR, glowG, glowB, glowA;
+sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch,
+               glowR, glowG, glowB, <span style="color:#ff5252">glowA</span>);  <span class="comment">// glowA 읽음</span>
+
+<span class="comment">// ⚠️ 그런데 glowA 대신 RGB에서 재계산!</span>
+<span class="highlight">float</span> glowAlpha = fminf(fmaxf(fmaxf(<span style="color:#ff9800">glowR, glowG</span>), <span style="color:#ff9800">glowB</span>), 1.0f);
+
+<span class="comment">// 이 glowAlpha가 블렌드에 사용됨</span>
+resA = fminf(srcA + <span style="color:#ff9800">glowAlpha</span>, 1.0f);  <span class="comment">// Add mode</span>
+    </div>
+
+    <div class="issue">
+        <strong>🔴 문제 발견:</strong><br/><br/>
+        <code>glowA</code>는 실제로 MIP 체인을 통해 블러된 알파 채널인데,<br/>
+        Composite에서 <code>glowA</code>를 사용하지 않고 RGB에서 <code>max(R,G,B)</code>로 재계산!<br/><br/>
+        <strong>왜 문제인가:</strong><br/>
+        - 텍스트 레이어: 작은 소스 → 블러 에너지 적음 → glowR,G,B 낮음 → glowAlpha 낮음<br/>
+        - 조정 레이어: 큰 소스 → 블러 에너지 많음 → glowR,G,B 높음 → glowAlpha 높음
+    </div>
+
+    <h2>4. 조정 레이어 vs 텍스트 레이어 비교</h2>
+    <div class="mermaid">
+flowchart LR
+    subgraph ADJ["조정 레이어"]
+        A1["Input: 1920×1080<br/>(전체 밝은 픽셀)"]
+        A2["Glow RGB: 높음"]
+        A3["glowAlpha = 0.8+"]
+        A4["resA = 강함"]
+    end
+
+    subgraph TEXT["텍스트 레이어"]
+        T1["Input: 237×209<br/>(일부만 밝음)"]
+        T2["Glow RGB: 낮음"]
+        T3["glowAlpha = 0.2~0.5"]
+        T4["resA = 약함"]
+    end
+
+    A1 --> A2 --> A3 --> A4
+    T1 --> T2 --> T3 --> T4
+
+    style A4 fill:#4caf50
+    style T4 fill:#ff5252
+    </div>
+
+    <table>
+        <tr>
+            <th>항목</th>
+            <th>조정 레이어</th>
+            <th>텍스트 레이어</th>
+        </tr>
+        <tr>
+            <td>입력 크기</td>
+            <td>1920×1080</td>
+            <td>237×209</td>
+        </tr>
+        <tr>
+            <td>밝은 픽셀 수</td>
+            <td>많음 (전체)</td>
+            <td>적음 (텍스트만)</td>
+        </tr>
+        <tr>
+            <td>Glow 버퍼 에너지</td>
+            <td>높음</td>
+            <td>낮음</td>
+        </tr>
+        <tr>
+            <td>max(R,G,B)</td>
+            <td>~0.8+</td>
+            <td>~0.2~0.5</td>
+        </tr>
+        <tr>
+            <td style="color:#ff5252">glowAlpha 추정값</td>
+            <td style="color:#4caf50">강함</td>
+            <td style="color:#ff5252">약함</td>
+        </tr>
+    </table>
+
+    <h2>5. 수정 제안</h2>
+
+    <h3>Option A: 실제 glowA 사용</h3>
+    <div class="code-block">
+<span class="comment">// 현재 (문제)</span>
+<span class="highlight">float</span> glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
+
+<span class="comment">// 수정: 실제 alpha 채널 사용</span>
+<span class="highlight">float</span> glowAlpha = glowA;
+    </div>
+
+    <h3>Option B: RGB + Alpha 하이브리드</h3>
+    <div class="code-block">
+<span class="comment">// RGB 기반 밝기와 실제 알파 중 큰 값</span>
+<span class="highlight">float</span> rgbAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
+<span class="highlight">float</span> glowAlpha = fmaxf(rgbAlpha, glowA);
+    </div>
+
+    <h3>Option C: 정규화된 알파</h3>
+    <div class="code-block">
+<span class="comment">// 버퍼 크기에 관계없이 일정한 알파 강도</span>
+<span class="comment">// Glow 에너지를 정규화</span>
+<span class="highlight">float</span> glowLum = (glowR + glowG + glowB) / 3.0f;
+<span class="highlight">float</span> normalizedAlpha = fminf(glowLum * exposure * 2.0f, 1.0f);
+<span class="highlight">float</span> glowAlpha = fmaxf(normalizedAlpha, glowA);
+    </div>
+
+    <h2>6. 코드 위치</h2>
+    <div class="code-block">
+<span class="comment">// JustGlowKernels.cu - DebugOutputKernel()</span>
+
+<span class="comment">// Line 1165: Glow 샘플링</span>
+sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch,
+               glowR, glowG, glowB, glowA);
+
+<span class="comment">// Line 1188-1189: ⚠️ Alpha 재계산 (문제)</span>
+<span class="highlight">float</span> glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
+
+<span class="comment">// Line 1198: Add 블렌드</span>
+resA = fminf(srcA + glowAlpha, 1.0f);
+
+<span class="comment">// Line 1205: Screen 블렌드</span>
+resA = srcA + glowAlpha - srcA * glowAlpha;
+    </div>
+
+    <h2>7. 테스트 방법</h2>
+    <div class="note">
+        <strong>1. Debug View = Glow Only (16)로 설정</strong><br/>
+        텍스트 레이어와 조정 레이어에서 글로우 밝기 비교<br/><br/>
+
+        <strong>2. 알파 채널만 확인</strong><br/>
+        AE에서 알파 채널 표시 → 글로우 알파 강도 비교<br/><br/>
+
+        <strong>3. glowA vs max(R,G,B) 로그 추가</strong><br/>
+        <code>CUDA_LOG("glowA=%.3f, maxRGB=%.3f", glowA, maxRGB);</code>
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+    </script>
+</body>
+</html>

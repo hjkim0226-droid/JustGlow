@@ -102,6 +102,7 @@ JustGlowCUDARenderer::JustGlowCUDARenderer()
     , m_upsampleKernel(nullptr)
     , m_compositeKernel(nullptr)
     , m_horizontalBlurKernel(nullptr)
+    , m_gaussian2DDownsampleKernel(nullptr)
     , m_gaussianDownsampleHKernel(nullptr)
     , m_gaussianDownsampleVKernel(nullptr)
     , m_debugOutputKernel(nullptr)
@@ -231,17 +232,24 @@ bool JustGlowCUDARenderer::LoadKernels() {
     }
     CUDA_LOG("HorizontalBlurKernel loaded");
 
+    err = cuModuleGetFunction(&m_gaussian2DDownsampleKernel, m_module, "Gaussian2DDownsampleKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(Gaussian2DDownsampleKernel)")) {
+        return false;
+    }
+    CUDA_LOG("Gaussian2DDownsampleKernel loaded");
+
+    // Load deprecated kernels for fallback compatibility
     err = cuModuleGetFunction(&m_gaussianDownsampleHKernel, m_module, "GaussianDownsampleHKernel");
     if (!CheckCUDAError(err, "cuModuleGetFunction(GaussianDownsampleHKernel)")) {
         return false;
     }
-    CUDA_LOG("GaussianDownsampleHKernel loaded");
+    CUDA_LOG("GaussianDownsampleHKernel loaded (deprecated)");
 
     err = cuModuleGetFunction(&m_gaussianDownsampleVKernel, m_module, "GaussianDownsampleVKernel");
     if (!CheckCUDAError(err, "cuModuleGetFunction(GaussianDownsampleVKernel)")) {
         return false;
     }
-    CUDA_LOG("GaussianDownsampleVKernel loaded");
+    CUDA_LOG("GaussianDownsampleVKernel loaded (deprecated)");
 
     err = cuModuleGetFunction(&m_debugOutputKernel, m_module, "DebugOutputKernel");
     if (!CheckCUDAError(err, "cuModuleGetFunction(DebugOutputKernel)")) {
@@ -284,6 +292,7 @@ void JustGlowCUDARenderer::Shutdown() {
     m_upsampleKernel = nullptr;
     m_compositeKernel = nullptr;
     m_horizontalBlurKernel = nullptr;
+    m_gaussian2DDownsampleKernel = nullptr;
     m_gaussianDownsampleHKernel = nullptr;
     m_gaussianDownsampleVKernel = nullptr;
     m_debugOutputKernel = nullptr;
@@ -300,8 +309,13 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
     // Check if we can reuse existing chain
     if (m_currentMipLevels == levels && !m_mipChain.empty()) {
         if (m_mipChain[0].width == width && m_mipChain[0].height == height) {
+            CUDA_LOG("AllocateMipChain: REUSING existing chain %dx%d, %d levels", width, height, levels);
             return true;
         }
+        CUDA_LOG("AllocateMipChain: Size changed %dx%d -> %dx%d, REALLOCATING",
+            m_mipChain[0].width, m_mipChain[0].height, width, height);
+    } else {
+        CUDA_LOG("AllocateMipChain: NEW allocation %dx%d, %d levels", width, height, levels);
     }
 
     ReleaseMipChain();
@@ -586,127 +600,55 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
 // ============================================================================
 
 bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
-    // Hybrid downsample: Gaussian (9-tap separable) for Level 0-4, Kawase for 5+
-    // Gaussian preserves near-glow detail, Kawase is faster for deep levels
-    constexpr int GAUSSIAN_LEVELS = 5;  // Use Gaussian for levels 0, 1, 2, 3, 4
+    // All levels use 2D Gaussian (9-tap, ZeroPad) for temporal stability
+    // Kawase removed - caused blur flickering on subpixel movement
+    // ZeroPad sampling prevents edge energy concentration across different buffer sizes
 
     for (int i = 0; i < params.mipLevels - 1; ++i) {
         auto& srcMip = m_mipChain[i];
         auto& dstMip = m_mipChain[i + 1];
 
-        // Use per-level blurOffset (decays from spread to 1.5px for deeper levels)
-        float blurOffset = params.blurOffsets[i];
+        // =========================================
+        // 2D Gaussian 9-tap (single pass, ZeroPad)
+        // Temporally stable - no flickering on movement
+        // =========================================
+        int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        if (i < GAUSSIAN_LEVELS) {
-            // =========================================
-            // Gaussian 9-tap Separable (2 passes)
-            // Pass 1: Horizontal blur at source resolution
-            // Pass 2: Vertical blur + 2x downsample
-            // =========================================
+        int srcPitchPixels = srcMip.width;
+        int dstPitchPixels = dstMip.width;
 
-            // Pass 1: Horizontal Gaussian blur (src -> temp at src resolution)
-            int hGridX = (srcMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int hGridY = (srcMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int srcPitchPixels = srcMip.width;
+        // Dynamic offset: 1.0 at level 0, 1.0 + spreadDown at max level
+        float spreadDown = params.spreadDown;
+        int level = i;
+        int maxLevels = params.mipLevels;
 
-            CUDA_LOG("Downsample[%d]: Gaussian H-blur %dx%d, blurOffset=%.2f",
-                i, srcMip.width, srcMip.height, blurOffset);
+        CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad, spreadDown=%.2f)",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, spreadDown);
 
-            void* hBlurParams[] = {
-                &srcMip.devicePtr,
-                &m_gaussianDownsampleTemp.devicePtr,
-                (void*)&srcMip.width,
-                (void*)&srcMip.height,
-                (void*)&srcPitchPixels,
-                (void*)&blurOffset
-            };
+        void* kernelParams[] = {
+            &srcMip.devicePtr,
+            &dstMip.devicePtr,
+            (void*)&srcMip.width,
+            (void*)&srcMip.height,
+            (void*)&srcPitchPixels,
+            (void*)&dstMip.width,
+            (void*)&dstMip.height,
+            (void*)&dstPitchPixels,
+            (void*)&spreadDown,
+            (void*)&level,
+            (void*)&maxLevels
+        };
 
-            CUresult err = cuLaunchKernel(
-                m_gaussianDownsampleHKernel,
-                hGridX, hGridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                hBlurParams, nullptr);
+        CUresult err = cuLaunchKernel(
+            m_gaussian2DDownsampleKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            kernelParams, nullptr);
 
-            if (!CheckCUDAError(err, "cuLaunchKernel(GaussianDownsampleH)")) {
-                return false;
-            }
-
-            // Synchronize: H-blur must complete before V-blur reads temp buffer
-            cuEventRecord(m_syncEvent, m_stream);
-            cuStreamWaitEvent(m_stream, m_syncEvent, 0);
-
-            // Pass 2: Vertical Gaussian blur + 2x downsample (temp -> dst)
-            int vGridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int vGridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int dstPitchPixels = dstMip.width;
-
-            CUDA_LOG("Downsample[%d]: Gaussian V-blur+downsample %dx%d -> %dx%d",
-                i, srcMip.width, srcMip.height, dstMip.width, dstMip.height);
-
-            void* vBlurParams[] = {
-                &m_gaussianDownsampleTemp.devicePtr,
-                &dstMip.devicePtr,
-                (void*)&srcMip.width,
-                (void*)&srcMip.height,
-                (void*)&srcPitchPixels,
-                (void*)&dstMip.width,
-                (void*)&dstMip.height,
-                (void*)&dstPitchPixels,
-                (void*)&blurOffset
-            };
-
-            err = cuLaunchKernel(
-                m_gaussianDownsampleVKernel,
-                vGridX, vGridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                vBlurParams, nullptr);
-
-            if (!CheckCUDAError(err, "cuLaunchKernel(GaussianDownsampleV)")) {
-                return false;
-            }
-        } else {
-            // =========================================
-            // Kawase 5-tap (single pass, faster)
-            // =========================================
-            int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-            int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-
-            // Alternate between X (diagonal) and + (cross) patterns
-            // This breaks up boxy artifacts -> rounder glow
-            int rotationMode = i % 2;  // 0=X, 1=+
-
-            CUDA_LOG("Downsample[%d]: Kawase %dx%d -> %dx%d, rotation=%s, blurOffset=%.2f",
-                i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
-                rotationMode == 0 ? "X" : "+", blurOffset);
-
-            int srcPitchPixels = srcMip.width;  // Pitch in pixels, not floats
-            int dstPitchPixels = dstMip.width;  // Pitch in pixels, not floats
-
-            void* kernelParams[] = {
-                &srcMip.devicePtr,
-                &dstMip.devicePtr,
-                (void*)&srcMip.width,
-                (void*)&srcMip.height,
-                (void*)&srcPitchPixels,
-                (void*)&dstMip.width,
-                (void*)&dstMip.height,
-                (void*)&dstPitchPixels,
-                (void*)&blurOffset,
-                (void*)&rotationMode
-            };
-
-            CUresult err = cuLaunchKernel(
-                m_downsampleKernel,
-                gridX, gridY, 1,
-                THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-                0, m_stream,
-                kernelParams, nullptr);
-
-            if (!CheckCUDAError(err, "cuLaunchKernel(Downsample)")) {
-                return false;
-            }
+        if (!CheckCUDAError(err, "cuLaunchKernel(Gaussian2DDownsample)")) {
+            return false;
         }
     }
 
@@ -739,8 +681,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int gridX = (dstUpsample.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstUpsample.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        // blurOffset from params (kernel uses dynamic offset internally, this is for API compatibility)
-        float blurOffset = params.blurOffsets[i];
+        // spreadUp: 0-1 for dynamic offset calculation in kernel
+        float spreadUp = params.spreadUp;
 
         // Level index for weight calculation
         int levelIndex = i;
@@ -761,8 +703,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         // blurMode is ignored by kernel (always uses 9-tap Discrete Gaussian)
         int blurMode = 0;
 
-        CUDA_LOG("Upsample[%d]: 9-tap Discrete Gaussian %dx%d -> %dx%d",
-            i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height);
+        CUDA_LOG("Upsample[%d]: 9-tap Discrete Gaussian %dx%d -> %dx%d (spreadUp=%.2f)",
+            i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, spreadUp);
 
         int srcPitchPixels = currMip.width;
         int dstPitchPixels = dstUpsample.width;
@@ -784,7 +726,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             (void*)&dstUpsample.width,
             (void*)&dstUpsample.height,
             (void*)&dstPitchPixels,
-            (void*)&blurOffset,
+            (void*)&spreadUp,
             (void*)&levelIndex,
             (void*)&activeLimit,
             (void*)&params.decayK,
@@ -830,6 +772,10 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     int glowHeight = m_upsampleChain[0].height;
     int glowPitch = m_upsampleChain[0].width;  // Pitch in pixels
 
+    // Critical check: glowWidth must equal params.width for 1:1 UV mapping
+    CUDA_LOG("Composite GLOW CHECK: params.width=%d, glowWidth=%d, match=%s",
+        params.width, glowWidth, (params.width == glowWidth) ? "YES" : "NO!!!");
+
     // Determine debug buffer based on debugView
     // debugView: 1=Final, 2=Prefilter, 3-8=Down1-6, 9-15=Up0-6, 16=GlowOnly
     CUdeviceptr debugBuffer = 0;
@@ -870,6 +816,11 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     CUDA_LOG("Composite: output=%dx%d, input=%dx%d, sourceOpacity=%.2f, glowOpacity=%.2f",
         params.width, params.height, params.inputWidth, params.inputHeight,
         params.sourceOpacity, params.glowOpacity);
+    CUDA_LOG("Composite DEBUG: width=%d, height=%d, inputW=%d, inputH=%d, glowW=%d, glowH=%d, srcPitch=%d, dstPitch=%d",
+        params.width, params.height, params.inputWidth, params.inputHeight,
+        glowWidth, glowHeight, params.srcPitch, params.dstPitch);
+    CUDA_LOG("Composite DEBUG: offsetX=%d, offsetY=%d",
+        (params.width - params.inputWidth) / 2, (params.height - params.inputHeight) / 2);
 
     int useLinear = params.linearize ? 1 : 0;
     int inputProfile = params.inputProfile;  // 1=sRGB, 2=Rec709, 3=Gamma2.2
@@ -880,6 +831,15 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     float glowTintB = params.glowColor[2];
 
     float dither = params.dither;
+
+    // Chromatic aberration
+    float chromaticAberration = params.chromaticAberration;
+    float caTintRr = params.caTintR[0];
+    float caTintRg = params.caTintR[1];
+    float caTintRb = params.caTintR[2];
+    float caTintBr = params.caTintB[0];
+    float caTintBg = params.caTintB[1];
+    float caTintBb = params.caTintB[2];
 
     void* kernelParams[] = {
         &original,
@@ -908,7 +868,14 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&glowTintR,
         (void*)&glowTintG,
         (void*)&glowTintB,
-        (void*)&dither
+        (void*)&dither,
+        (void*)&chromaticAberration,
+        (void*)&caTintRr,
+        (void*)&caTintRg,
+        (void*)&caTintRb,
+        (void*)&caTintBr,
+        (void*)&caTintBg,
+        (void*)&caTintBb
     };
 
     CUresult err = cuLaunchKernel(

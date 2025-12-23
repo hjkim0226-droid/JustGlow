@@ -314,19 +314,33 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_RADIUS);
 
-    // Spread (0-100) - Controls blur softness (offset 1.1-2.5px)
+    // Spread Down (1-5) - Downsample offset at max MIP level
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
-        "Spread",
+        "Spread Down",
         Ranges::SpreadMin,
         Ranges::SpreadMax,
         Ranges::SpreadMin,
         Ranges::SpreadMax,
-        Defaults::Spread,
+        Defaults::SpreadDown,
         PF_Precision_TENTHS,
         0,
         0,
-        DISK_ID_SPREAD);
+        DISK_ID_SPREAD_DOWN);
+
+    // Spread Up (1-5) - Upsample offset at max MIP level
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Spread Up",
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Ranges::SpreadMin,
+        Ranges::SpreadMax,
+        Defaults::SpreadUp,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_SPREAD_UP);
 
     // Falloff (0-100) - Decay rate per level
     AEFX_CLR_STRUCT(def);
@@ -374,13 +388,15 @@ PF_Err ParamsSetup(
     // Blur Options
     // ===========================================
 
-    // Quality (determines max MIP levels)
+    // Quality (MIP levels, 6-12)
     AEFX_CLR_STRUCT(def);
-    PF_ADD_POPUP(
+    PF_ADD_SLIDER(
         "Quality",
-        4,  // Number of choices
-        Defaults::Quality,
-        "Low (4)|Medium (6)|High (8)|Ultra (12)",
+        Ranges::QualityMin,    // 6
+        Ranges::QualityMax,    // 12
+        Ranges::QualityMin,    // slider min
+        Ranges::QualityMax,    // slider max
+        Defaults::Quality,     // 8
         DISK_ID_QUALITY);
 
     // Falloff Type (decay curve shape)
@@ -457,6 +473,34 @@ PF_Err ParamsSetup(
         "Anamorphic Angle",
         static_cast<PF_Fixed>(Defaults::AnamorphicAngle * 65536),
         DISK_ID_ANAMORPHIC_ANGLE);
+
+    // Chromatic Aberration
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Chromatic Aberration",
+        Ranges::ChromaticAberrationMin, Ranges::ChromaticAberrationMax,
+        Ranges::ChromaticAberrationMin, Ranges::ChromaticAberrationMax,
+        Defaults::ChromaticAberration,
+        PF_Precision_TENTHS, 0, 0,
+        DISK_ID_CHROMATIC_ABERRATION);
+
+    // CA Tint Red (color for R channel shift)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_COLOR(
+        "CA Tint Red",
+        255,  // Red
+        0,    // Green
+        0,    // Blue
+        DISK_ID_CA_TINT_R);
+
+    // CA Tint Blue (color for B channel shift)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_COLOR(
+        "CA Tint Blue",
+        0,    // Red
+        0,    // Green
+        255,  // Blue
+        DISK_ID_CA_TINT_B);
 
     // Composite Mode
     AEFX_CLR_STRUCT(def);
@@ -780,52 +824,73 @@ PF_Err PreRender(
     // Allocate pre-render data
     JustGlowPreRenderData* preRenderData = new JustGlowPreRenderData();
 
-    // Calculate glow expansion based on quality and spread
-    // Glow can spread approximately: sum of (blurOffset * 2^level) for all levels
-    // Simplified: use quality level as multiplier (more levels = more spread)
-    // Base expansion: ~64px for Low, ~128px for Medium, ~256px for High, ~512px for Ultra
-    int qualityMultiplier = 16;  // Base pixels per level
-
     // Get quality parameter early for extent calculation
     PF_ParamDef qualityParam;
     AEFX_CLR_STRUCT(qualityParam);
     PF_CHECKOUT_PARAM(in_data, PARAM_QUALITY, in_data->current_time,
         in_data->time_step, in_data->time_scale, &qualityParam);
-    BlurQuality quality = static_cast<BlurQuality>(qualityParam.u.pd.value);
+    int quality = qualityParam.u.sd.value;  // Direct integer (6-12)
     int mipLevels = GetQualityLevelCount(quality);
 
-    // Get spread for more accurate expansion
-    PF_ParamDef spreadParam;
-    AEFX_CLR_STRUCT(spreadParam);
-    PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD, in_data->current_time,
-        in_data->time_step, in_data->time_scale, &spreadParam);
-    float spread = spreadParam.u.fs_d.value;
+    // Get spread values for more accurate expansion
+    PF_ParamDef spreadDownParam, spreadUpParam;
+    AEFX_CLR_STRUCT(spreadDownParam);
+    AEFX_CLR_STRUCT(spreadUpParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_DOWN, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &spreadDownParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_UP, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &spreadUpParam);
+    float spreadDown = spreadDownParam.u.fs_d.value;
+    float spreadUp = spreadUpParam.u.fs_d.value;
+    float spread = (std::max)(spreadDown, spreadUp);  // Use max for expansion calculation
 
-    // Get radius - higher radius activates more MIP levels = wider glow
-    PF_ParamDef radiusParam;
-    AEFX_CLR_STRUCT(radiusParam);
-    PF_CHECKOUT_PARAM(in_data, PARAM_RADIUS, in_data->current_time,
-        in_data->time_step, in_data->time_scale, &radiusParam);
-    float radius = radiusParam.u.fs_d.value;
+    // Calculate glow expansion based on MIP levels and spread parameters
+    //
+    // The blur spread is approximately 2^mipLevels pixels at maximum.
+    // Each MIP level doubles the effective blur radius:
+    //   Level 6: 64px, Level 7: 128px, Level 8: 256px, Level 9: 512px, etc.
+    //
+    // Spread parameter (1.0-5.0) affects how far the blur actually spreads
+    // at each downsample/upsample step.
+    //
+    // Expected expansion values:
+    //   Quality 6 (mipLevels=6): spread=1→51px,  spread=5→96px
+    //   Quality 7 (mipLevels=7): spread=1→102px, spread=5→192px
+    //   Quality 8 (mipLevels=8): spread=1→205px, spread=5→384px
+    //   Quality 9 (mipLevels=9): spread=1→410px, spread=5→768px
+    //   Quality 10+: scales accordingly up to 4096px max
 
-    // Calculate expansion: base + (spread factor * 2^mipLevels) * radius factor
-    // Radius affects how many MIP levels are active, which determines max glow spread
-    // radius 0 -> 0.5x, radius 50 -> 0.75x, radius 100 -> 1.0x
-    float radiusFactor = 0.5f + (radius / 100.0f) * 0.5f;
-    int glowExpansion = static_cast<int>(qualityMultiplier * (1 << (mipLevels / 2)) * (0.5f + spread / 100.0f) * radiusFactor);
+    // Base expansion: 2^mipLevels (theoretical maximum blur spread)
+    int baseExpansion = 1 << mipLevels;
+
+    // Spread factor: scales expansion based on spread parameter
+    // spread=1.0 → 0.8x (conservative), spread=5.0 → 1.5x (full spread)
+    float spreadFactor = 0.625f + spread * 0.175f;
+
+    // Calculate expansion
+    int glowExpansion = static_cast<int>(baseExpansion * spreadFactor);
+
     // Scale by downsample factor for preview resolution support
     glowExpansion = static_cast<int>(glowExpansion * downsampleFactor);
-    // Use parentheses to prevent Windows min/max macro expansion
-    glowExpansion = (std::max)(32, (std::min)(glowExpansion, 2048));  // Min 32 for preview
 
-    PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f, radius=%.1f)",
-        glowExpansion, static_cast<int>(quality), mipLevels, spread, radius);
+    // Clamp to reasonable range (64 minimum for preview, 4096 maximum)
+    glowExpansion = (std::max)(64, (std::min)(glowExpansion, 4096));
+
+    PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f)",
+        glowExpansion, static_cast<int>(quality), mipLevels, spread);
+    PLUGIN_LOG("PreRender: Original req.rect = (%d,%d,%d,%d) size=%dx%d",
+        req.rect.left, req.rect.top, req.rect.right, req.rect.bottom,
+        req.rect.right - req.rect.left, req.rect.bottom - req.rect.top);
 
     // Expand the request rect to get extra pixels for glow spread
     req.rect.left -= glowExpansion;
     req.rect.top -= glowExpansion;
     req.rect.right += glowExpansion;
     req.rect.bottom += glowExpansion;
+
+    PLUGIN_LOG("PreRender: Expanded req.rect = (%d,%d,%d,%d) size=%dx%d",
+        req.rect.left, req.rect.top, req.rect.right, req.rect.bottom,
+        req.rect.right - req.rect.left, req.rect.bottom - req.rect.top);
 
     // Checkout input layer at current time (with expanded request)
     err = extra->cb->checkout_layer(
@@ -837,6 +902,12 @@ PF_Err PreRender(
         in_data->time_step,
         in_data->time_scale,
         &in_result);
+
+    PLUGIN_LOG("PreRender: in_result.result_rect = (%d,%d,%d,%d) size=%dx%d",
+        in_result.result_rect.left, in_result.result_rect.top,
+        in_result.result_rect.right, in_result.result_rect.bottom,
+        in_result.result_rect.right - in_result.result_rect.left,
+        in_result.result_rect.bottom - in_result.result_rect.top);
 
     if (!err) {
         // Get parameter values
@@ -864,11 +935,17 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->radius = param.u.fs_d.value;
 
-        // Spread (0-100)
+        // Spread Down (1-5)
         AEFX_CLR_STRUCT(param);
-        PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD, in_data->current_time,
+        PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_DOWN, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->spread = param.u.fs_d.value;
+        preRenderData->spreadDown = param.u.fs_d.value;
+
+        // Spread Up (1-5)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_UP, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->spreadUp = param.u.fs_d.value;
 
         // Falloff (0-100)
         AEFX_CLR_STRUCT(param);
@@ -899,11 +976,11 @@ PF_Err PreRender(
         // Blur Options
         // ===========================================
 
-        // Quality
+        // Quality (MIP levels 6-12)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_QUALITY, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->quality = static_cast<BlurQuality>(param.u.pd.value);
+        preRenderData->quality = param.u.sd.value;  // Direct integer
 
         // Falloff Type
         AEFX_CLR_STRUCT(param);
@@ -950,6 +1027,28 @@ PF_Err PreRender(
         PF_CHECKOUT_PARAM(in_data, PARAM_ANAMORPHIC_ANGLE, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->anamorphicAngle = FIX_2_FLOAT(param.u.ad.value);
+
+        // Chromatic Aberration
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_CHROMATIC_ABERRATION, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->chromaticAberration = static_cast<float>(param.u.fs_d.value);
+
+        // CA Tint Red
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_CA_TINT_R, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->caTintR[0] = param.u.cd.value.red / 65535.0f;
+        preRenderData->caTintR[1] = param.u.cd.value.green / 65535.0f;
+        preRenderData->caTintR[2] = param.u.cd.value.blue / 65535.0f;
+
+        // CA Tint Blue
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_CA_TINT_B, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->caTintB[0] = param.u.cd.value.red / 65535.0f;
+        preRenderData->caTintB[1] = param.u.cd.value.green / 65535.0f;
+        preRenderData->caTintB[2] = param.u.cd.value.blue / 65535.0f;
 
         // Composite Mode
         AEFX_CLR_STRUCT(param);
@@ -1009,6 +1108,7 @@ PF_Err PreRender(
 
         // MIP levels from quality setting
         preRenderData->mipLevels = GetQualityLevelCount(preRenderData->quality);
+        PLUGIN_LOG("PreRender: Quality=%d, MipLevels=%d", preRenderData->quality, preRenderData->mipLevels);
 
         // activeLimit: Radius -> soft threshold factor (0-1)
         // Radius 100% = no threshold (all glow passes)
@@ -1016,12 +1116,11 @@ PF_Err PreRender(
         // Now uses per-level soft threshold instead of hard MIP cutoff
         preRenderData->activeLimit = preRenderData->radius / 100.0f;
 
-        // blurOffsets: Spread -> per-level pixel offset (decays from spread to 1.5px)
-        // Level 0 gets full offset, deeper levels decay toward 1.5px minimum
-        // Scale by downsampleFactor for consistent look at Half/Quarter preview resolution
-        float spreadOffset = 1.1f + (preRenderData->spread / 100.0f) * 1.4f; // 1.1 ~ 2.5px
+        // blurOffsets: Legacy, not used in current kernels
+        // Now using spreadDown/spreadUp directly in kernels with level-based interpolation
+        // offset = 1.0 + spread * (level / maxLevel)
         for (int i = 0; i < preRenderData->mipLevels && i < PRERENDER_MAX_MIP_LEVELS; ++i) {
-            preRenderData->blurOffsets[i] = GetLevelBlurOffset(i, spreadOffset) * downsampleFactor;
+            preRenderData->blurOffsets[i] = 1.0f;  // Legacy placeholder
         }
 
         // decayK: Pass falloff directly (0-100), kernel calculates decayRate
@@ -1049,6 +1148,12 @@ PF_Err PreRender(
     extra->output->max_result_rect.top -= glowExpansion;
     extra->output->max_result_rect.right += glowExpansion;
     extra->output->max_result_rect.bottom += glowExpansion;
+
+    PLUGIN_LOG("PreRender: Final output->result_rect = (%d,%d,%d,%d) size=%dx%d",
+        extra->output->result_rect.left, extra->output->result_rect.top,
+        extra->output->result_rect.right, extra->output->result_rect.bottom,
+        extra->output->result_rect.right - extra->output->result_rect.left,
+        extra->output->result_rect.bottom - extra->output->result_rect.top);
 
     extra->output->solid = FALSE;
     extra->output->pre_render_data = preRenderData;
@@ -1160,13 +1265,15 @@ PF_Err SmartRender(
                     rp.exposure = preRenderData->exposure;
                     rp.level1Weight = preRenderData->level1Weight;
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);
+                    rp.spreadDown = preRenderData->spreadDown;  // 1-5 direct
+                    rp.spreadUp = preRenderData->spreadUp;      // 1-5 direct
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;
                     rp.softKnee = preRenderData->softKnee;
 
-                    // Quality
-                    rp.quality = static_cast<int>(preRenderData->quality);
+                    // Quality (MIP levels)
+                    rp.quality = preRenderData->quality;
 
                     // Color
                     rp.glowColor[0] = preRenderData->glowColorR;
@@ -1178,6 +1285,11 @@ PF_Err SmartRender(
                     // Advanced
                     rp.anamorphic = preRenderData->anamorphic;
                     rp.anamorphicAngle = preRenderData->anamorphicAngle;
+                    rp.chromaticAberration = preRenderData->chromaticAberration;
+                    for (int i = 0; i < 3; ++i) {
+                        rp.caTintR[i] = preRenderData->caTintR[i];
+                        rp.caTintB[i] = preRenderData->caTintB[i];
+                    }
                     rp.compositeMode = static_cast<int>(preRenderData->compositeMode);
                     rp.hdrMode = preRenderData->hdrMode;
                     rp.linearize = preRenderData->linearize;
@@ -1198,8 +1310,11 @@ PF_Err SmartRender(
                     rp.inputHeight = input_worldP->height;
                     rp.mipLevels = preRenderData->mipLevels;
 
-                    PLUGIN_LOG("SmartRender: output=%dx%d, input=%dx%d",
-                        rp.width, rp.height, rp.inputWidth, rp.inputHeight);
+                    PLUGIN_LOG("SmartRender: output=%dx%d, input=%dx%d, srcPitch=%d, dstPitch=%d",
+                        rp.width, rp.height, rp.inputWidth, rp.inputHeight, rp.srcPitch, rp.dstPitch);
+                    PLUGIN_LOG("SmartRender DEBUG: input_world=%dx%d (rowbytes=%d), output_world=%dx%d (rowbytes=%d)",
+                        input_worldP->width, input_worldP->height, input_worldP->rowbytes,
+                        output_worldP->width, output_worldP->height, output_worldP->rowbytes);
 
                     // Execute GPU rendering based on framework
                     bool renderSuccess = false;

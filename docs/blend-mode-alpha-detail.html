@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>JustGlow - Blend Mode Alpha Detail</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 40px;
+            margin: 0;
+        }
+        h1 { color: #4fc3f7; text-align: center; }
+        h2 {
+            color: #81c784;
+            margin-top: 40px;
+            border-bottom: 2px solid #81c784;
+            padding-bottom: 10px;
+        }
+        h3 { color: #ffb74d; margin-top: 30px; }
+        .mermaid {
+            background: #252542;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+        }
+        .code-block {
+            background: #1e1e3f;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Consolas', monospace;
+            font-size: 14px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        .highlight { color: #4fc3f7; }
+        .comment { color: #6a9955; }
+        .number { color: #b5cea8; }
+        .issue {
+            background: rgba(255,82,82,0.2);
+            border-left: 4px solid #ff5252;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .note {
+            background: rgba(33,150,243,0.2);
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .success {
+            background: rgba(76,175,80,0.2);
+            border-left: 4px solid #4caf50;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #444;
+            padding: 10px;
+            text-align: left;
+        }
+        th { background: #333; }
+        .formula {
+            background: #2d2d4a;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Consolas', monospace;
+            font-size: 16px;
+            text-align: center;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Blend Mode Alpha 상세 로직</h1>
+
+    <h2>1. 전체 Composite 흐름</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph INPUT["입력"]
+        I1["original (srcR, srcG, srcB, srcA)"]
+        I2["glow (glowR, glowG, glowB, glowA=1.0)"]
+    end
+
+    subgraph OPACITY[" Source/Glow Opacity 적용"]
+        O1["srcR = origR × sourceOpacity"]
+        O2["srcG = origG × sourceOpacity"]
+        O3["srcB = origB × sourceOpacity"]
+        O4["srcA = origA × sourceOpacity"]
+        O5["glowR,G,B × exposure × glowOpacity"]
+    end
+
+    subgraph GLOW_ALPHA["glowAlpha 계산"]
+        GA1["glowA = 1.0 (버퍼에서)"]
+        GA2["glowAlpha = min(max(R,G,B), 1.0)"]
+        GA3["RGB 밝기로 추정"]
+    end
+
+    subgraph BLEND["Blend Mode 분기"]
+        B1["Add (case 1)"]
+        B2["Screen (case 2)"]
+        B3["Overlay (case 3)"]
+    end
+
+    subgraph OUTPUT["출력"]
+        OUT["resR, resG, resB, resA"]
+    end
+
+    I1 --> O1 --> O4
+    I2 --> O5
+    O5 --> GA1 --> GA2 --> GA3
+    O4 --> BLEND
+    GA3 --> BLEND
+    B1 --> OUT
+    B2 --> OUT
+    B3 --> OUT
+
+    style GA1 fill:#ff9800
+    style GA2 fill:#ff5252
+    </div>
+
+    <h2>2. glowAlpha 계산 (Line 1188-1189)</h2>
+    <div class="mermaid">
+flowchart LR
+    subgraph SAMPLE["Glow 버퍼 샘플링"]
+        S1["sampleBilinear(glow, u, v, ...)"]
+        S2["glowR, glowG, glowB, glowA"]
+    end
+
+    subgraph ESTIMATE["Alpha 추정"]
+        E1["glowA = 1.0f (항상)"]
+        E2["max(glowR, glowG)"]
+        E3["max(위결과, glowB)"]
+        E4["min(위결과, 1.0)"]
+        E5["glowAlpha"]
+    end
+
+    S1 --> S2
+    S2 --> E1
+    S2 --> E2 --> E3 --> E4 --> E5
+
+    style E1 fill:#ff9800
+    style E5 fill:#4caf50
+    </div>
+
+    <div class="code-block">
+<span class="comment">// Line 1188-1189</span>
+<span class="comment">// glowA는 UpsampleKernel에서 1.0f로 하드코딩되어 있음</span>
+<span class="comment">// 그래서 RGB 밝기에서 alpha를 추정</span>
+
+<span class="highlight">float</span> glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), <span class="number">1.0f</span>);
+
+<span class="comment">// 예시:</span>
+<span class="comment">// glowR=0.8, glowG=0.6, glowB=0.4</span>
+<span class="comment">// → max(0.8, 0.6) = 0.8</span>
+<span class="comment">// → max(0.8, 0.4) = 0.8</span>
+<span class="comment">// → min(0.8, 1.0) = 0.8</span>
+<span class="comment">// → glowAlpha = 0.8</span>
+    </div>
+
+    <h2>3. Blend Mode별 Alpha 계산</h2>
+
+    <h3>3.1 Add Mode (case 1)</h3>
+    <div class="mermaid">
+flowchart LR
+    subgraph ADD["Add Blend"]
+        A1["srcA"]
+        A2["glowAlpha"]
+        A3["srcA + glowAlpha"]
+        A4["min(결과, 1.0)"]
+        A5["resA"]
+    end
+
+    A1 --> A3
+    A2 --> A3
+    A3 --> A4 --> A5
+
+    style A3 fill:#4fc3f7
+    </div>
+
+    <div class="formula">
+        <strong>Add:</strong> resA = min(srcA + glowAlpha, 1.0)
+    </div>
+
+    <div class="code-block">
+<span class="comment">// Line 1194-1198</span>
+case <span class="number">1</span>: <span class="comment">// Add</span>
+    resR = srcR + glowR;
+    resG = srcG + glowG;
+    resB = srcB + glowB;
+    resA = fminf(srcA + glowAlpha, <span class="number">1.0f</span>);
+    break;
+    </div>
+
+    <h3>3.2 Screen Mode (case 2)</h3>
+    <div class="mermaid">
+flowchart LR
+    subgraph SCREEN["Screen Blend"]
+        S1["srcA"]
+        S2["glowAlpha"]
+        S3["srcA × glowAlpha"]
+        S4["srcA + glowAlpha"]
+        S5["S4 - S3"]
+        S6["resA"]
+    end
+
+    S1 --> S3
+    S2 --> S3
+    S1 --> S4
+    S2 --> S4
+    S3 --> S5
+    S4 --> S5
+    S5 --> S6
+
+    style S5 fill:#4fc3f7
+    </div>
+
+    <div class="formula">
+        <strong>Screen:</strong> resA = srcA + glowAlpha - (srcA × glowAlpha)
+    </div>
+
+    <div class="code-block">
+<span class="comment">// Line 1201-1205</span>
+case <span class="number">2</span>: <span class="comment">// Screen</span>
+    resR = srcR + glowR - srcR * glowR;
+    resG = srcG + glowG - srcG * glowG;
+    resB = srcB + glowB - srcB * glowB;
+    resA = srcA + glowAlpha - srcA * glowAlpha;
+    break;
+    </div>
+
+    <h3>3.3 Overlay Mode (case 3)</h3>
+    <div class="mermaid">
+flowchart LR
+    subgraph OVERLAY["Overlay Blend"]
+        O1["srcA"]
+        O2["glowAlpha"]
+        O3["Screen 공식 사용"]
+        O4["srcA + glowAlpha - srcA×glowAlpha"]
+        O5["resA"]
+    end
+
+    O1 --> O4
+    O2 --> O4
+    O3 --> O4
+    O4 --> O5
+
+    style O4 fill:#4fc3f7
+    </div>
+
+    <div class="formula">
+        <strong>Overlay:</strong> resA = srcA + glowAlpha - (srcA × glowAlpha) <span style="color:#888">(Screen과 동일)</span>
+    </div>
+
+    <div class="code-block">
+<span class="comment">// Line 1208-1223</span>
+case <span class="number">3</span>: { <span class="comment">// Overlay</span>
+    <span class="comment">// RGB는 조건부 multiply/screen</span>
+    <span class="highlight">float</span> straightSrcR = (srcA > <span class="number">0.001f</span>) ? srcR / srcA : <span class="number">0.0f</span>;
+    <span class="comment">// ...</span>
+    resR = (straightSrcR < <span class="number">0.5f</span>)
+        ? <span class="number">2.0f</span> * srcR * glowR
+        : srcR + <span class="number">2.0f</span> * glowR * (<span class="number">1.0f</span> - srcR);
+    <span class="comment">// ...</span>
+
+    <span class="comment">// Alpha는 Screen 공식 사용</span>
+    resA = srcA + glowAlpha - srcA * glowAlpha;
+    break;
+}
+    </div>
+
+    <h2>4. 수치 예시</h2>
+
+    <h3>Case A: 밝은 Glow (조정 레이어)</h3>
+    <table>
+        <tr>
+            <th>변수</th>
+            <th>값</th>
+            <th>설명</th>
+        </tr>
+        <tr>
+            <td>srcA</td>
+            <td>1.0</td>
+            <td>원본 불투명</td>
+        </tr>
+        <tr>
+            <td>glowR, G, B</td>
+            <td>0.9, 0.8, 0.7</td>
+            <td>밝은 glow</td>
+        </tr>
+        <tr>
+            <td style="color:#ff9800">glowAlpha</td>
+            <td style="color:#ff9800">0.9</td>
+            <td>max(0.9, 0.8, 0.7) = 0.9</td>
+        </tr>
+        <tr>
+            <td>resA (Add)</td>
+            <td>min(1.0 + 0.9, 1.0) = <strong>1.0</strong></td>
+            <td>포화</td>
+        </tr>
+        <tr>
+            <td>resA (Screen)</td>
+            <td>1.0 + 0.9 - 0.9 = <strong>1.0</strong></td>
+            <td>포화</td>
+        </tr>
+    </table>
+
+    <h3>Case B: 어두운 Glow (텍스트 레이어)</h3>
+    <table>
+        <tr>
+            <th>변수</th>
+            <th>값</th>
+            <th>설명</th>
+        </tr>
+        <tr>
+            <td>srcA</td>
+            <td>1.0</td>
+            <td>원본 불투명</td>
+        </tr>
+        <tr>
+            <td>glowR, G, B</td>
+            <td>0.3, 0.25, 0.2</td>
+            <td>약한 glow</td>
+        </tr>
+        <tr>
+            <td style="color:#ff9800">glowAlpha</td>
+            <td style="color:#ff9800">0.3</td>
+            <td>max(0.3, 0.25, 0.2) = 0.3</td>
+        </tr>
+        <tr>
+            <td>resA (Add)</td>
+            <td>min(1.0 + 0.3, 1.0) = <strong>1.0</strong></td>
+            <td>포화</td>
+        </tr>
+        <tr>
+            <td>resA (Screen)</td>
+            <td>1.0 + 0.3 - 0.3 = <strong>1.0</strong></td>
+            <td>포화</td>
+        </tr>
+    </table>
+
+    <div class="note">
+        <strong>관찰:</strong> srcA=1.0일 때 resA는 항상 1.0으로 포화됨.<br/>
+        glowAlpha 차이는 <strong>srcA < 1.0</strong>인 경우 (투명 영역)에서만 영향.
+    </div>
+
+    <h3>Case C: 투명 영역 (Glow 확장부)</h3>
+    <table>
+        <tr>
+            <th>변수</th>
+            <th>밝은 Glow</th>
+            <th>어두운 Glow</th>
+        </tr>
+        <tr>
+            <td>srcA</td>
+            <td>0.0</td>
+            <td>0.0</td>
+        </tr>
+        <tr>
+            <td>glowAlpha</td>
+            <td style="color:#4caf50">0.9</td>
+            <td style="color:#ff5252">0.3</td>
+        </tr>
+        <tr>
+            <td>resA (Add)</td>
+            <td style="color:#4caf50"><strong>0.9</strong></td>
+            <td style="color:#ff5252"><strong>0.3</strong></td>
+        </tr>
+        <tr>
+            <td>resA (Screen)</td>
+            <td style="color:#4caf50"><strong>0.9</strong></td>
+            <td style="color:#ff5252"><strong>0.3</strong></td>
+        </tr>
+    </table>
+
+    <div class="issue">
+        <strong>핵심 차이점:</strong><br/><br/>
+        투명 영역(srcA=0)에서:<br/>
+        - 밝은 Glow → resA = <strong>0.9</strong> (불투명에 가까움)<br/>
+        - 어두운 Glow → resA = <strong>0.3</strong> (반투명)<br/><br/>
+        <strong>결과:</strong> 텍스트 레이어의 glow 확장 영역이 더 투명하게 보임
+    </div>
+
+    <h2>5. 전체 데이터 흐름</h2>
+    <div class="mermaid">
+flowchart TD
+    subgraph SOURCE["소스"]
+        SRC1["original: RGBA"]
+        SRC2["glow: RGBA (A=1.0 항상)"]
+    end
+
+    subgraph PROCESS["처리"]
+        P1["sourceOpacity 적용"]
+        P2["exposure × glowOpacity 적용"]
+        P3["glowAlpha = max(R,G,B)"]
+    end
+
+    subgraph BLEND_CALC["Blend 계산"]
+        BC1["RGB: Add/Screen/Overlay 공식"]
+        BC2["Alpha: srcA + glowAlpha 계열"]
+    end
+
+    subgraph RESULT["결과"]
+        R1["resR, resG, resB"]
+        R2["resA"]
+    end
+
+    SRC1 --> P1 --> BC1
+    SRC2 --> P2 --> P3 --> BC2
+    P1 --> BC2
+    BC1 --> R1
+    BC2 --> R2
+
+    style P3 fill:#ff5252
+    style BC2 fill:#ff9800
+    </div>
+
+    <h2>6. 코드 위치 요약</h2>
+    <div class="code-block">
+<span class="comment">// JustGlowKernels.cu - DebugOutputKernel()</span>
+
+<span class="comment">// Line 1182-1186: Source opacity 적용</span>
+<span class="highlight">float</span> srcR = origR * sourceOpacity;
+<span class="highlight">float</span> srcA = origA * sourceOpacity;
+
+<span class="comment">// Line 1188-1189: glowAlpha 추정 (핵심!)</span>
+<span class="highlight">float</span> glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), <span class="number">1.0f</span>);
+
+<span class="comment">// Line 1193-1231: Blend Mode 분기</span>
+switch (compositeMode) {
+    case <span class="number">1</span>: <span class="comment">// Add</span>
+        resA = fminf(srcA + glowAlpha, <span class="number">1.0f</span>);
+        break;
+    case <span class="number">2</span>: <span class="comment">// Screen</span>
+        resA = srcA + glowAlpha - srcA * glowAlpha;
+        break;
+    case <span class="number">3</span>: <span class="comment">// Overlay</span>
+        resA = srcA + glowAlpha - srcA * glowAlpha;
+        break;
+}
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+    </script>
+</body>
+</html>
