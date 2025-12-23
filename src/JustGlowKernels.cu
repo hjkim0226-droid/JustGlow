@@ -1190,58 +1190,54 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // 1. Estimate glow alpha from premultiplied RGB
+        // Estimate glow alpha from premultiplied RGB
         float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
 
-        // 2. Convert glow to straight (unpremultiply)
-        float straightGlowR = (glowAlpha > 0.001f) ? glowR / glowAlpha : 0.0f;
-        float straightGlowG = (glowAlpha > 0.001f) ? glowG / glowAlpha : 0.0f;
-        float straightGlowB = (glowAlpha > 0.001f) ? glowB / glowAlpha : 0.0f;
-
-        // 3. Blend using straight glow
-        // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
+        // Blend premultiplied glow with premultiplied src
+        // Alpha uses same blend formula as RGB
         switch (compositeMode) {
-            case 1: { // Add - additive blending (standard glow)
-                resR = srcR + straightGlowR;
-                resG = srcG + straightGlowG;
-                resB = srcB + straightGlowB;
+            case 1: { // Add
+                resR = srcR + glowR;
+                resG = srcG + glowG;
+                resB = srcB + glowB;
+                resA = srcA + glowAlpha;
                 break;
             }
 
-            case 2: { // Screen - formula: A + B - A*B
-                resR = srcR + straightGlowR - srcR * straightGlowR;
-                resG = srcG + straightGlowG - srcG * straightGlowG;
-                resB = srcB + straightGlowB - srcB * straightGlowB;
+            case 2: { // Screen: A + B - A*B
+                resR = srcR + glowR - srcR * glowR;
+                resG = srcG + glowG - srcG * glowG;
+                resB = srcB + glowB - srcB * glowB;
+                resA = srcA + glowAlpha - srcA * glowAlpha;
                 break;
             }
 
-            case 3: { // Overlay - conditional multiply/screen
+            case 3: { // Overlay
                 float straightSrcR = (srcA > 0.001f) ? srcR / srcA : 0.0f;
                 float straightSrcG = (srcA > 0.001f) ? srcG / srcA : 0.0f;
                 float straightSrcB = (srcA > 0.001f) ? srcB / srcA : 0.0f;
 
                 resR = (straightSrcR < 0.5f)
-                    ? 2.0f * srcR * straightGlowR
-                    : srcR + 2.0f * straightGlowR * (1.0f - srcR);
+                    ? 2.0f * srcR * glowR
+                    : srcR + 2.0f * glowR * (1.0f - srcR);
                 resG = (straightSrcG < 0.5f)
-                    ? 2.0f * srcG * straightGlowG
-                    : srcG + 2.0f * straightGlowG * (1.0f - srcG);
+                    ? 2.0f * srcG * glowG
+                    : srcG + 2.0f * glowG * (1.0f - srcG);
                 resB = (straightSrcB < 0.5f)
-                    ? 2.0f * srcB * straightGlowB
-                    : srcB + 2.0f * straightGlowB * (1.0f - srcB);
+                    ? 2.0f * srcB * glowB
+                    : srcB + 2.0f * glowB * (1.0f - srcB);
+                resA = srcA + glowAlpha - srcA * glowAlpha;  // Screen for alpha
                 break;
             }
 
             default: { // Fallback to Add
-                resR = srcR + straightGlowR;
-                resG = srcG + straightGlowG;
-                resB = srcB + straightGlowB;
+                resR = srcR + glowR;
+                resG = srcG + glowG;
+                resB = srcB + glowB;
+                resA = srcA + glowAlpha;
                 break;
             }
         }
-
-        // 4. Alpha: Over formula
-        resA = glowAlpha + srcA * (1.0f - glowAlpha);
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
