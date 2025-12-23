@@ -328,7 +328,7 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_SPREAD_DOWN);
 
-    // Spread Up (1-5) - Upsample offset at max MIP level
+    // Spread Up (0-10) - Upsample offset at max MIP level
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
         "Spread Up",
@@ -341,6 +341,34 @@ PF_Err ParamsSetup(
         0,
         0,
         DISK_ID_SPREAD_UP);
+
+    // Offset Down (0-3) - Downsample base offset
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Offset Down",
+        Ranges::OffsetMin,
+        Ranges::OffsetMax,
+        Ranges::OffsetMin,
+        Ranges::OffsetMax,
+        Defaults::OffsetDown,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_OFFSET_DOWN);
+
+    // Offset Up (0-3) - Upsample base offset
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Offset Up",
+        Ranges::OffsetMin,
+        Ranges::OffsetMax,
+        Ranges::OffsetMin,
+        Ranges::OffsetMax,
+        Defaults::OffsetUp,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_OFFSET_UP);
 
     // Falloff (0-100) - Decay rate per level
     AEFX_CLR_STRUCT(def);
@@ -941,11 +969,23 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->spreadDown = param.u.fs_d.value;
 
-        // Spread Up (1-5)
+        // Spread Up (0-10)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_SPREAD_UP, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->spreadUp = param.u.fs_d.value;
+
+        // Offset Down (0-3)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_OFFSET_DOWN, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->offsetDown = param.u.fs_d.value;
+
+        // Offset Up (0-3)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_OFFSET_UP, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->offsetUp = param.u.fs_d.value;
 
         // Falloff (0-100)
         AEFX_CLR_STRUCT(param);
@@ -1267,8 +1307,8 @@ PF_Err SmartRender(
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);
                     rp.spreadDown = preRenderData->spreadDown;  // 0-10 direct
                     rp.spreadUp = preRenderData->spreadUp;      // 0-10 direct
-                    rp.offsetDown = 1.0f;  // Base offset for downsample (TODO: add UI param)
-                    rp.offsetUp = 1.0f;    // Base offset for upsample (TODO: add UI param)
+                    rp.offsetDown = preRenderData->offsetDown;  // 0-3 direct
+                    rp.offsetUp = preRenderData->offsetUp;      // 0-3 direct
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;
