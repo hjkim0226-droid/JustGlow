@@ -79,10 +79,10 @@ enum ParamID {
     PARAM_INTENSITY,            // Level 1 starting weight (0-100%) → core concentration
     PARAM_EXPOSURE,             // Brightness multiplier (0-50) → final glow brightness
     PARAM_RADIUS,               // Glow reach distance (0-200) → controls active MIP levels
-    PARAM_SPREAD_DOWN,          // Downsample spread (0-10) → added to offset at max MIP level
-    PARAM_SPREAD_UP,            // Upsample spread (0-10) → added to offset at max MIP level
-    PARAM_OFFSET_DOWN,          // Downsample base offset (0-3) → base sampling distance
-    PARAM_OFFSET_UP,            // Upsample base offset (0-3) → base sampling distance
+    PARAM_SPREAD_DOWN,          // Downsample spread (-10 to 10) → added to offset at max MIP level
+    PARAM_SPREAD_UP,            // Upsample spread (-10 to 10) → added to offset at max MIP level
+    PARAM_OFFSET_DOWN,          // Downsample base offset (0-10) → base sampling distance
+    PARAM_OFFSET_UP,            // Upsample base offset (0-10) → base sampling distance
     PARAM_FALLOFF,              // Decay rate per level (0-100) → weight decay
     PARAM_THRESHOLD,            // Brightness threshold (0-100%)
     PARAM_SOFT_KNEE,            // Soft knee width (0-100%)
@@ -250,11 +250,11 @@ namespace Ranges {
     constexpr float RadiusMin       = 0.0f;
     constexpr float RadiusMax       = 100.0f;   // 100% = all MIP levels active
 
-    constexpr float SpreadMin       = 0.0f;
-    constexpr float SpreadMax       = 10.0f;    // Offset at max MIP level (0-10)
+    constexpr float SpreadMin       = -10.0f;
+    constexpr float SpreadMax       = 10.0f;    // Spread at max MIP level (-10 to 10)
 
     constexpr float OffsetMin       = 0.0f;
-    constexpr float OffsetMax       = 3.0f;     // Base offset (0-3)
+    constexpr float OffsetMax       = 10.0f;    // Base offset (0-10)
 
     constexpr float FalloffMin      = 0.0f;
     constexpr float FalloffMax      = 100.0f;   // 0=boost, 50=neutral, 100=decay
@@ -316,10 +316,10 @@ struct JustGlowPreRenderData {
     float intensity;    // 0-100: Level 1 starting weight (core concentration)
     float exposure;     // 0-50: Brightness multiplier (final glow brightness)
     float radius;       // 0-200: controls active MIP levels
-    float spreadDown;   // 0-10: downsample spread at max MIP level
-    float spreadUp;     // 0-10: upsample spread at max MIP level
-    float offsetDown;   // 0-3: downsample base offset
-    float offsetUp;     // 0-3: upsample base offset
+    float spreadDown;   // -10 to 10: downsample spread at max MIP level
+    float spreadUp;     // -10 to 10: upsample spread at max MIP level
+    float offsetDown;   // 0-10: downsample base offset
+    float offsetUp;     // 0-10: upsample base offset
     float falloff;      // 0-100: decay rate per level
     float threshold;    // 0-100: brightness threshold
     float softKnee;     // 0-100: soft knee width
