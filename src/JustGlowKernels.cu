@@ -137,14 +137,11 @@ __device__ __forceinline__ void unpremultiply(float& r, float& g, float& b, floa
 }
 
 // Calculate weight based on level, falloff, and intensity
-// Level 0: always 100%
-// Level 1: level1Weight (controlled by Intensity parameter, 50%-100%)
-// Level 2+: level1Weight * pow(decayRate, level-1)
+// Level 0: level1Weight (controlled by Intensity parameter)
+// Level 1: level1Weight * decayRate
+// Level N: level1Weight * pow(decayRate, N)
 // Falloff: 0%=boost outer, 50%=neutral, 100%=decay to core
 __device__ __forceinline__ float calculatePhysicalWeight(float level, float falloff, int falloffType, float level1Weight) {
-    // Level 0 is always 100%
-    if (level < 0.5f) return 1.0f;
-
     // Calculate decayRate from Falloff (0-100, 50=neutral)
     // Symmetric around neutral: decayRate = 1.0 - normalizedFalloff * 0.5
     // Falloff 0%   -> decayRate 1.5  (boost outer levels)
@@ -153,9 +150,9 @@ __device__ __forceinline__ float calculatePhysicalWeight(float level, float fall
     float normalizedFalloff = (falloff - 50.0f) / 50.0f;  // -1 to 1
     float decayRate = 1.0f - normalizedFalloff * 0.5f;    // 0.5 to 1.5
 
-    // Level 1 starts at level1Weight, then multiplies by decayRate per level
-    // weight = level1Weight * pow(decayRate, level - 1)
-    float weight = level1Weight * powf(decayRate, level - 1.0f);
+    // Level 0 starts at level1Weight, then multiplies by decayRate per level
+    // weight = level1Weight * pow(decayRate, level)
+    float weight = level1Weight * powf(decayRate, level);
 
     return fmaxf(0.0f, weight);
 }
@@ -513,7 +510,7 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float spreadDown, int level, int maxLevels)
+    float offsetDown, float spreadDown, int level, int maxLevels)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -528,10 +525,10 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     float texelX = 1.0f / (float)srcWidth;
     float texelY = 1.0f / (float)srcHeight;
 
-    // Dynamic offset: 1.0 at level 0, 1.0 + spreadDown at max level
-    // spreadDown range: 0-10
+    // Dynamic offset: offsetDown at level 0, offsetDown + spreadDown at max level
+    // offsetDown: base offset (default 1.0), spreadDown: 0-10
     float levelRatio = (float)level / fmaxf((float)(maxLevels - 1), 1.0f);
-    float offset = 1.0f + spreadDown * levelRatio;
+    float offset = offsetDown + spreadDown * levelRatio;
 
     // 3×3 Gaussian weights: [1,2,1; 2,4,2; 1,2,1] / 16
     const float wCenter = 4.0f / 16.0f;    // 0.25
@@ -821,7 +818,8 @@ extern "C" __global__ void UpsampleKernel(
     int srcWidth, int srcHeight, int srcPitch,
     int prevWidth, int prevHeight, int prevPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float spreadUp,    // 0-1: dynamic offset (1.0 at level 0, 1.0+spreadUp at max level)
+    float offsetUp,    // base offset (default 1.0)
+    float spreadUp,    // 0-10: added to base offset at max level
     int levelIndex,
     float activeLimit,  // now 0-1 (radius / 100)
     float decayK,
@@ -844,17 +842,17 @@ extern "C" __global__ void UpsampleKernel(
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
     // 9-Tap Discrete Gaussian (3x3 pattern)
-    // Dynamic offset based on spreadUp: 1.0 at level 0, 1.0+spreadUp at max level
+    // Dynamic offset: offsetUp at level 0, offsetUp+spreadUp at max level
     // Weights: Center=4/16, Cross=2/16, Diagonal=1/16 (total=16)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
-        // Dynamic offset: 1.0 at level 0, 1.0 + spreadUp at max level
-        // spreadUp range: 0-10
+        // Dynamic offset: offsetUp at level 0, offsetUp + spreadUp at max level
+        // offsetUp: base offset (default 1.0), spreadUp: 0-10
         float levelRatio = (float)levelIndex / fmaxf((float)(maxLevels - 1), 1.0f);
-        float offset = 1.0f + spreadUp * levelRatio;
+        float offset = offsetUp + spreadUp * levelRatio;
 
         // =========================================
         // 9-Tap Discrete Gaussian (3x3 pattern)

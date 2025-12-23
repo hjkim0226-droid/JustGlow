@@ -1265,8 +1265,10 @@ PF_Err SmartRender(
                     rp.exposure = preRenderData->exposure;
                     rp.level1Weight = preRenderData->level1Weight;
                     rp.falloffType = static_cast<int>(preRenderData->falloffType);
-                    rp.spreadDown = preRenderData->spreadDown;  // 1-5 direct
-                    rp.spreadUp = preRenderData->spreadUp;      // 1-5 direct
+                    rp.spreadDown = preRenderData->spreadDown;  // 0-10 direct
+                    rp.spreadUp = preRenderData->spreadUp;      // 0-10 direct
+                    rp.offsetDown = 1.0f;  // Base offset for downsample (TODO: add UI param)
+                    rp.offsetUp = 1.0f;    // Base offset for upsample (TODO: add UI param)
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;

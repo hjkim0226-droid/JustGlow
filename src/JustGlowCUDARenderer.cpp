@@ -618,13 +618,14 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         int srcPitchPixels = srcMip.width;
         int dstPitchPixels = dstMip.width;
 
-        // Dynamic offset: 1.0 at level 0, 1.0 + spreadDown at max level
+        // Dynamic offset: offsetDown at level 0, offsetDown + spreadDown at max level
+        float offsetDown = params.offsetDown;
         float spreadDown = params.spreadDown;
         int level = i;
         int maxLevels = params.mipLevels;
 
-        CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad, spreadDown=%.2f)",
-            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, spreadDown);
+        CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad, offset=%.2f, spread=%.2f)",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, offsetDown, spreadDown);
 
         void* kernelParams[] = {
             &srcMip.devicePtr,
@@ -635,6 +636,7 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
             (void*)&dstMip.width,
             (void*)&dstMip.height,
             (void*)&dstPitchPixels,
+            (void*)&offsetDown,
             (void*)&spreadDown,
             (void*)&level,
             (void*)&maxLevels
@@ -681,7 +683,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int gridX = (dstUpsample.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
         int gridY = (dstUpsample.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-        // spreadUp: 0-1 for dynamic offset calculation in kernel
+        // offsetUp + spreadUp for dynamic offset calculation in kernel
+        float offsetUp = params.offsetUp;
         float spreadUp = params.spreadUp;
 
         // Level index for weight calculation
@@ -703,8 +706,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         // blurMode is ignored by kernel (always uses 9-tap Discrete Gaussian)
         int blurMode = 0;
 
-        CUDA_LOG("Upsample[%d]: 9-tap Discrete Gaussian %dx%d -> %dx%d (spreadUp=%.2f)",
-            i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, spreadUp);
+        CUDA_LOG("Upsample[%d]: 9-tap Discrete Gaussian %dx%d -> %dx%d (offset=%.2f, spread=%.2f)",
+            i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, offsetUp, spreadUp);
 
         int srcPitchPixels = currMip.width;
         int dstPitchPixels = dstUpsample.width;
@@ -726,6 +729,7 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             (void*)&dstUpsample.width,
             (void*)&dstUpsample.height,
             (void*)&dstPitchPixels,
+            (void*)&offsetUp,
             (void*)&spreadUp,
             (void*)&levelIndex,
             (void*)&activeLimit,

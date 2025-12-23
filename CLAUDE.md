@@ -10,9 +10,9 @@ JustGlow is a GPU-accelerated glow effect plugin for Adobe After Effects.
 - **Windows:** DirectX 12 (기본) + CUDA (선택)
 - **macOS:** Metal (계획됨)
 
-**Core Algorithm:** Dual Kawase blur with:
+**Core Algorithm:** Multi-level Gaussian blur with:
 - 13-tap prefilter with ZeroPad (HDR firefly prevention)
-- 9-tap 2D Gaussian downsample (Level 0-4) + 5-tap Kawase (Level 5+), all ZeroPad
+- 9-tap 2D Gaussian downsample (all levels, ZeroPad)
 - 9-tap tent upsample with falloff-based blending (physical light decay)
 - Dynamic MIP levels (up to 12, until min dimension < 16px)
 
@@ -44,7 +44,7 @@ cmake --install build
 
 **GPU Rendering Pipeline:**
 1. Prefilter → soft threshold + ZeroPad sampling + sRGB→Linear
-2. Downsample chain → creates MIP pyramid (Level 0-4: 2D Gaussian, 5+: Kawase, all ZeroPad)
+2. Downsample chain → creates MIP pyramid (9-tap 2D Gaussian, all levels, ZeroPad)
 3. Upsample chain → reconstructs with progressive blur blending
 4. Composite → blends glow with original (Add/Screen/Overlay modes)
 
@@ -61,10 +61,10 @@ cmake --install build
 
 **커널 목록:**
 - `PrefilterKernel` - 13-tap + Soft Threshold + ZeroPad
-- `Gaussian2DDownsampleKernel` - 9-tap 2D Gaussian + ZeroPad (Level 0-4)
-- `DownsampleKernel` - Dual Kawase 5-tap + ZeroPad (Level 5+)
+- `Gaussian2DDownsampleKernel` - 9-tap 2D Gaussian + ZeroPad (all levels)
 - `UpsampleKernel` - 9-tap Tent + Falloff
 - `DebugOutputKernel` - 디버그 뷰 및 최종 합성
+- `DownsampleKernel` - (미사용, Kawase 5-tap - flickering 이슈로 제거됨)
 
 **버퍼 구조:**
 - `m_mipChain[]` - 다운샘플 결과 저장
@@ -133,10 +133,9 @@ cmake --install build
 ## Key Techniques
 
 1. **ZeroPad Sampling:** All downsampling uses ZeroPad (out-of-bounds = 0) for consistent glow across different buffer sizes. Prevents edge energy concentration that caused brightness differences between Adjustment and Text layers.
-2. **2D Gaussian Downsample:** Single-pass 9-tap 2D Gaussian replaces separable H+V for Level 0-4. No temp buffer needed, no H→V sync required.
-3. **X/+ Rotation:** Alternates diagonal (X) and cross (+) sampling patterns during Kawase downsample (Level 5+) to break boxy artifacts → rounder glow
-4. **Dynamic MIP Levels:** Ultra quality goes to 12 levels (until 16px), providing Deep Glow-like "atmosphere" feel
-5. **Falloff Blending:** `levelWeight = pow(falloff, level)` during upsample for physical light decay
+2. **9-tap 2D Gaussian Downsample:** Single-pass 9-tap 2D Gaussian for all levels. No temp buffer needed, no H→V sync required. Temporally stable (no flickering on subpixel movement).
+3. **Dynamic MIP Levels:** Ultra quality goes to 12 levels (until 16px), providing Deep Glow-like "atmosphere" feel
+4. **Falloff Blending:** `levelWeight = pow(falloff, level)` during upsample for physical light decay
 
 ## 알려진 이슈
 
