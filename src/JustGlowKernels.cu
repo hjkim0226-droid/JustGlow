@@ -418,18 +418,38 @@ extern "C" __global__ void PrefilterKernel(
     sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
 
     // =========================================
-    // Weighted Average (kernel weights only)
+    // Weighted Average using Gaussian kernel
     // Input is premultiplied, so RGB already contains alpha info
     // =========================================
     (void)useHDR;  // Suppress unused parameter warning
 
-    // Kernel weights for 13-tap sampling (normalized to sum = 1.0):
-    // Center G: 4/11, Inner DEIJ: 1/11 each (4/11 total), Outer cross BFHL: 1/22 each (2/11 total), Corners ACKM: 1/44 each (1/11 total)
-    // Previous weights summed to 0.34375, causing ~66% brightness loss
-    const float wCenter = 4.0f / 11.0f;      // 0.3636
-    const float wInner = 1.0f / 11.0f;       // 0.0909
-    const float wCross = 1.0f / 22.0f;       // 0.0455
-    const float wCorner = 1.0f / 44.0f;      // 0.0227
+    // Gaussian kernel weights: weight = exp(-d² / (2σ²))
+    // σ = outerOffset * 0.85 provides good coverage for 13-tap pattern
+    // Weights calculated based on actual sample distances
+    float sigma = outerOffset * 0.85f;
+    float sigma2x2 = 2.0f * sigma * sigma;
+
+    // Distance² for each sample group:
+    // Center (0,0): d² = 0
+    // Inner corners (±inner, ±inner): d² = 2 * inner²
+    // Outer cross (±outer, 0): d² = outer²
+    // Outer corners (±outer, ±outer): d² = 2 * outer²
+    float innerDist2 = 2.0f * innerOffset * innerOffset;
+    float crossDist2 = outerOffset * outerOffset;
+    float cornerDist2 = 2.0f * outerOffset * outerOffset;
+
+    // Gaussian weights (unnormalized)
+    float wCenter_raw = 1.0f;  // exp(0) = 1
+    float wInner_raw = expf(-innerDist2 / sigma2x2);
+    float wCross_raw = expf(-crossDist2 / sigma2x2);
+    float wCorner_raw = expf(-cornerDist2 / sigma2x2);
+
+    // Normalize so sum = 1.0
+    float wSum = wCenter_raw + 4.0f * wInner_raw + 4.0f * wCross_raw + 4.0f * wCorner_raw;
+    float wCenter = wCenter_raw / wSum;
+    float wInner = wInner_raw / wSum;
+    float wCross = wCross_raw / wSum;
+    float wCorner = wCorner_raw / wSum;
 
     // Simple weighted average of premultiplied RGB
     // Zero-padded samples contribute 0, which is correct for blur (light spreads into empty space)
