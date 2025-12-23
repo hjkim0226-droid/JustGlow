@@ -1232,9 +1232,9 @@ extern "C" __global__ void DebugOutputKernel(
             }
         }
 
-        // Estimate alpha from blended result RGB, then add source alpha
+        // Estimate alpha from blended result RGB, take max with source alpha
         float resultAlpha = fminf(fmaxf(fmaxf(resR, resG), resB), 1.0f);
-        resA = fminf(srcA + resultAlpha, 1.0f);
+        resA = fmaxf(srcA, resultAlpha);
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
