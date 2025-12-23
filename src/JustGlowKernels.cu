@@ -437,6 +437,11 @@ extern "C" __global__ void PrefilterKernel(
     float sumB = Gb * wCenter + (Db + Eb + Ib + Jb) * wInner + (Bb + Fb + Hb + Lb) * wCross + (Ab + Cb + Kb + Mb) * wCorner;
     float sumA = Ga * wCenter + (Da + Ea + Ia + Ja) * wInner + (Ba + Fa + Ha + La) * wCross + (Aa + Ca + Ka + Ma) * wCorner;
 
+    // Clamp to 1.0 for consistency (text layer vs adjustment layer)
+    sumR = fminf(sumR, 1.0f);
+    sumG = fminf(sumG, 1.0f);
+    sumB = fminf(sumB, 1.0f);
+
     // =========================================
     // Color Space Conversion
     // OFF: Premultiplied sRGB/Rec709/Gamma2.2 유지
@@ -1185,14 +1190,17 @@ extern "C" __global__ void DebugOutputKernel(
         float srcB = origB * sourceOpacity;
         float srcA = origA * sourceOpacity;
 
-        // Composite based on mode (use glowA directly, no estimation)
+        // Estimate glow alpha from RGB (premultiplied: alpha >= max(R,G,B))
+        float glowAlpha = fminf(fmaxf(fmaxf(glowR, glowG), glowB), 1.0f);
+
+        // Composite based on mode
         // Note: Case values match CompositeMode enum (1=Add, 2=Screen, 3=Overlay)
         switch (compositeMode) {
             case 1: { // Add - additive blending (standard glow)
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                resA = fminf(srcA + glowA, 1.0f);
+                resA = fminf(srcA + glowAlpha, 1.0f);
                 break;
             }
 
@@ -1200,7 +1208,7 @@ extern "C" __global__ void DebugOutputKernel(
                 resR = srcR + glowR - srcR * glowR;
                 resG = srcG + glowG - srcG * glowG;
                 resB = srcB + glowB - srcB * glowB;
-                resA = srcA + glowA - srcA * glowA;
+                resA = srcA + glowAlpha - srcA * glowAlpha;
                 break;
             }
 
@@ -1218,7 +1226,7 @@ extern "C" __global__ void DebugOutputKernel(
                 resB = (straightSrcB < 0.5f)
                     ? 2.0f * srcB * glowB
                     : srcB + 2.0f * glowB * (1.0f - srcB);
-                resA = srcA + glowA - srcA * glowA;
+                resA = srcA + glowAlpha - srcA * glowAlpha;
                 break;
             }
 
@@ -1226,7 +1234,7 @@ extern "C" __global__ void DebugOutputKernel(
                 resR = srcR + glowR;
                 resG = srcG + glowG;
                 resB = srcB + glowB;
-                resA = fminf(srcA + glowA, 1.0f);
+                resA = fminf(srcA + glowAlpha, 1.0f);
                 break;
             }
         }
