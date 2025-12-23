@@ -384,6 +384,15 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_OFFSET_PREFILTER);
 
+    // Prefilter Quality - blur algorithm selection
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_POPUP(
+        "Prefilter Quality",
+        4,  // Number of choices
+        Defaults::PrefilterQuality,
+        "13-tap Star (Fast)|25-tap Grid|Separable 5+5|Separable 9+9 (HQ)",
+        DISK_ID_PREFILTER_QUALITY);
+
     // Falloff (0-100) - Decay rate per level
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX(
@@ -1007,6 +1016,12 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->offsetPrefilter = param.u.fs_d.value;
 
+        // Prefilter Quality
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_PREFILTER_QUALITY, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->prefilterQuality = static_cast<PrefilterQuality>(param.u.pd.value);
+
         // Falloff (0-100)
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_FALLOFF, in_data->current_time,
@@ -1330,6 +1345,7 @@ PF_Err SmartRender(
                     rp.offsetDown = preRenderData->offsetDown;  // 0-10 direct
                     rp.offsetUp = preRenderData->offsetUp;      // 0-10 direct
                     rp.offsetPrefilter = preRenderData->offsetPrefilter;  // 0-10 direct
+                    rp.prefilterQuality = static_cast<int>(preRenderData->prefilterQuality);
 
                     // Threshold
                     rp.threshold = preRenderData->threshold;
@@ -1373,8 +1389,8 @@ PF_Err SmartRender(
                     rp.inputHeight = input_worldP->height;
                     rp.mipLevels = preRenderData->mipLevels;
 
-                    PLUGIN_LOG("SmartRender: output=%dx%d, input=%dx%d, srcPitch=%d, dstPitch=%d",
-                        rp.width, rp.height, rp.inputWidth, rp.inputHeight, rp.srcPitch, rp.dstPitch);
+                    PLUGIN_LOG("SmartRender: output=%dx%d, input=%dx%d, srcPitch=%d, dstPitch=%d, debugView=%d",
+                        rp.width, rp.height, rp.inputWidth, rp.inputHeight, rp.srcPitch, rp.dstPitch, rp.debugView);
                     PLUGIN_LOG("SmartRender DEBUG: input_world=%dx%d (rowbytes=%d), output_world=%dx%d (rowbytes=%d)",
                         input_worldP->width, input_worldP->height, input_worldP->rowbytes,
                         output_worldP->width, output_worldP->height, output_worldP->rowbytes);

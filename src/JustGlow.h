@@ -84,6 +84,7 @@ enum ParamID {
     PARAM_OFFSET_DOWN,          // Downsample base offset (0-10) → base sampling distance
     PARAM_OFFSET_UP,            // Upsample base offset (0-10) → base sampling distance
     PARAM_OFFSET_PREFILTER,     // Prefilter offset (0-10) → prefilter sampling distance
+    PARAM_PREFILTER_QUALITY,    // Prefilter quality (13-tap/25-tap/Sep5/Sep9)
     PARAM_FALLOFF,              // Decay rate per level (0-100) → weight decay
     PARAM_THRESHOLD,            // Brightness threshold (0-100%)
     PARAM_SOFT_KNEE,            // Soft knee width (0-100%)
@@ -127,6 +128,7 @@ enum ParamDiskID {
     DISK_ID_OFFSET_DOWN,
     DISK_ID_OFFSET_UP,
     DISK_ID_OFFSET_PREFILTER,
+    DISK_ID_PREFILTER_QUALITY,
     DISK_ID_FALLOFF,
     DISK_ID_THRESHOLD,
     DISK_ID_SOFT_KNEE,
@@ -179,6 +181,14 @@ enum class InputProfile : int {
     Gamma22 = 3     // Pure gamma 2.2
 };
 
+// Prefilter quality modes
+enum class PrefilterQuality : int {
+    Star13 = 1,     // 13-tap star pattern (current, fast)
+    Grid25 = 2,     // 25-tap 5x5 discrete Gaussian (quality)
+    Sep5 = 3,       // Separable 5+5 tap (10 total, balanced)
+    Sep9 = 4        // Separable 9+9 tap (18 total, high quality)
+};
+
 // Debug view modes for visualizing pipeline stages
 // Down0 removed (same as Prefilter, which shows MIP[0])
 enum class DebugViewMode : int {
@@ -214,6 +224,7 @@ namespace Defaults {
     constexpr float OffsetDown      = 1.0f;     // 1.0 = standard base offset
     constexpr float OffsetUp        = 1.0f;     // 1.0 = standard base offset
     constexpr float OffsetPrefilter = 1.0f;     // 1.0 = standard prefilter offset
+    constexpr int   PrefilterQuality = static_cast<int>(::PrefilterQuality::Star13);  // Fast default
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
     constexpr float Threshold       = 25.0f;    // 25% - lower threshold for more glow
     constexpr float SoftKnee        = 75.0f;    // 75% - softer threshold transition
@@ -324,6 +335,7 @@ struct JustGlowPreRenderData {
     float offsetDown;   // 0-10: downsample base offset
     float offsetUp;     // 0-10: upsample base offset
     float offsetPrefilter; // 0-10: prefilter sampling offset
+    PrefilterQuality prefilterQuality;  // Prefilter blur quality mode
     float falloff;      // 0-100: decay rate per level
     float threshold;    // 0-100: brightness threshold
     float softKnee;     // 0-100: soft knee width

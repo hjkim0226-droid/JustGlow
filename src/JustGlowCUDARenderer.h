@@ -55,6 +55,11 @@ private:
     // CUDA modules and kernels
     CUmodule m_module;
     CUfunction m_prefilterKernel;
+    CUfunction m_prefilter25TapKernel;
+    CUfunction m_prefilterSep5HKernel;
+    CUfunction m_prefilterSep5VKernel;
+    CUfunction m_prefilterSep9HKernel;
+    CUfunction m_prefilterSep9VKernel;
     CUfunction m_downsampleKernel;
     CUfunction m_upsampleKernel;
     CUfunction m_compositeKernel;
@@ -74,6 +79,8 @@ private:
     CUDAMipBuffer m_horizontalTemp;
     // Temp buffer for Gaussian downsample H-blur (source resolution)
     CUDAMipBuffer m_gaussianDownsampleTemp;
+    // Temp buffer for separable prefilter H-pass
+    CUDAMipBuffer m_prefilterSepTemp;
     int m_currentMipLevels;
     int m_currentWidth;
     int m_currentHeight;

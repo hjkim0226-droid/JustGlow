@@ -523,6 +523,493 @@ extern "C" __global__ void PrefilterKernel(
 }
 
 // ============================================================================
+// Prefilter 25-Tap (5x5 Discrete Gaussian)
+// True Gaussian kernel on regular grid for highest quality
+// ============================================================================
+
+extern "C" __global__ void Prefilter25TapKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch,
+    int inputWidth, int inputHeight,
+    float threshold, float softKnee, float intensity,
+    float colorR, float colorG, float colorB,
+    float colorTempR, float colorTempG, float colorTempB,
+    float preserveColor, int useHDR, int useLinear, int inputProfile,
+    float offsetPrefilter)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    int offsetX = (dstWidth - inputWidth) / 2;
+    int offsetY = (dstHeight - inputHeight) / 2;
+
+    float srcX = (float)x - (float)offsetX;
+    float srcY = (float)y - (float)offsetY;
+
+    float u = (srcX + 0.5f) / (float)inputWidth;
+    float v = (srcY + 0.5f) / (float)inputHeight;
+
+    float texelX = 1.0f / (float)inputWidth;
+    float texelY = 1.0f / (float)inputHeight;
+
+    // 5x5 Gaussian kernel with adjustable offset
+    // Standard weights: σ ≈ 1.0
+    // [1  4  6  4 1]
+    // [4 16 24 16 4]
+    // [6 24 36 24 6] / 256
+    // [4 16 24 16 4]
+    // [1  4  6  4 1]
+    const float w0 = 1.0f / 256.0f;   // corners
+    const float w1 = 4.0f / 256.0f;   // edge
+    const float w2 = 6.0f / 256.0f;   // edge center
+    const float w3 = 16.0f / 256.0f;  // inner corner
+    const float w4 = 24.0f / 256.0f;  // inner edge
+    const float w5 = 36.0f / 256.0f;  // center
+
+    float offset1 = 1.0f * offsetPrefilter;
+    float offset2 = 2.0f * offsetPrefilter;
+
+    float sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+    float r, g, b, a;
+
+    // Row -2
+    sampleBilinearZeroPad(input, u - offset2*texelX, v - offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+    sampleBilinearZeroPad(input, u - offset1*texelX, v - offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u, v - offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+    sampleBilinearZeroPad(input, u + offset1*texelX, v - offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u + offset2*texelX, v - offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+
+    // Row -1
+    sampleBilinearZeroPad(input, u - offset2*texelX, v - offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u - offset1*texelX, v - offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinearZeroPad(input, u, v - offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w4; sumG += g*w4; sumB += b*w4; sumA += a*w4;
+    sampleBilinearZeroPad(input, u + offset1*texelX, v - offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinearZeroPad(input, u + offset2*texelX, v - offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+
+    // Row 0 (center)
+    sampleBilinearZeroPad(input, u - offset2*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+    sampleBilinearZeroPad(input, u - offset1*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w4; sumG += g*w4; sumB += b*w4; sumA += a*w4;
+    sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w5; sumG += g*w5; sumB += b*w5; sumA += a*w5;
+    sampleBilinearZeroPad(input, u + offset1*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w4; sumG += g*w4; sumB += b*w4; sumA += a*w4;
+    sampleBilinearZeroPad(input, u + offset2*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+
+    // Row +1
+    sampleBilinearZeroPad(input, u - offset2*texelX, v + offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u - offset1*texelX, v + offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinearZeroPad(input, u, v + offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w4; sumG += g*w4; sumB += b*w4; sumA += a*w4;
+    sampleBilinearZeroPad(input, u + offset1*texelX, v + offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinearZeroPad(input, u + offset2*texelX, v + offset1*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+
+    // Row +2
+    sampleBilinearZeroPad(input, u - offset2*texelX, v + offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+    sampleBilinearZeroPad(input, u - offset1*texelX, v + offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u, v + offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+    sampleBilinearZeroPad(input, u + offset1*texelX, v + offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u + offset2*texelX, v + offset2*texelY, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+
+    // Clamp
+    sumR = fminf(sumR, 1.0f);
+    sumG = fminf(sumG, 1.0f);
+    sumB = fminf(sumB, 1.0f);
+
+    // Color space conversion (same as 13-tap)
+    float resR, resG, resB;
+    (void)useHDR;
+
+    if (useLinear) {
+        float straightR, straightG, straightB;
+        if (sumA > 0.001f) {
+            straightR = sumR / sumA;
+            straightG = sumG / sumA;
+            straightB = sumB / sumA;
+        } else {
+            straightR = straightG = straightB = 0.0f;
+        }
+        straightR = toLinear(straightR, inputProfile);
+        straightG = toLinear(straightG, inputProfile);
+        straightB = toLinear(straightB, inputProfile);
+        resR = straightR * sumA;
+        resG = straightG * sumA;
+        resB = straightB * sumA;
+    } else {
+        resR = sumR;
+        resG = sumG;
+        resB = sumB;
+    }
+
+    softThreshold(resR, resG, resB, threshold, softKnee);
+
+    // Desaturation
+    float brightness = fmaxf(fmaxf(resR, resG), resB);
+    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
+    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    resR = resR + (lum - resR) * desatAmount;
+    resG = resG + (lum - resG) * desatAmount;
+    resB = resB + (lum - resB) * desatAmount;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = resR;
+    output[outIdx + 1] = resG;
+    output[outIdx + 2] = resB;
+    output[outIdx + 3] = sumA;
+}
+
+// ============================================================================
+// Prefilter Separable 5-tap Horizontal
+// First pass of separable Gaussian blur
+// ============================================================================
+
+extern "C" __global__ void PrefilterSep5HKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch,
+    int inputWidth, int inputHeight,
+    float offsetPrefilter)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    int offsetX = (dstWidth - inputWidth) / 2;
+    int offsetY = (dstHeight - inputHeight) / 2;
+
+    float srcX = (float)x - (float)offsetX;
+    float srcY = (float)y - (float)offsetY;
+
+    float u = (srcX + 0.5f) / (float)inputWidth;
+    float v = (srcY + 0.5f) / (float)inputHeight;
+
+    float texelX = 1.0f / (float)inputWidth;
+
+    // 5-tap Gaussian: [1, 4, 6, 4, 1] / 16
+    const float w0 = 1.0f / 16.0f;
+    const float w1 = 4.0f / 16.0f;
+    const float w2 = 6.0f / 16.0f;
+
+    float offset1 = 1.0f * offsetPrefilter;
+    float offset2 = 2.0f * offsetPrefilter;
+
+    float r0, g0, b0, a0, r1, g1, b1, a1, r2, g2, b2, a2, r3, g3, b3, a3, r4, g4, b4, a4;
+
+    sampleBilinearZeroPad(input, u - offset2*texelX, v, inputWidth, inputHeight, srcPitch, r0, g0, b0, a0);
+    sampleBilinearZeroPad(input, u - offset1*texelX, v, inputWidth, inputHeight, srcPitch, r1, g1, b1, a1);
+    sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, r2, g2, b2, a2);
+    sampleBilinearZeroPad(input, u + offset1*texelX, v, inputWidth, inputHeight, srcPitch, r3, g3, b3, a3);
+    sampleBilinearZeroPad(input, u + offset2*texelX, v, inputWidth, inputHeight, srcPitch, r4, g4, b4, a4);
+
+    float sumR = r0*w0 + r1*w1 + r2*w2 + r3*w1 + r4*w0;
+    float sumG = g0*w0 + g1*w1 + g2*w2 + g3*w1 + g4*w0;
+    float sumB = b0*w0 + b1*w1 + b2*w2 + b3*w1 + b4*w0;
+    float sumA = a0*w0 + a1*w1 + a2*w2 + a3*w1 + a4*w0;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = sumR;
+    output[outIdx + 1] = sumG;
+    output[outIdx + 2] = sumB;
+    output[outIdx + 3] = sumA;
+}
+
+// ============================================================================
+// Prefilter Separable 5-tap Vertical + Threshold
+// Second pass: vertical blur + threshold + color processing
+// ============================================================================
+
+extern "C" __global__ void PrefilterSep5VKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch,
+    float threshold, float softKnee,
+    float colorR, float colorG, float colorB,
+    float colorTempR, float colorTempG, float colorTempB,
+    float preserveColor, int useHDR, int useLinear, int inputProfile,
+    float offsetPrefilter)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    float u = ((float)x + 0.5f) / (float)srcWidth;
+    float v = ((float)y + 0.5f) / (float)srcHeight;
+
+    float texelY = 1.0f / (float)srcHeight;
+
+    // 5-tap Gaussian: [1, 4, 6, 4, 1] / 16
+    const float w0 = 1.0f / 16.0f;
+    const float w1 = 4.0f / 16.0f;
+    const float w2 = 6.0f / 16.0f;
+
+    float offset1 = 1.0f * offsetPrefilter;
+    float offset2 = 2.0f * offsetPrefilter;
+
+    float r0, g0, b0, a0, r1, g1, b1, a1, r2, g2, b2, a2, r3, g3, b3, a3, r4, g4, b4, a4;
+
+    sampleBilinear(input, u, v - offset2*texelY, srcWidth, srcHeight, srcPitch, r0, g0, b0, a0);
+    sampleBilinear(input, u, v - offset1*texelY, srcWidth, srcHeight, srcPitch, r1, g1, b1, a1);
+    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, r2, g2, b2, a2);
+    sampleBilinear(input, u, v + offset1*texelY, srcWidth, srcHeight, srcPitch, r3, g3, b3, a3);
+    sampleBilinear(input, u, v + offset2*texelY, srcWidth, srcHeight, srcPitch, r4, g4, b4, a4);
+
+    float sumR = r0*w0 + r1*w1 + r2*w2 + r3*w1 + r4*w0;
+    float sumG = g0*w0 + g1*w1 + g2*w2 + g3*w1 + g4*w0;
+    float sumB = b0*w0 + b1*w1 + b2*w2 + b3*w1 + b4*w0;
+    float sumA = a0*w0 + a1*w1 + a2*w2 + a3*w1 + a4*w0;
+
+    sumR = fminf(sumR, 1.0f);
+    sumG = fminf(sumG, 1.0f);
+    sumB = fminf(sumB, 1.0f);
+
+    float resR, resG, resB;
+    (void)useHDR;
+
+    if (useLinear) {
+        float straightR, straightG, straightB;
+        if (sumA > 0.001f) {
+            straightR = sumR / sumA;
+            straightG = sumG / sumA;
+            straightB = sumB / sumA;
+        } else {
+            straightR = straightG = straightB = 0.0f;
+        }
+        straightR = toLinear(straightR, inputProfile);
+        straightG = toLinear(straightG, inputProfile);
+        straightB = toLinear(straightB, inputProfile);
+        resR = straightR * sumA;
+        resG = straightG * sumA;
+        resB = straightB * sumA;
+    } else {
+        resR = sumR;
+        resG = sumG;
+        resB = sumB;
+    }
+
+    softThreshold(resR, resG, resB, threshold, softKnee);
+
+    float brightness = fmaxf(fmaxf(resR, resG), resB);
+    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
+    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    resR = resR + (lum - resR) * desatAmount;
+    resG = resG + (lum - resG) * desatAmount;
+    resB = resB + (lum - resB) * desatAmount;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = resR;
+    output[outIdx + 1] = resG;
+    output[outIdx + 2] = resB;
+    output[outIdx + 3] = sumA;
+}
+
+// ============================================================================
+// Prefilter Separable 9-tap Horizontal
+// Higher quality separable blur
+// ============================================================================
+
+extern "C" __global__ void PrefilterSep9HKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch,
+    int inputWidth, int inputHeight,
+    float offsetPrefilter)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    int offsetX = (dstWidth - inputWidth) / 2;
+    int offsetY = (dstHeight - inputHeight) / 2;
+
+    float srcX = (float)x - (float)offsetX;
+    float srcY = (float)y - (float)offsetY;
+
+    float u = (srcX + 0.5f) / (float)inputWidth;
+    float v = (srcY + 0.5f) / (float)inputHeight;
+
+    float texelX = 1.0f / (float)inputWidth;
+
+    // 9-tap Gaussian: [1, 8, 28, 56, 70, 56, 28, 8, 1] / 256
+    const float w0 = 1.0f / 256.0f;
+    const float w1 = 8.0f / 256.0f;
+    const float w2 = 28.0f / 256.0f;
+    const float w3 = 56.0f / 256.0f;
+    const float w4 = 70.0f / 256.0f;
+
+    float off1 = 1.0f * offsetPrefilter;
+    float off2 = 2.0f * offsetPrefilter;
+    float off3 = 3.0f * offsetPrefilter;
+    float off4 = 4.0f * offsetPrefilter;
+
+    float sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+    float r, g, b, a;
+
+    sampleBilinearZeroPad(input, u - off4*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+    sampleBilinearZeroPad(input, u - off3*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u - off2*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+    sampleBilinearZeroPad(input, u - off1*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w4; sumG += g*w4; sumB += b*w4; sumA += a*w4;
+    sampleBilinearZeroPad(input, u + off1*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinearZeroPad(input, u + off2*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+    sampleBilinearZeroPad(input, u + off3*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinearZeroPad(input, u + off4*texelX, v, inputWidth, inputHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = sumR;
+    output[outIdx + 1] = sumG;
+    output[outIdx + 2] = sumB;
+    output[outIdx + 3] = sumA;
+}
+
+// ============================================================================
+// Prefilter Separable 9-tap Vertical + Threshold
+// ============================================================================
+
+extern "C" __global__ void PrefilterSep9VKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int srcWidth, int srcHeight, int srcPitch,
+    int dstWidth, int dstHeight, int dstPitch,
+    float threshold, float softKnee,
+    float colorR, float colorG, float colorB,
+    float colorTempR, float colorTempG, float colorTempB,
+    float preserveColor, int useHDR, int useLinear, int inputProfile,
+    float offsetPrefilter)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstWidth || y >= dstHeight)
+        return;
+
+    float u = ((float)x + 0.5f) / (float)srcWidth;
+    float v = ((float)y + 0.5f) / (float)srcHeight;
+
+    float texelY = 1.0f / (float)srcHeight;
+
+    // 9-tap Gaussian: [1, 8, 28, 56, 70, 56, 28, 8, 1] / 256
+    const float w0 = 1.0f / 256.0f;
+    const float w1 = 8.0f / 256.0f;
+    const float w2 = 28.0f / 256.0f;
+    const float w3 = 56.0f / 256.0f;
+    const float w4 = 70.0f / 256.0f;
+
+    float off1 = 1.0f * offsetPrefilter;
+    float off2 = 2.0f * offsetPrefilter;
+    float off3 = 3.0f * offsetPrefilter;
+    float off4 = 4.0f * offsetPrefilter;
+
+    float sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+    float r, g, b, a;
+
+    sampleBilinear(input, u, v - off4*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+    sampleBilinear(input, u, v - off3*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinear(input, u, v - off2*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+    sampleBilinear(input, u, v - off1*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinear(input, u, v, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w4; sumG += g*w4; sumB += b*w4; sumA += a*w4;
+    sampleBilinear(input, u, v + off1*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w3; sumG += g*w3; sumB += b*w3; sumA += a*w3;
+    sampleBilinear(input, u, v + off2*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w2; sumG += g*w2; sumB += b*w2; sumA += a*w2;
+    sampleBilinear(input, u, v + off3*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w1; sumG += g*w1; sumB += b*w1; sumA += a*w1;
+    sampleBilinear(input, u, v + off4*texelY, srcWidth, srcHeight, srcPitch, r, g, b, a);
+    sumR += r*w0; sumG += g*w0; sumB += b*w0; sumA += a*w0;
+
+    sumR = fminf(sumR, 1.0f);
+    sumG = fminf(sumG, 1.0f);
+    sumB = fminf(sumB, 1.0f);
+
+    float resR, resG, resB;
+    (void)useHDR;
+
+    if (useLinear) {
+        float straightR, straightG, straightB;
+        if (sumA > 0.001f) {
+            straightR = sumR / sumA;
+            straightG = sumG / sumA;
+            straightB = sumB / sumA;
+        } else {
+            straightR = straightG = straightB = 0.0f;
+        }
+        straightR = toLinear(straightR, inputProfile);
+        straightG = toLinear(straightG, inputProfile);
+        straightB = toLinear(straightB, inputProfile);
+        resR = straightR * sumA;
+        resG = straightG * sumA;
+        resB = straightB * sumA;
+    } else {
+        resR = sumR;
+        resG = sumG;
+        resB = sumB;
+    }
+
+    softThreshold(resR, resG, resB, threshold, softKnee);
+
+    float brightness = fmaxf(fmaxf(resR, resG), resB);
+    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
+    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    resR = resR + (lum - resR) * desatAmount;
+    resG = resG + (lum - resG) * desatAmount;
+    resB = resB + (lum - resB) * desatAmount;
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = resR;
+    output[outIdx + 1] = resG;
+    output[outIdx + 2] = resB;
+    output[outIdx + 3] = sumA;
+}
+
+// ============================================================================
 // 2D Gaussian Downsample (9-tap, single pass with ZeroPad)
 // Replaces separable H+V passes for consistency across different buffer sizes
 // Uses ZeroPad sampling to prevent edge energy concentration
@@ -1146,6 +1633,17 @@ extern "C" __global__ void DebugOutputKernel(
     float v = ((float)y + 0.5f) / (float)height;
 
     float resR, resG, resB, resA;
+
+    // DEBUG: Show debugMode value indicator in top-left corner (32x32 pixels)
+    // Color encodes mode: R=mode/16, G=(mode!=1)?1:0, B=(mode>8)?1:0
+    if (x < 32 && y < 32) {
+        int idx = (y * outputPitch + x) * 4;
+        output[idx + 0] = (float)debugMode / 16.0f;  // R = mode/16
+        output[idx + 1] = (debugMode != 1) ? 1.0f : 0.0f;  // G = not Final
+        output[idx + 2] = (debugMode > 8) ? 1.0f : 0.0f;   // B = Up modes
+        output[idx + 3] = 1.0f;
+        return;
+    }
 
     // debugMode: 1=Final, 2=Prefilter, 3-8=Down1-6, 9-15=Up0-6, 16=GlowOnly
     if (debugMode == 1) {

@@ -188,6 +188,7 @@ struct RenderParams {
     float   offsetDown;         // 0-10: Downsample base offset (default 1.0)
     float   offsetUp;           // 0-10: Upsample base offset (default 1.0)
     float   offsetPrefilter;    // 0-10: Prefilter sampling offset (default 1.0)
+    int     prefilterQuality;   // PrefilterQuality enum (1=Star13, 2=Grid25, 3=Sep5, 4=Sep9)
 
     // Threshold
     float   threshold;

@@ -108,6 +108,7 @@ JustGlowCUDARenderer::JustGlowCUDARenderer()
     , m_debugOutputKernel(nullptr)
     , m_horizontalTemp{}
     , m_gaussianDownsampleTemp{}
+    , m_prefilterSepTemp{}
     , m_currentMipLevels(0)
     , m_currentWidth(0)
     , m_currentHeight(0)
@@ -207,6 +208,36 @@ bool JustGlowCUDARenderer::LoadKernels() {
         return false;
     }
     CUDA_LOG("PrefilterKernel loaded");
+
+    err = cuModuleGetFunction(&m_prefilter25TapKernel, m_module, "Prefilter25TapKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(Prefilter25TapKernel)")) {
+        return false;
+    }
+    CUDA_LOG("Prefilter25TapKernel loaded");
+
+    err = cuModuleGetFunction(&m_prefilterSep5HKernel, m_module, "PrefilterSep5HKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(PrefilterSep5HKernel)")) {
+        return false;
+    }
+    CUDA_LOG("PrefilterSep5HKernel loaded");
+
+    err = cuModuleGetFunction(&m_prefilterSep5VKernel, m_module, "PrefilterSep5VKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(PrefilterSep5VKernel)")) {
+        return false;
+    }
+    CUDA_LOG("PrefilterSep5VKernel loaded");
+
+    err = cuModuleGetFunction(&m_prefilterSep9HKernel, m_module, "PrefilterSep9HKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(PrefilterSep9HKernel)")) {
+        return false;
+    }
+    CUDA_LOG("PrefilterSep9HKernel loaded");
+
+    err = cuModuleGetFunction(&m_prefilterSep9VKernel, m_module, "PrefilterSep9VKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(PrefilterSep9VKernel)")) {
+        return false;
+    }
+    CUDA_LOG("PrefilterSep9VKernel loaded");
 
     err = cuModuleGetFunction(&m_downsampleKernel, m_module, "DownsampleKernel");
     if (!CheckCUDAError(err, "cuModuleGetFunction(DownsampleKernel)")) {
@@ -403,6 +434,23 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
             m_gaussianDownsampleTemp.width, m_gaussianDownsampleTemp.height, m_gaussianDownsampleTemp.sizeBytes);
     }
 
+    // Allocate separable prefilter temp buffer (for H-pass at MIP[0] resolution)
+    {
+        m_prefilterSepTemp.width = m_mipChain[0].width;
+        m_prefilterSepTemp.height = m_mipChain[0].height;
+        m_prefilterSepTemp.pitchBytes = m_mipChain[0].pitchBytes;
+        m_prefilterSepTemp.sizeBytes = m_mipChain[0].sizeBytes;
+
+        CUresult err = cuMemAlloc(&m_prefilterSepTemp.devicePtr, m_prefilterSepTemp.sizeBytes);
+        if (!CheckCUDAError(err, "cuMemAlloc for PrefilterSepTemp")) {
+            CUDA_LOG("ERROR: Failed to allocate PrefilterSepTemp buffer");
+            ReleaseMipChain();
+            return false;
+        }
+        CUDA_LOG("PrefilterSepTemp allocated: %dx%d, %zu bytes",
+            m_prefilterSepTemp.width, m_prefilterSepTemp.height, m_prefilterSepTemp.sizeBytes);
+    }
+
     return true;
 }
 
@@ -433,6 +481,12 @@ void JustGlowCUDARenderer::ReleaseMipChain() {
     if (m_gaussianDownsampleTemp.devicePtr) {
         cuMemFree(m_gaussianDownsampleTemp.devicePtr);
         m_gaussianDownsampleTemp.devicePtr = 0;
+    }
+
+    // Free separable prefilter temp buffer
+    if (m_prefilterSepTemp.devicePtr) {
+        cuMemFree(m_prefilterSepTemp.devicePtr);
+        m_prefilterSepTemp.devicePtr = 0;
     }
 
     m_currentMipLevels = 0;
@@ -532,8 +586,8 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
     int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
     int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-    CUDA_LOG("Prefilter: %dx%d -> %dx%d, grid: %dx%d",
-        params.width, params.height, dstMip.width, dstMip.height, gridX, gridY);
+    CUDA_LOG("Prefilter: %dx%d -> %dx%d, grid: %dx%d, quality: %d",
+        params.width, params.height, dstMip.width, dstMip.height, gridX, gridY, params.prefilterQuality);
 
     // Calculate color temperature multipliers
     float colorTempR = 1.0f, colorTempG = 1.0f, colorTempB = 1.0f;
@@ -546,54 +600,133 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
         colorTempB = 1.0f - t * 0.3f;
     }
 
-    // Kernel parameters
-    int dstPitchPixels = dstMip.width;  // Pitch in pixels, not bytes
-    // Prefilter doesn't need exposure boost - it's applied in upsample
+    // Common parameters
+    int dstPitchPixels = dstMip.width;
     float prefilterIntensity = 1.0f;
-    // Convert bool to int for CUDA kernel (bool pointer would be wrong size)
     int useHDR = params.hdrMode ? 1 : 0;
     int useLinear = params.linearize ? 1 : 0;
-    int inputProfile = params.inputProfile;  // 1=sRGB, 2=Rec709, 3=Gamma2.2
-
-    // srcPitch is for the input buffer (AE's input layer)
-    // Use actual srcPitch from AE (may include padding)
+    int inputProfile = params.inputProfile;
     int inputPitch = params.srcPitch;
 
-    void* kernelParams[] = {
-        &input,
-        &dstMip.devicePtr,
-        (void*)&params.inputWidth,   // srcWidth = actual input size
-        (void*)&params.inputHeight,  // srcHeight = actual input size
-        (void*)&inputPitch,          // srcPitch = input width in pixels
-        (void*)&dstMip.width,
-        (void*)&dstMip.height,
-        (void*)&dstPitchPixels,
-        (void*)&params.inputWidth,   // inputWidth for offset calculation
-        (void*)&params.inputHeight,  // inputHeight for offset calculation
-        (void*)&params.threshold,
-        (void*)&params.softKnee,
-        (void*)&prefilterIntensity,
-        (void*)&params.glowColor[0],
-        (void*)&params.glowColor[1],
-        (void*)&params.glowColor[2],
-        (void*)&colorTempR,
-        (void*)&colorTempG,
-        (void*)&colorTempB,
-        (void*)&params.preserveColor,
-        (void*)&useHDR,
-        (void*)&useLinear,
-        (void*)&inputProfile,
-        (void*)&params.offsetPrefilter
-    };
+    CUresult err;
 
-    CUresult err = cuLaunchKernel(
-        m_prefilterKernel,
-        gridX, gridY, 1,
-        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
-        0, m_stream,
-        kernelParams, nullptr);
+    // Select kernel based on prefilter quality
+    // 1=Star13, 2=Grid25, 3=Sep5, 4=Sep9
+    if (params.prefilterQuality == 3 || params.prefilterQuality == 4) {
+        // =========================================
+        // Separable mode: H pass -> V pass
+        // =========================================
+        bool isSep9 = (params.prefilterQuality == 4);
+        CUDA_LOG("Prefilter: Separable %s mode", isSep9 ? "9+9" : "5+5");
 
-    return CheckCUDAError(err, "cuLaunchKernel(Prefilter)");
+        // H pass: input -> temp
+        void* hParams[] = {
+            &input,
+            &m_prefilterSepTemp.devicePtr,
+            (void*)&params.inputWidth,
+            (void*)&params.inputHeight,
+            (void*)&inputPitch,
+            (void*)&dstMip.width,
+            (void*)&dstMip.height,
+            (void*)&dstPitchPixels,
+            (void*)&params.inputWidth,
+            (void*)&params.inputHeight,
+            (void*)&params.offsetPrefilter
+        };
+
+        err = cuLaunchKernel(
+            isSep9 ? m_prefilterSep9HKernel : m_prefilterSep5HKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            hParams, nullptr);
+
+        if (!CheckCUDAError(err, "cuLaunchKernel(PrefilterSepH)")) {
+            return false;
+        }
+
+        // Sync between H and V passes
+        cuEventRecord(m_syncEvent, m_stream);
+        cuStreamWaitEvent(m_stream, m_syncEvent, 0);
+
+        // V pass: temp -> output (with threshold/color processing)
+        int tempPitch = m_prefilterSepTemp.width;
+        void* vParams[] = {
+            &m_prefilterSepTemp.devicePtr,
+            &dstMip.devicePtr,
+            (void*)&m_prefilterSepTemp.width,
+            (void*)&m_prefilterSepTemp.height,
+            (void*)&tempPitch,
+            (void*)&dstMip.width,
+            (void*)&dstMip.height,
+            (void*)&dstPitchPixels,
+            (void*)&params.threshold,
+            (void*)&params.softKnee,
+            (void*)&params.glowColor[0],
+            (void*)&params.glowColor[1],
+            (void*)&params.glowColor[2],
+            (void*)&colorTempR,
+            (void*)&colorTempG,
+            (void*)&colorTempB,
+            (void*)&params.preserveColor,
+            (void*)&useHDR,
+            (void*)&useLinear,
+            (void*)&inputProfile,
+            (void*)&params.offsetPrefilter
+        };
+
+        err = cuLaunchKernel(
+            isSep9 ? m_prefilterSep9VKernel : m_prefilterSep5VKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            vParams, nullptr);
+
+        return CheckCUDAError(err, "cuLaunchKernel(PrefilterSepV)");
+
+    } else {
+        // =========================================
+        // Single-pass mode: Star13 or Grid25
+        // =========================================
+        bool isGrid25 = (params.prefilterQuality == 2);
+        CUDA_LOG("Prefilter: %s mode", isGrid25 ? "25-tap Grid" : "13-tap Star");
+
+        void* kernelParams[] = {
+            &input,
+            &dstMip.devicePtr,
+            (void*)&params.inputWidth,
+            (void*)&params.inputHeight,
+            (void*)&inputPitch,
+            (void*)&dstMip.width,
+            (void*)&dstMip.height,
+            (void*)&dstPitchPixels,
+            (void*)&params.inputWidth,
+            (void*)&params.inputHeight,
+            (void*)&params.threshold,
+            (void*)&params.softKnee,
+            (void*)&prefilterIntensity,
+            (void*)&params.glowColor[0],
+            (void*)&params.glowColor[1],
+            (void*)&params.glowColor[2],
+            (void*)&colorTempR,
+            (void*)&colorTempG,
+            (void*)&colorTempB,
+            (void*)&params.preserveColor,
+            (void*)&useHDR,
+            (void*)&useLinear,
+            (void*)&inputProfile,
+            (void*)&params.offsetPrefilter
+        };
+
+        err = cuLaunchKernel(
+            isGrid25 ? m_prefilter25TapKernel : m_prefilterKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            kernelParams, nullptr);
+
+        return CheckCUDAError(err, "cuLaunchKernel(Prefilter)");
+    }
 }
 
 // ============================================================================
