@@ -41,7 +41,7 @@ static void LogMsg(const char* format, ...) {
     static bool initialized = false;
 
     if (!initialized) {
-        logFile.open(GetLogFilePath(), std::ios::out | std::ios::app);
+        logFile.open(GetLogFilePath(), std::ios::out | std::ios::trunc);  // Clear on each AE session
         initialized = true;
         if (logFile.is_open()) {
             logFile << "\n========== JustGlow Plugin Loaded ==========\n";
