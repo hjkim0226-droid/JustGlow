@@ -63,8 +63,8 @@ constexpr int PRERENDER_MAX_MIP_LEVELS = 12;
 #define PLUGIN_DESCRIPTION      "High-quality GPU Glow Effect with Dual Kawase Blur"
 
 #define MAJOR_VERSION           1
-#define MINOR_VERSION           5
-#define BUG_VERSION             5
+#define MINOR_VERSION           6
+#define BUG_VERSION             0
 #define STAGE_VERSION           PF_Stage_DEVELOP
 #define BUILD_VERSION           1
 

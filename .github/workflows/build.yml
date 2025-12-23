@@ -141,9 +141,13 @@ jobs:
 
     # Package
     - name: Package Plugin
+      id: package
       run: |
         $version = (Select-String -Path "CMakeLists.txt" -Pattern 'VERSION (\d+\.\d+\.\d+)').Matches.Groups[1].Value
-        $artifactDir = "artifacts/JustGlow-Windows"
+        Write-Host "Version: $version"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+
+        $artifactDir = "artifacts/JustGlow-v$version-Windows"
 
         New-Item -ItemType Directory -Force -Path $artifactDir
 
@@ -169,8 +173,8 @@ jobs:
     - name: Upload Windows Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: JustGlow-Windows-x64
-        path: artifacts/JustGlow-Windows/
+        name: JustGlow-v${{ steps.package.outputs.version }}-Windows-x64
+        path: artifacts/JustGlow-v${{ steps.package.outputs.version }}-Windows/
         retention-days: 30
 
   # ============================================
