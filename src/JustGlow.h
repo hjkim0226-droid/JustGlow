@@ -92,6 +92,7 @@ enum ParamID {
     // === Blur Options ===
     PARAM_QUALITY,              // Quality level (Low/Medium/High/Ultra)
     PARAM_FALLOFF_TYPE,         // Decay curve type (Exponential/InverseSquare/Linear)
+    PARAM_BLUR_MODE,            // Upsample blur mode (3x3/5x5 Gaussian)
 
     // === Color Options ===
     PARAM_GLOW_COLOR,           // Glow tint color
@@ -114,6 +115,7 @@ enum ParamID {
     PARAM_DEBUG_VIEW,           // Debug view mode (Final/Prefilter/Down0-6/Up0-6/GlowOnly)
     PARAM_SOURCE_OPACITY,       // Source layer opacity (0-100%)
     PARAM_GLOW_OPACITY,         // Glow opacity (0-200%)
+    PARAM_PADDING_THRESHOLD,    // Padding clipping threshold (0-1%)
 
     PARAM_COUNT
 };
@@ -134,6 +136,7 @@ enum ParamDiskID {
     DISK_ID_SOFT_KNEE,
     DISK_ID_QUALITY,
     DISK_ID_FALLOFF_TYPE,
+    DISK_ID_BLUR_MODE,
     DISK_ID_GLOW_COLOR,
     DISK_ID_COLOR_TEMP,
     DISK_ID_PRESERVE_COLOR,
@@ -149,7 +152,8 @@ enum ParamDiskID {
     DISK_ID_DITHER,
     DISK_ID_DEBUG_VIEW,
     DISK_ID_SOURCE_OPACITY,
-    DISK_ID_GLOW_OPACITY
+    DISK_ID_GLOW_OPACITY,
+    DISK_ID_PADDING_THRESHOLD
 };
 
 // ============================================================================
@@ -187,6 +191,12 @@ enum class PrefilterQuality : int {
     Grid25 = 2,     // 25-tap 5x5 discrete Gaussian (quality)
     Sep5 = 3,       // Separable 5+5 tap (10 total, balanced)
     Sep9 = 4        // Separable 9+9 tap (18 total, high quality)
+};
+
+// Upsample blur modes
+enum class BlurMode : int {
+    Gaussian3x3 = 1,  // 9-tap 3x3 Gaussian (fast, default)
+    Gaussian5x5 = 2   // 25-tap 5x5 Gaussian (smoother, better diagonal coverage)
 };
 
 // Debug view modes for visualizing pipeline stages
@@ -232,6 +242,7 @@ namespace Defaults {
     // Blur Options
     constexpr int   Quality         = 8;  // MIP levels (6-12), 8 = balanced default
     constexpr int   FalloffType     = static_cast<int>(::FalloffType::Exponential);
+    constexpr int   BlurMode        = static_cast<int>(::BlurMode::Gaussian3x3);  // Fast default
 
     // Color
     constexpr float ColorTemp       = 0.0f;     // Neutral
@@ -251,6 +262,7 @@ namespace Defaults {
     constexpr int   DebugView       = static_cast<int>(DebugViewMode::Final);
     constexpr float SourceOpacity   = 100.0f;   // 100% = full source visibility
     constexpr float GlowOpacity     = 100.0f;   // 100% = normal glow, up to 200%
+    constexpr float PaddingThreshold = 0.3f;    // 0.3% = clip very dark values for padding optimization
 }
 
 namespace Ranges {
@@ -304,6 +316,10 @@ namespace Ranges {
     // Debug: Glow Opacity
     constexpr float GlowOpacityMin  = 0.0f;
     constexpr float GlowOpacityMax  = 200.0f;   // Up to 200% for boosted glow
+
+    // Debug: Padding Threshold
+    constexpr float PaddingThresholdMin = 0.0f;
+    constexpr float PaddingThresholdMax = 1.0f;  // 0-1% (very small values)
 }
 
 // ============================================================================
@@ -343,6 +359,7 @@ struct JustGlowPreRenderData {
     // Blur Options
     int quality;  // MIP levels (6-12)
     FalloffType falloffType;
+    BlurMode blurMode;  // Upsample Gaussian kernel size (3x3/5x5)
 
     // Color
     float glowColorR, glowColorG, glowColorB;
@@ -365,6 +382,7 @@ struct JustGlowPreRenderData {
     DebugViewMode debugView;
     float sourceOpacity;        // 0-100%
     float glowOpacity;          // 0-200%
+    float paddingThreshold;     // 0-1%: clip dark values for padding optimization
 
     // Computed values
     int mipLevels;          // Based on quality setting

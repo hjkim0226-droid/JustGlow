@@ -196,6 +196,7 @@ struct RenderParams {
 
     // Quality
     int     quality;            // BlurQuality enum value
+    int     blurMode;           // BlurMode enum (1=Gaussian3x3, 2=Gaussian5x5)
 
     // Color
     float   glowColor[3];
@@ -218,6 +219,7 @@ struct RenderParams {
     int     debugView;          // DebugViewMode enum value
     float   sourceOpacity;      // 0-1 (from 0-100%)
     float   glowOpacity;        // 0-2 (from 0-200%)
+    float   paddingThreshold;   // 0-0.01: clip dark values for padding optimization
 
     // Image info (output dimensions - may be expanded for glow)
     int     width;

@@ -757,9 +757,10 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         float spreadDown = params.spreadDown;
         int level = i;
         int maxLevels = params.mipLevels;
+        float paddingThreshold = params.paddingThreshold;
 
-        CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad, offset=%.2f, spread=%.2f)",
-            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, offsetDown, spreadDown);
+        CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad, offset=%.2f, spread=%.2f, padThresh=%.4f)",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, offsetDown, spreadDown, paddingThreshold);
 
         void* kernelParams[] = {
             &srcMip.devicePtr,
@@ -773,7 +774,8 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
             (void*)&offsetDown,
             (void*)&spreadDown,
             (void*)&level,
-            (void*)&maxLevels
+            (void*)&maxLevels,
+            (void*)&paddingThreshold
         };
 
         CUresult err = cuLaunchKernel(
@@ -837,11 +839,12 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             prevPitchPixels = prevUpsample.width;
         }
 
-        // blurMode is ignored by kernel (always uses 9-tap Discrete Gaussian)
-        int blurMode = 0;
+        // blurMode: 1=3x3 Gaussian (9-tap), 2=5x5 Gaussian (25-tap)
+        int blurMode = params.blurMode;
 
-        CUDA_LOG("Upsample[%d]: 9-tap Discrete Gaussian %dx%d -> %dx%d (offset=%.2f, spread=%.2f)",
-            i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, offsetUp, spreadUp);
+        CUDA_LOG("Upsample[%d]: %s %dx%d -> %dx%d (offset=%.2f, spread=%.2f)",
+            i, blurMode == 2 ? "5x5 Gaussian" : "3x3 Gaussian",
+            prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, offsetUp, spreadUp);
 
         int srcPitchPixels = currMip.width;
         int dstPitchPixels = dstUpsample.width;

@@ -459,6 +459,15 @@ PF_Err ParamsSetup(
         "Exponential|Inverse Square|Linear",
         DISK_ID_FALLOFF_TYPE);
 
+    // Blur Mode (upsample Gaussian kernel size)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_POPUP(
+        "Blur Mode",
+        2,  // Number of choices
+        Defaults::BlurMode,
+        "3x3 Gaussian|5x5 Gaussian",
+        DISK_ID_BLUR_MODE);
+
     // ===========================================
     // Color Options
     // ===========================================
@@ -639,6 +648,20 @@ PF_Err ParamsSetup(
         0,
         0,
         DISK_ID_GLOW_OPACITY);
+
+    // Padding Threshold (0-1%) - clip dark values for padding optimization
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Padding Threshold",
+        Ranges::PaddingThresholdMin,
+        Ranges::PaddingThresholdMax,
+        Ranges::PaddingThresholdMin,
+        Ranges::PaddingThresholdMax,
+        Defaults::PaddingThreshold,
+        PF_Precision_THOUSANDTHS,
+        0,
+        0,
+        DISK_ID_PADDING_THRESHOLD);
 
     out_data->num_params = PARAM_COUNT;
 
@@ -893,42 +916,75 @@ PF_Err PreRender(
         in_data->time_step, in_data->time_scale, &spreadUpParam);
     float spreadDown = spreadDownParam.u.fs_d.value;
     float spreadUp = spreadUpParam.u.fs_d.value;
-    float spread = (std::max)(spreadDown, spreadUp);  // Use max for expansion calculation
 
-    // Calculate glow expansion based on MIP levels and spread parameters
+    // Get offset parameters for accurate padding calculation
+    PF_ParamDef offsetDownParam, offsetUpParam, offsetPrefilterParam, prefilterQualityParam;
+    AEFX_CLR_STRUCT(offsetDownParam);
+    AEFX_CLR_STRUCT(offsetUpParam);
+    AEFX_CLR_STRUCT(offsetPrefilterParam);
+    AEFX_CLR_STRUCT(prefilterQualityParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_OFFSET_DOWN, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &offsetDownParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_OFFSET_UP, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &offsetUpParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_OFFSET_PREFILTER, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &offsetPrefilterParam);
+    PF_CHECKOUT_PARAM(in_data, PARAM_PREFILTER_QUALITY, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &prefilterQualityParam);
+    float offsetDown = offsetDownParam.u.fs_d.value;
+    float offsetUp = offsetUpParam.u.fs_d.value;
+    float offsetPrefilter = offsetPrefilterParam.u.fs_d.value;
+    PrefilterQuality prefilterQuality = static_cast<PrefilterQuality>(prefilterQualityParam.u.pd.value);
+
+    // Calculate glow expansion based on actual sampling offsets
+    // Formula: ceil(offset) × 2 × 2^level for each level, accumulated
     //
-    // The blur spread is approximately 2^mipLevels pixels at maximum.
-    // Each MIP level doubles the effective blur radius:
-    //   Level 6: 64px, Level 7: 128px, Level 8: 256px, Level 9: 512px, etc.
+    // Prefilter padding: ceil(maxOffset × offsetPrefilter) × 2
+    //   - Sep9: maxOffset = 4.0
+    //   - Others: maxOffset = 2.0
     //
-    // Spread parameter (1.0-5.0) affects how far the blur actually spreads
-    // at each downsample/upsample step.
-    //
-    // Expected expansion values:
-    //   Quality 6 (mipLevels=6): spread=1→51px,  spread=5→96px
-    //   Quality 7 (mipLevels=7): spread=1→102px, spread=5→192px
-    //   Quality 8 (mipLevels=8): spread=1→205px, spread=5→384px
-    //   Quality 9 (mipLevels=9): spread=1→410px, spread=5→768px
-    //   Quality 10+: scales accordingly up to 4096px max
+    // Downsample/Upsample padding per level:
+    //   offset = offsetDown + spreadDown × levelRatio
+    //   padding = ceil(offset) × 2 × 2^level (converted to mip[0] resolution)
 
-    // Base expansion: 2^mipLevels (theoretical maximum blur spread)
-    int baseExpansion = 1 << mipLevels;
+    // Prefilter padding
+    float prefilterMaxOffset = (prefilterQuality == PrefilterQuality::Sep9) ? 4.0f : 2.0f;
+    prefilterMaxOffset *= offsetPrefilter;
+    int prefilterPadding = static_cast<int>(std::ceil(prefilterMaxOffset)) * 2;
 
-    // Spread factor: scales expansion based on spread parameter
-    // spread=1.0 → 0.8x (conservative), spread=5.0 → 1.5x (full spread)
-    float spreadFactor = 0.625f + spread * 0.175f;
+    // Downsample padding (accumulated across all levels)
+    int totalDownPadding = 0;
+    for (int level = 0; level < mipLevels; level++) {
+        float levelRatio = (mipLevels > 1) ? (float)level / (float)(mipLevels - 1) : 0.0f;
+        float offset = offsetDown + spreadDown * levelRatio;
+        if (offset > 0.0f) {
+            int levelPadding = static_cast<int>(std::ceil(offset)) * 2;
+            totalDownPadding += levelPadding * (1 << level);
+        }
+    }
 
-    // Calculate expansion
-    int glowExpansion = static_cast<int>(baseExpansion * spreadFactor);
+    // Upsample padding (accumulated across all levels)
+    int totalUpPadding = 0;
+    for (int level = mipLevels - 1; level >= 0; level--) {
+        float levelRatio = (mipLevels > 1) ? (float)level / (float)(mipLevels - 1) : 0.0f;
+        float offset = offsetUp + spreadUp * levelRatio;
+        if (offset > 0.0f) {
+            int levelPadding = static_cast<int>(std::ceil(offset)) * 2;
+            totalUpPadding += levelPadding * (1 << level);
+        }
+    }
+
+    // Total expansion: prefilter + max(downsample, upsample)
+    int glowExpansion = prefilterPadding + (std::max)(totalDownPadding, totalUpPadding);
 
     // Scale by downsample factor for preview resolution support
     glowExpansion = static_cast<int>(glowExpansion * downsampleFactor);
 
-    // Clamp to reasonable range (64 minimum for preview, 4096 maximum)
-    glowExpansion = (std::max)(64, (std::min)(glowExpansion, 4096));
+    // Clamp to reasonable range (64 minimum for preview, 8192 maximum)
+    glowExpansion = (std::max)(64, (std::min)(glowExpansion, 8192));
 
-    PLUGIN_LOG("PreRender: Glow expansion = %d pixels (quality=%d, mipLevels=%d, spread=%.1f)",
-        glowExpansion, static_cast<int>(quality), mipLevels, spread);
+    PLUGIN_LOG("PreRender: Glow expansion = %d pixels (prefilter=%d, down=%d, up=%d)",
+        glowExpansion, prefilterPadding, totalDownPadding, totalUpPadding);
     PLUGIN_LOG("PreRender: Original req.rect = (%d,%d,%d,%d) size=%dx%d",
         req.rect.left, req.rect.top, req.rect.right, req.rect.bottom,
         req.rect.right - req.rect.left, req.rect.bottom - req.rect.top);
@@ -1064,6 +1120,12 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->falloffType = static_cast<FalloffType>(param.u.pd.value);
 
+        // Blur Mode (upsample kernel size)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_BLUR_MODE, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->blurMode = static_cast<BlurMode>(param.u.pd.value);
+
         // ===========================================
         // Color Options
         // ===========================================
@@ -1177,6 +1239,12 @@ PF_Err PreRender(
         PF_CHECKOUT_PARAM(in_data, PARAM_GLOW_OPACITY, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->glowOpacity = param.u.fs_d.value;
+
+        // Padding Threshold
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_PADDING_THRESHOLD, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->paddingThreshold = param.u.fs_d.value / 100.0f;  // Convert % to 0-0.01
 
         // ===========================================
         // Computed Values (The Secret Sauce)
@@ -1355,6 +1423,7 @@ PF_Err SmartRender(
 
                     // Quality (MIP levels)
                     rp.quality = preRenderData->quality;
+                    rp.blurMode = static_cast<int>(preRenderData->blurMode);
 
                     // Color
                     rp.glowColor[0] = preRenderData->glowColorR;
@@ -1381,6 +1450,7 @@ PF_Err SmartRender(
                     rp.debugView = static_cast<int>(preRenderData->debugView);
                     rp.sourceOpacity = preRenderData->sourceOpacity / 100.0f;  // 0-1
                     rp.glowOpacity = preRenderData->glowOpacity / 100.0f;      // 0-2
+                    rp.paddingThreshold = preRenderData->paddingThreshold;     // Already 0-0.01
 
                     // Image info
                     rp.width = output_worldP->width;

@@ -1021,7 +1021,8 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     float* __restrict__ output,
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
-    float offsetDown, float spreadDown, int level, int maxLevels)
+    float offsetDown, float spreadDown, int level, int maxLevels,
+    float paddingThreshold)  // Clip dark values for padding optimization
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1083,6 +1084,12 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     float outA = Ca * wCenter +
                  (Ta + La + Ra + Ba) * wCross +
                  (TLa + TRa + BLa + BRa) * wDiagonal;
+
+    // Padding threshold clipping: clip very dark values to 0 for padding optimization
+    // This allows smaller padding sizes by making dark edges fade to true black
+    if (paddingThreshold > 0.0f && (outR + outG + outB) < paddingThreshold) {
+        outR = outG = outB = outA = 0.0f;
+    }
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = outR;
@@ -1244,12 +1251,13 @@ extern "C" __global__ void DownsampleKernel(
     float resR = centerR * 0.5f + (Ar + Br + Cr + Dr) * 0.125f;
     float resG = centerG * 0.5f + (Ag + Bg + Cg + Dg) * 0.125f;
     float resB = centerB * 0.5f + (Ab + Bb + Cb + Db) * 0.125f;
+    float resA = centerA * 0.5f + (Aa + Ba + Ca + Da) * 0.125f;
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = 1.0f;
+    output[outIdx + 3] = resA;
 }
 
 // ============================================================================
@@ -1348,66 +1356,138 @@ extern "C" __global__ void UpsampleKernel(
     float u = ((float)x + 0.5f) / (float)dstWidth;
     float v = ((float)y + 0.5f) / (float)dstHeight;
 
-    float resR = 0.0f, resG = 0.0f, resB = 0.0f;
+    float resR = 0.0f, resG = 0.0f, resB = 0.0f, resA = 0.0f;
 
     // =========================================================
     // STEP 1: Upsample from Previous Level (smaller texture)
-    // 9-Tap Discrete Gaussian (3x3 pattern)
-    // Dynamic offset: offsetUp at level 0, offsetUp+spreadUp at max level
-    // Weights: Center=4/16, Cross=2/16, Diagonal=1/16 (total=16)
+    // blurMode=1: 9-Tap 3x3 Gaussian (fast)
+    // blurMode=2: 25-Tap 5x5 Gaussian (better diagonal coverage)
     // =========================================================
     if (prevLevel != nullptr) {
         float texelX = 1.0f / (float)prevWidth;
         float texelY = 1.0f / (float)prevHeight;
 
         // Dynamic offset: offsetUp at level 0, offsetUp + spreadUp at max level
-        // offsetUp: base offset (default 1.0), spreadUp: 0-10
         float levelRatio = (float)levelIndex / fmaxf((float)(maxLevels - 1), 1.0f);
         float offset = offsetUp + spreadUp * levelRatio;
 
-        // =========================================
-        // 9-Tap Discrete Gaussian (3x3 pattern)
-        // For upsampling, we sample 9 points honestly
-        // No linear optimization - prevents shift artifacts
-        // =========================================
-        float TLr, TLg, TLb, TLa;  // Top-Left (diagonal)
-        float Tr, Tg, Tb, Ta;       // Top (cross)
-        float TRr, TRg, TRb, TRa;  // Top-Right (diagonal)
-        float Lr, Lg, Lb, La;       // Left (cross)
-        float Cr, Cg, Cb, Ca;       // Center
-        float Rr, Rg, Rb, Ra;       // Right (cross)
-        float BLr, BLg, BLb, BLa;  // Bottom-Left (diagonal)
-        float Bor, Bog, Bob, Boa;  // Bottom (cross)
-        float BRr, BRg, BRb, BRa;  // Bottom-Right (diagonal)
+        if (blurMode == 2) {
+            // =========================================
+            // 25-Tap 5x5 Gaussian (blurMode == 2)
+            // Weights from Pascal's triangle: 1 4 6 4 1
+            // Total = 256, better diagonal coverage
+            // =========================================
+            const float w0 = 36.0f / 256.0f;   // center (0,0)
+            const float w1 = 24.0f / 256.0f;   // cross ±1 (0,±1), (±1,0)
+            const float w2 = 16.0f / 256.0f;   // diagonal ±1 (±1,±1)
+            const float w3 = 6.0f / 256.0f;    // cross ±2 (0,±2), (±2,0)
+            const float w4 = 4.0f / 256.0f;    // edge corners (±1,±2), (±2,±1)
+            const float w5 = 1.0f / 256.0f;    // corners (±2,±2)
 
-        // Sample all 9 points with ZeroPad (consistent with downsample)
-        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
-        sampleBilinearZeroPad(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
-        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
+            float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f, sumA = 0.0f;
+            float r, g, b, a;
 
-        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
-        sampleBilinearZeroPad(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
-        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
+            // Center (0,0) - weight 36
+            sampleBilinearZeroPad(prevLevel, u, v, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w0; sumG += g * w0; sumB += b * w0; sumA += a * w0;
 
-        sampleBilinearZeroPad(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
-        sampleBilinearZeroPad(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
-        sampleBilinearZeroPad(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
+            // Cross ±1 (4 samples) - weight 24 each
+            sampleBilinearZeroPad(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w1; sumG += g * w1; sumB += b * w1; sumA += a * w1;
+            sampleBilinearZeroPad(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w1; sumG += g * w1; sumB += b * w1; sumA += a * w1;
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w1; sumG += g * w1; sumB += b * w1; sumA += a * w1;
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w1; sumG += g * w1; sumB += b * w1; sumA += a * w1;
 
-        // Gaussian weights: Center=4/16, Cross=2/16, Diagonal=1/16
-        // This is the standard "국룰" for smooth upsampling
-        const float wCenter = 0.25f;     // 4/16
-        const float wCross = 0.125f;     // 2/16
-        const float wDiagonal = 0.0625f; // 1/16
+            // Diagonal ±1 (4 samples) - weight 16 each
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w2; sumG += g * w2; sumB += b * w2; sumA += a * w2;
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w2; sumG += g * w2; sumB += b * w2; sumA += a * w2;
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w2; sumG += g * w2; sumB += b * w2; sumA += a * w2;
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w2; sumG += g * w2; sumB += b * w2; sumA += a * w2;
 
-        resR = Cr * wCenter +
-               (Tr + Lr + Rr + Bor) * wCross +
-               (TLr + TRr + BLr + BRr) * wDiagonal;
-        resG = Cg * wCenter +
-               (Tg + Lg + Rg + Bog) * wCross +
-               (TLg + TRg + BLg + BRg) * wDiagonal;
-        resB = Cb * wCenter +
-               (Tb + Lb + Rb + Bob) * wCross +
-               (TLb + TRb + BLb + BRb) * wDiagonal;
+            // Cross ±2 (4 samples) - weight 6 each
+            float offset2 = offset * 2.0f;
+            sampleBilinearZeroPad(prevLevel, u, v - offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w3; sumG += g * w3; sumB += b * w3; sumA += a * w3;
+            sampleBilinearZeroPad(prevLevel, u, v + offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w3; sumG += g * w3; sumB += b * w3; sumA += a * w3;
+            sampleBilinearZeroPad(prevLevel, u - offset2 * texelX, v, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w3; sumG += g * w3; sumB += b * w3; sumA += a * w3;
+            sampleBilinearZeroPad(prevLevel, u + offset2 * texelX, v, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w3; sumG += g * w3; sumB += b * w3; sumA += a * w3;
+
+            // Edge corners (8 samples) - weight 4 each: (±1,±2) and (±2,±1)
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v - offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v - offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v + offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v + offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+            sampleBilinearZeroPad(prevLevel, u - offset2 * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+            sampleBilinearZeroPad(prevLevel, u + offset2 * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+            sampleBilinearZeroPad(prevLevel, u - offset2 * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+            sampleBilinearZeroPad(prevLevel, u + offset2 * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w4; sumG += g * w4; sumB += b * w4; sumA += a * w4;
+
+            // Corners (4 samples) - weight 1 each: (±2,±2)
+            sampleBilinearZeroPad(prevLevel, u - offset2 * texelX, v - offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w5; sumG += g * w5; sumB += b * w5; sumA += a * w5;
+            sampleBilinearZeroPad(prevLevel, u + offset2 * texelX, v - offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w5; sumG += g * w5; sumB += b * w5; sumA += a * w5;
+            sampleBilinearZeroPad(prevLevel, u - offset2 * texelX, v + offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w5; sumG += g * w5; sumB += b * w5; sumA += a * w5;
+            sampleBilinearZeroPad(prevLevel, u + offset2 * texelX, v + offset2 * texelY, prevWidth, prevHeight, prevPitch, r, g, b, a);
+            sumR += r * w5; sumG += g * w5; sumB += b * w5; sumA += a * w5;
+
+            resR = sumR;
+            resG = sumG;
+            resB = sumB;
+            resA = sumA;
+        } else {
+            // =========================================
+            // 9-Tap 3x3 Gaussian (blurMode == 1, default)
+            // Weights: Center=4/16, Cross=2/16, Diagonal=1/16
+            // =========================================
+            float TLr, TLg, TLb, TLa;
+            float Tr, Tg, Tb, Ta;
+            float TRr, TRg, TRb, TRa;
+            float Lr, Lg, Lb, La;
+            float Cr, Cg, Cb, Ca;
+            float Rr, Rg, Rb, Ra;
+            float BLr, BLg, BLb, BLa;
+            float Bor, Bog, Bob, Boa;
+            float BRr, BRg, BRb, BRa;
+
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TLr, TLg, TLb, TLa);
+            sampleBilinearZeroPad(prevLevel, u, v - offset * texelY, prevWidth, prevHeight, prevPitch, Tr, Tg, Tb, Ta);
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v - offset * texelY, prevWidth, prevHeight, prevPitch, TRr, TRg, TRb, TRa);
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v, prevWidth, prevHeight, prevPitch, Lr, Lg, Lb, La);
+            sampleBilinearZeroPad(prevLevel, u, v, prevWidth, prevHeight, prevPitch, Cr, Cg, Cb, Ca);
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v, prevWidth, prevHeight, prevPitch, Rr, Rg, Rb, Ra);
+            sampleBilinearZeroPad(prevLevel, u - offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BLr, BLg, BLb, BLa);
+            sampleBilinearZeroPad(prevLevel, u, v + offset * texelY, prevWidth, prevHeight, prevPitch, Bor, Bog, Bob, Boa);
+            sampleBilinearZeroPad(prevLevel, u + offset * texelX, v + offset * texelY, prevWidth, prevHeight, prevPitch, BRr, BRg, BRb, BRa);
+
+            const float wCenter = 0.25f;     // 4/16
+            const float wCross = 0.125f;     // 2/16
+            const float wDiagonal = 0.0625f; // 1/16
+
+            resR = Cr * wCenter + (Tr + Lr + Rr + Bor) * wCross + (TLr + TRr + BLr + BRr) * wDiagonal;
+            resG = Cg * wCenter + (Tg + Lg + Rg + Bog) * wCross + (TLg + TRg + BLg + BRg) * wDiagonal;
+            resB = Cb * wCenter + (Tb + Lb + Rb + Bob) * wCross + (TLb + TRb + BLb + BRb) * wDiagonal;
+            resA = Ca * wCenter + (Ta + La + Ra + Boa) * wCross + (TLa + TRa + BLa + BRa) * wDiagonal;
+        }
     }
 
     // =========================================================
@@ -1425,6 +1505,7 @@ extern "C" __global__ void UpsampleKernel(
     float contribR = currR * physicalWeight;
     float contribG = currG * physicalWeight;
     float contribB = currB * physicalWeight;
+    float contribA = currA * physicalWeight;
 
     // B. Radius-based Soft Threshold (replaces hard level cutoff)
     // - Higher level = more threshold applied
@@ -1461,6 +1542,7 @@ extern "C" __global__ void UpsampleKernel(
         contribR *= contribution;
         contribG *= contribution;
         contribB *= contribution;
+        contribA *= contribution;
     }
 
     // Add to upsampled base
@@ -1468,12 +1550,13 @@ extern "C" __global__ void UpsampleKernel(
     resR = resR + contribR;
     resG = resG + contribG;
     resB = resB + contribB;
+    resA = resA + contribA;
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = 1.0f;
+    output[outIdx + 3] = resA;
 }
 
 // ============================================================================
