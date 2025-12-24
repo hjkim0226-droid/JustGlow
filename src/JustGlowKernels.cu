@@ -505,11 +505,11 @@ extern "C" __global__ void PrefilterKernel(
     softThreshold(resR, resG, resB, threshold, softKnee);
 
     // Desaturation: 밝기에 비례해서 채도 감소 (자연스러운 하이라이트)
-    // 지수 곡선: 부드럽게 수렴, 최대 ~40% desaturation
-    // 0→0%, 0.5→22%, 1.0→39%
+    // 지수 곡선: 부드럽게 수렴, 최대 ~20% desaturation
+    // 0→0%, 0.5→11%, 1.0→20%
     float brightness = fmaxf(fmaxf(resR, resG), resB);
     float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
     resR = resR + (lum - resR) * desatAmount;
     resG = resG + (lum - resG) * desatAmount;
     resB = resB + (lum - resB) * desatAmount;
@@ -669,10 +669,10 @@ extern "C" __global__ void Prefilter25TapKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Desaturation
+    // Desaturation (최대 ~20%)
     float brightness = fmaxf(fmaxf(resR, resG), resB);
     float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
     resR = resR + (lum - resR) * desatAmount;
     resG = resG + (lum - resG) * desatAmount;
     resB = resB + (lum - resB) * desatAmount;
@@ -820,9 +820,10 @@ extern "C" __global__ void PrefilterSep5VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
+    // Desaturation (최대 ~20%)
     float brightness = fmaxf(fmaxf(resR, resG), resB);
     float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
     resR = resR + (lum - resR) * desatAmount;
     resG = resG + (lum - resG) * desatAmount;
     resB = resB + (lum - resB) * desatAmount;
@@ -995,9 +996,10 @@ extern "C" __global__ void PrefilterSep9VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
+    // Desaturation (최대 ~20%)
     float brightness = fmaxf(fmaxf(resR, resG), resB);
     float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = 1.0f - expf(-brightness * 0.5f);
+    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
     resR = resR + (lum - resR) * desatAmount;
     resG = resG + (lum - resG) * desatAmount;
     resB = resB + (lum - resB) * desatAmount;
