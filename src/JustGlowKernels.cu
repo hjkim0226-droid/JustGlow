@@ -333,6 +333,40 @@ __device__ void softThreshold(
 }
 
 // ============================================================================
+// Desaturation Kernel (Max-based, in-place)
+// Runs before Prefilter to desaturate input toward max channel
+// This simulates natural highlight blowout to white
+// ============================================================================
+
+extern "C" __global__ void DesaturationKernel(
+    float* __restrict__ data,
+    int width, int height, int pitch,
+    float desaturation)  // 0-1: amount to blend toward max
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    int idx = (y * pitch + x) * 4;
+    float r = data[idx + 0];
+    float g = data[idx + 1];
+    float b = data[idx + 2];
+    // Alpha unchanged
+
+    // Max-based desaturation: blend toward max channel (adds only)
+    float maxVal = fmaxf(fmaxf(r, g), b);
+    r = r + (maxVal - r) * desaturation;
+    g = g + (maxVal - g) * desaturation;
+    b = b + (maxVal - b) * desaturation;
+
+    data[idx + 0] = r;
+    data[idx + 1] = g;
+    data[idx + 2] = b;
+}
+
+// ============================================================================
 // Prefilter Kernel
 // Driver API entry point
 // ============================================================================
@@ -348,6 +382,7 @@ extern "C" __global__ void PrefilterKernel(
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
     float offsetPrefilter)  // 0-10: sampling offset multiplier
+    // Note: Desaturation now applied via separate DesaturationKernel before Prefilter
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -504,8 +539,7 @@ extern "C" __global__ void PrefilterKernel(
     // Soft threshold on Premultiplied (통일된 위치)
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation removed - ADD blend naturally reduces saturation
-    // Explicit desaturation was causing over-desaturation
+    // Note: Desaturation applied via separate kernel before Prefilter
 
     // Write output
     int outIdx = (y * dstPitch + x) * 4;
@@ -530,7 +564,8 @@ extern "C" __global__ void Prefilter25TapKernel(
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
-    float offsetPrefilter)
+    float offsetPrefilter,
+    float desaturation)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -662,7 +697,13 @@ extern "C" __global__ void Prefilter25TapKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation removed - ADD blend naturally reduces saturation
+    // Max-based desaturation
+    if (desaturation > 0.001f) {
+        float maxVal = fmaxf(fmaxf(resR, resG), resB);
+        resR = resR + (maxVal - resR) * desaturation;
+        resG = resG + (maxVal - resG) * desaturation;
+        resB = resB + (maxVal - resB) * desaturation;
+    }
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -743,7 +784,8 @@ extern "C" __global__ void PrefilterSep5VKernel(
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
-    float offsetPrefilter)
+    float offsetPrefilter,
+    float desaturation)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -807,7 +849,13 @@ extern "C" __global__ void PrefilterSep5VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation removed - ADD blend naturally reduces saturation
+    // Max-based desaturation
+    if (desaturation > 0.001f) {
+        float maxVal = fmaxf(fmaxf(resR, resG), resB);
+        resR = resR + (maxVal - resR) * desaturation;
+        resG = resG + (maxVal - resG) * desaturation;
+        resB = resB + (maxVal - resB) * desaturation;
+    }
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -900,7 +948,8 @@ extern "C" __global__ void PrefilterSep9VKernel(
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
-    float offsetPrefilter)
+    float offsetPrefilter,
+    float desaturation)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -977,7 +1026,13 @@ extern "C" __global__ void PrefilterSep9VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation removed - ADD blend naturally reduces saturation
+    // Max-based desaturation
+    if (desaturation > 0.001f) {
+        float maxVal = fmaxf(fmaxf(resR, resG), resB);
+        resR = resR + (maxVal - resR) * desaturation;
+        resG = resG + (maxVal - resG) * desaturation;
+        resB = resB + (maxVal - resB) * desaturation;
+    }
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -1781,7 +1836,7 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Note: Desaturation removed - ADD blend naturally reduces saturation
+        // Note: Max-based desaturation is applied in Prefilter stage
 
         // Apply source opacity (premultiplied)
         float srcR = origR * sourceOpacity;

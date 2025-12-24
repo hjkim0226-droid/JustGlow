@@ -98,6 +98,7 @@ enum ParamID {
     PARAM_GLOW_COLOR,           // Glow tint color
     PARAM_COLOR_TEMP,           // Color temperature shift (-100 to +100)
     PARAM_PRESERVE_COLOR,       // Original color preservation (0-100%)
+    PARAM_DESATURATION,         // Glow desaturation amount (0-100%)
 
     // === Advanced Options ===
     PARAM_ANAMORPHIC,           // Anamorphic stretch amount (0-100%)
@@ -140,6 +141,7 @@ enum ParamDiskID {
     DISK_ID_GLOW_COLOR,
     DISK_ID_COLOR_TEMP,
     DISK_ID_PRESERVE_COLOR,
+    DISK_ID_DESATURATION,
     DISK_ID_ANAMORPHIC,
     DISK_ID_ANAMORPHIC_ANGLE,
     DISK_ID_CHROMATIC_ABERRATION,
@@ -247,6 +249,7 @@ namespace Defaults {
     // Color
     constexpr float ColorTemp       = 0.0f;     // Neutral
     constexpr float PreserveColor   = 100.0f;   // 100%
+    constexpr float Desaturation    = 45.0f;    // 45% (Deep Glow match)
 
     // Advanced
     constexpr float Anamorphic      = 0.0f;     // Disabled
@@ -365,6 +368,7 @@ struct JustGlowPreRenderData {
     float glowColorR, glowColorG, glowColorB;
     float colorTemp;
     float preserveColor;
+    float desaturation;     // Max-based desaturation (0-100%)
 
     // Advanced
     float anamorphic;

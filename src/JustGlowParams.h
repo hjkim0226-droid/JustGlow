@@ -202,6 +202,7 @@ struct RenderParams {
     float   glowColor[3];
     float   colorTemp;
     float   preserveColor;
+    float   desaturation;       // 0-1: Max-based desaturation amount
 
     // Advanced
     float   anamorphic;

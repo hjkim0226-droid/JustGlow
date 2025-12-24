@@ -509,6 +509,20 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_PRESERVE_COLOR);
 
+    // Desaturation (0-100%) - Max-based, adds only
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX(
+        "Desaturation",
+        Ranges::ThresholdMin,
+        Ranges::ThresholdMax,
+        Ranges::ThresholdMin,
+        Ranges::ThresholdMax,
+        Defaults::Desaturation,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        DISK_ID_DESATURATION);
+
     // ===========================================
     // Advanced Options
     // ===========================================
@@ -1150,6 +1164,12 @@ PF_Err PreRender(
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->preserveColor = param.u.fs_d.value;
 
+        // Desaturation (Max-based)
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_DESATURATION, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->desaturation = param.u.fs_d.value;
+
         // ===========================================
         // Advanced Options
         // ===========================================
@@ -1431,6 +1451,7 @@ PF_Err SmartRender(
                     rp.glowColor[2] = preRenderData->glowColorB;
                     rp.colorTemp = preRenderData->colorTemp;
                     rp.preserveColor = preRenderData->preserveColor;
+                    rp.desaturation = preRenderData->desaturation / 100.0f;  // 0-1
 
                     // Advanced
                     rp.anamorphic = preRenderData->anamorphic;

@@ -672,7 +672,8 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
             (void*)&useHDR,
             (void*)&useLinear,
             (void*)&inputProfile,
-            (void*)&params.offsetPrefilter
+            (void*)&params.offsetPrefilter,
+            (void*)&params.desaturation
         };
 
         err = cuLaunchKernel(
@@ -715,7 +716,8 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
             (void*)&useHDR,
             (void*)&useLinear,
             (void*)&inputProfile,
-            (void*)&params.offsetPrefilter
+            (void*)&params.offsetPrefilter,
+            (void*)&params.desaturation
         };
 
         err = cuLaunchKernel(
