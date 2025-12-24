@@ -1548,11 +1548,12 @@ extern "C" __global__ void UpsampleKernel(
     }
 
     // Add to upsampled base
-    // Result = TentUpsample(Previous) + Current × Weight (after threshold)
+    // RGB = ADD (glow is additive light)
+    // Alpha = OVER formula (standard alpha compositing)
     resR = resR + contribR;
     resG = resG + contribG;
     resB = resB + contribB;
-    resA = resA + contribA;
+    resA = resA + contribA * (1.0f - resA);  // OVER: prevents alpha > 1.0
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
