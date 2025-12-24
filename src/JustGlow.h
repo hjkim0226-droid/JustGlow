@@ -116,7 +116,7 @@ enum ParamID {
     PARAM_DEBUG_VIEW,           // Debug view mode (Final/Prefilter/Down0-6/Up0-6/GlowOnly)
     PARAM_SOURCE_OPACITY,       // Source layer opacity (0-100%)
     PARAM_GLOW_OPACITY,         // Glow opacity (0-200%)
-    PARAM_PADDING_THRESHOLD,    // Padding clipping threshold (0-1%)
+    PARAM_PADDING_THRESHOLD,    // Padding clipping threshold (0-10%)
 
     PARAM_COUNT
 };
@@ -322,7 +322,7 @@ namespace Ranges {
 
     // Debug: Padding Threshold
     constexpr float PaddingThresholdMin = 0.0f;
-    constexpr float PaddingThresholdMax = 1.0f;  // 0-1% (very small values)
+    constexpr float PaddingThresholdMax = 10.0f;  // 0-10%
 }
 
 // ============================================================================
@@ -386,7 +386,7 @@ struct JustGlowPreRenderData {
     DebugViewMode debugView;
     float sourceOpacity;        // 0-100%
     float glowOpacity;          // 0-200%
-    float paddingThreshold;     // 0-1%: clip dark values for padding optimization
+    float paddingThreshold;     // 0-10%: clip dark values for padding optimization
 
     // Computed values
     int mipLevels;          // Based on quality setting

@@ -220,7 +220,7 @@ struct RenderParams {
     int     debugView;          // DebugViewMode enum value
     float   sourceOpacity;      // 0-1 (from 0-100%)
     float   glowOpacity;        // 0-2 (from 0-200%)
-    float   paddingThreshold;   // 0-0.01: clip dark values for padding optimization
+    float   paddingThreshold;   // 0-0.1: clip dark values for padding optimization (0-10%)
 
     // Image info (output dimensions - may be expanded for glow)
     int     width;

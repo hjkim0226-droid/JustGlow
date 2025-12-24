@@ -1264,7 +1264,7 @@ PF_Err PreRender(
         AEFX_CLR_STRUCT(param);
         PF_CHECKOUT_PARAM(in_data, PARAM_PADDING_THRESHOLD, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
-        preRenderData->paddingThreshold = param.u.fs_d.value / 100.0f;  // Convert % to 0-0.01
+        preRenderData->paddingThreshold = param.u.fs_d.value / 100.0f;  // Convert % to 0-0.1
 
         // ===========================================
         // Computed Values (The Secret Sauce)
