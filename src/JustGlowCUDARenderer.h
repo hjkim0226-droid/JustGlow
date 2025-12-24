@@ -70,6 +70,8 @@ private:
     CUfunction m_gaussianDownsampleVKernel;   // [deprecated] kept for fallback
     // Debug output kernel
     CUfunction m_debugOutputKernel;
+    // Desaturation kernel (runs after Prefilter, before Downsample)
+    CUfunction m_desaturationKernel;
 
     // MIP chain buffers (stores downsampled textures - read during upsample)
     std::vector<CUDAMipBuffer> m_mipChain;

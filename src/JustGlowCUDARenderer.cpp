@@ -106,6 +106,7 @@ JustGlowCUDARenderer::JustGlowCUDARenderer()
     , m_gaussianDownsampleHKernel(nullptr)
     , m_gaussianDownsampleVKernel(nullptr)
     , m_debugOutputKernel(nullptr)
+    , m_desaturationKernel(nullptr)
     , m_horizontalTemp{}
     , m_gaussianDownsampleTemp{}
     , m_prefilterSepTemp{}
@@ -288,6 +289,12 @@ bool JustGlowCUDARenderer::LoadKernels() {
     }
     CUDA_LOG("DebugOutputKernel loaded");
 
+    err = cuModuleGetFunction(&m_desaturationKernel, m_module, "DesaturationKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(DesaturationKernel)")) {
+        return false;
+    }
+    CUDA_LOG("DesaturationKernel loaded");
+
     return true;
 }
 
@@ -327,6 +334,7 @@ void JustGlowCUDARenderer::Shutdown() {
     m_gaussianDownsampleHKernel = nullptr;
     m_gaussianDownsampleVKernel = nullptr;
     m_debugOutputKernel = nullptr;
+    m_desaturationKernel = nullptr;
     m_context = nullptr;
     m_stream = nullptr;
     m_initialized = false;
@@ -672,8 +680,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
             (void*)&useHDR,
             (void*)&useLinear,
             (void*)&inputProfile,
-            (void*)&params.offsetPrefilter,
-            (void*)&params.desaturation
+            (void*)&params.offsetPrefilter
         };
 
         err = cuLaunchKernel(
@@ -683,7 +690,9 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
             0, m_stream,
             vParams, nullptr);
 
-        return CheckCUDAError(err, "cuLaunchKernel(PrefilterSepV)");
+        if (!CheckCUDAError(err, "cuLaunchKernel(PrefilterSepV)")) {
+            return false;
+        }
 
     } else {
         // =========================================
@@ -716,8 +725,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
             (void*)&useHDR,
             (void*)&useLinear,
             (void*)&inputProfile,
-            (void*)&params.offsetPrefilter,
-            (void*)&params.desaturation
+            (void*)&params.offsetPrefilter
         };
 
         err = cuLaunchKernel(
@@ -727,8 +735,40 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
             0, m_stream,
             kernelParams, nullptr);
 
-        return CheckCUDAError(err, "cuLaunchKernel(Prefilter)");
+        if (!CheckCUDAError(err, "cuLaunchKernel(Prefilter)")) {
+            return false;
+        }
     }
+
+    // =========================================
+    // Desaturation Kernel (runs after Prefilter, before Downsample)
+    // Max-based: blends toward max channel (only adds, never darkens)
+    // =========================================
+    if (params.desaturation > 0.001f) {
+        CUDA_LOG("Desaturation: %.1f%% on mipChain[0] %dx%d",
+            params.desaturation * 100.0f, dstMip.width, dstMip.height);
+
+        void* desatParams[] = {
+            &dstMip.devicePtr,
+            (void*)&dstMip.width,
+            (void*)&dstMip.height,
+            (void*)&dstPitchPixels,
+            (void*)&params.desaturation
+        };
+
+        err = cuLaunchKernel(
+            m_desaturationKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            desatParams, nullptr);
+
+        if (!CheckCUDAError(err, "cuLaunchKernel(Desaturation)")) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // ============================================================================
