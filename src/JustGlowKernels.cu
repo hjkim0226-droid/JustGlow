@@ -1096,12 +1096,10 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
                  (Ta + La + Ra + Ba) * wCross +
                  (TLa + TRa + BLa + BRa) * wDiagonal;
 
-    // Padding threshold clipping: clip very dark RGB to 0 for padding optimization
+    // Padding threshold clipping: clip very dark values to 0 for padding optimization
     // This allows smaller padding sizes by making dark edges fade to true black
-    // Note: Keep alpha unchanged for proper compositing
     if (paddingThreshold > 0.0f && (outR + outG + outB) < paddingThreshold) {
-        outR = outG = outB = 0.0f;
-        // outA preserved
+        outR = outG = outB = outA = 0.0f;
     }
 
     int outIdx = (y * dstPitch + x) * 4;
