@@ -1915,7 +1915,7 @@ extern "C" __global__ void DebugOutputKernel(
             resR = dbgR * exposure;
             resG = dbgG * exposure;
             resB = dbgB * exposure;
-            resA = 1.0f;
+            resA = dbgA;  // Use actual alpha from debug buffer
         }
 
         // =========================================
