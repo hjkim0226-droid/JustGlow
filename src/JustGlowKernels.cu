@@ -504,15 +504,8 @@ extern "C" __global__ void PrefilterKernel(
     // Soft threshold on Premultiplied (통일된 위치)
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Desaturation: 밝기에 비례해서 채도 감소 (자연스러운 하이라이트)
-    // 지수 곡선: 부드럽게 수렴, 최대 ~20% desaturation
-    // 0→0%, 0.5→11%, 1.0→20%
-    float brightness = fmaxf(fmaxf(resR, resG), resB);
-    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
-    resR = resR + (lum - resR) * desatAmount;
-    resG = resG + (lum - resG) * desatAmount;
-    resB = resB + (lum - resB) * desatAmount;
+    // Note: Desaturation removed - ADD blend naturally reduces saturation
+    // Explicit desaturation was causing over-desaturation
 
     // Write output
     int outIdx = (y * dstPitch + x) * 4;
@@ -669,13 +662,7 @@ extern "C" __global__ void Prefilter25TapKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Desaturation (최대 ~20%)
-    float brightness = fmaxf(fmaxf(resR, resG), resB);
-    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
-    resR = resR + (lum - resR) * desatAmount;
-    resG = resG + (lum - resG) * desatAmount;
-    resB = resB + (lum - resB) * desatAmount;
+    // Note: Desaturation removed - ADD blend naturally reduces saturation
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -820,13 +807,7 @@ extern "C" __global__ void PrefilterSep5VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Desaturation (최대 ~20%)
-    float brightness = fmaxf(fmaxf(resR, resG), resB);
-    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
-    resR = resR + (lum - resR) * desatAmount;
-    resG = resG + (lum - resG) * desatAmount;
-    resB = resB + (lum - resB) * desatAmount;
+    // Note: Desaturation removed - ADD blend naturally reduces saturation
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -996,13 +977,7 @@ extern "C" __global__ void PrefilterSep9VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Desaturation (최대 ~20%)
-    float brightness = fmaxf(fmaxf(resR, resG), resB);
-    float lum = 0.2126f * resR + 0.7152f * resG + 0.0722f * resB;
-    float desatAmount = (1.0f - expf(-brightness * 0.5f)) * 0.5f;
-    resR = resR + (lum - resR) * desatAmount;
-    resG = resG + (lum - resG) * desatAmount;
-    resB = resB + (lum - resB) * desatAmount;
+    // Note: Desaturation removed - ADD blend naturally reduces saturation
 
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
@@ -1347,7 +1322,8 @@ extern "C" __global__ void UpsampleKernel(
     float level1Weight,
     int falloffType,
     int maxLevels,      // total MIP levels
-    int blurMode)       // ignored, always use 9-tap Discrete Gaussian
+    int blurMode,       // ignored, always use 9-tap Discrete Gaussian
+    int compositeMode)  // 1=Add, 2=Screen, 3=Overlay
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1547,12 +1523,29 @@ extern "C" __global__ void UpsampleKernel(
         contribA *= contribution;
     }
 
-    // Add to upsampled base
-    // RGB = ADD (glow is additive light)
+    // Blend current level contribution with upsampled base
+    // RGB = based on compositeMode (1=Add, 2=Screen, 3=Overlay)
     // Alpha = OVER formula (standard alpha compositing)
-    resR = resR + contribR;
-    resG = resG + contribG;
-    resB = resB + contribB;
+    switch (compositeMode) {
+        case 2: { // Screen: A + B - A*B
+            resR = resR + contribR - resR * contribR;
+            resG = resG + contribG - resG * contribG;
+            resB = resB + contribB - resB * contribB;
+            break;
+        }
+        case 3: { // Overlay: 2*A*B if A<0.5, else 1-2*(1-A)*(1-B)
+            resR = (resR < 0.5f) ? 2.0f * resR * contribR : resR + 2.0f * contribR * (1.0f - resR);
+            resG = (resG < 0.5f) ? 2.0f * resG * contribG : resG + 2.0f * contribG * (1.0f - resG);
+            resB = (resB < 0.5f) ? 2.0f * resB * contribB : resB + 2.0f * contribB * (1.0f - resB);
+            break;
+        }
+        default: { // Add (case 1 and fallback)
+            resR = resR + contribR;
+            resG = resG + contribG;
+            resB = resB + contribB;
+            break;
+        }
+    }
     resA = resA + contribA * (1.0f - resA);  // OVER: prevents alpha > 1.0
 
     int outIdx = (y * dstPitch + x) * 4;
@@ -1788,7 +1781,7 @@ extern "C" __global__ void DebugOutputKernel(
         glowG *= exposure * glowOpacity;
         glowB *= exposure * glowOpacity;
 
-        // Note: Desaturation now applied in Prefilter stage (채도 30% 고정)
+        // Note: Desaturation removed - ADD blend naturally reduces saturation
 
         // Apply source opacity (premultiplied)
         float srcR = origR * sourceOpacity;
@@ -1885,7 +1878,7 @@ extern "C" __global__ void DebugOutputKernel(
             sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
         }
 
-        // Note: Glow color and desaturation already applied in Prefilter
+        // Note: Glow color applied in Prefilter, desaturation removed
 
         // Apply exposure and opacity
         resR = glowR * exposure * glowOpacity;

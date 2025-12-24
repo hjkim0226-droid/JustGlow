@@ -252,7 +252,7 @@ namespace Defaults {
     constexpr float Anamorphic      = 0.0f;     // Disabled
     constexpr float AnamorphicAngle = 0.0f;     // Horizontal
     constexpr float ChromaticAberration = 0.0f; // Disabled
-    constexpr int   CompositeMode   = static_cast<int>(::CompositeMode::Add);
+    constexpr int   CompositeMode   = static_cast<int>(::CompositeMode::Screen);
     constexpr bool  HDRMode         = true;
     constexpr bool  Linearize       = false;  // OFF by default (simpler, no alpha issues)
     constexpr int   InputProfile    = static_cast<int>(::InputProfile::sRGB);

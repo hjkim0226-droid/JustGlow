@@ -64,7 +64,7 @@ CONSTANT_BUFFER_BEGIN(GlowParams)
     float   anamorphicAmount;   // Blend amount (0-1)
 
     // Composite settings (16 bytes)
-    int     compositeMode;      // 0=Add, 1=Screen, 2=Overlay
+    int     compositeMode;      // 1=Add, 2=Screen, 3=Overlay
     int     useHDR;             // Enable Karis Average
     float   texelSizeX;         // 1.0 / width
     float   texelSizeY;         // 1.0 / height
@@ -209,7 +209,7 @@ struct RenderParams {
     float   chromaticAberration;    // 0-100: Chromatic aberration amount
     float   caTintR[3];             // CA Red channel tint (RGB)
     float   caTintB[3];             // CA Blue channel tint (RGB)
-    int     compositeMode;      // CompositeMode enum value (0=Add, 1=Screen, 2=Overlay)
+    int     compositeMode;      // CompositeMode enum value (1=Add, 2=Screen, 3=Overlay)
     bool    hdrMode;
     bool    linearize;          // Enable sRGB to Linear conversion
     int     inputProfile;       // Input color profile (1=sRGB, 2=Rec709, 3=Gamma2.2)

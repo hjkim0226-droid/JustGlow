@@ -841,10 +841,11 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
 
         // blurMode: 1=3x3 Gaussian (9-tap), 2=5x5 Gaussian (25-tap)
         int blurMode = params.blurMode;
+        int compositeMode = params.compositeMode;  // 1=Add, 2=Screen, 3=Overlay
 
-        CUDA_LOG("Upsample[%d]: %s %dx%d -> %dx%d (offset=%.2f, spread=%.2f)",
+        CUDA_LOG("Upsample[%d]: %s %dx%d -> %dx%d (offset=%.2f, spread=%.2f, blend=%d)",
             i, blurMode == 2 ? "5x5 Gaussian" : "3x3 Gaussian",
-            prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, offsetUp, spreadUp);
+            prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, offsetUp, spreadUp, compositeMode);
 
         int srcPitchPixels = currMip.width;
         int dstPitchPixels = dstUpsample.width;
@@ -874,7 +875,8 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             (void*)&params.level1Weight,
             (void*)&params.falloffType,
             (void*)&maxLevels,
-            (void*)&blurMode
+            (void*)&blurMode,
+            (void*)&compositeMode
         };
 
         CUresult err = cuLaunchKernel(
