@@ -539,14 +539,14 @@ extern "C" __global__ void PrefilterKernel(
     // Soft threshold on Premultiplied (통일된 위치)
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation applied via separate kernel before Prefilter
+    // Note: Desaturation applied via separate kernel after Prefilter
 
-    // Write output
+    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = sumA;
+    output[outIdx + 3] = 1.0f;
 }
 
 // ============================================================================
@@ -697,13 +697,12 @@ extern "C" __global__ void Prefilter25TapKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation applied via separate kernel after Prefilter
-
+    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = sumA;
+    output[outIdx + 3] = 1.0f;
 }
 
 // ============================================================================
@@ -843,13 +842,12 @@ extern "C" __global__ void PrefilterSep5VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation applied via separate kernel after Prefilter
-
+    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = sumA;
+    output[outIdx + 3] = 1.0f;
 }
 
 // ============================================================================
@@ -1014,13 +1012,12 @@ extern "C" __global__ void PrefilterSep9VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Note: Desaturation applied via separate kernel after Prefilter
-
+    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = sumA;
+    output[outIdx + 3] = 1.0f;
 }
 
 // ============================================================================
