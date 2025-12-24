@@ -1945,7 +1945,9 @@ extern "C" __global__ void DebugOutputKernel(
             resR = dbgR * exposure;
             resG = dbgG * exposure;
             resB = dbgB * exposure;
-            resA = dbgA;  // Use actual alpha from debug buffer
+            // Note: Internal buffers may have alpha=0 (paddingThreshold optimization)
+            // For debug visualization, always use alpha=1 to see RGB values
+            resA = 1.0f;
         }
 
         // =========================================
