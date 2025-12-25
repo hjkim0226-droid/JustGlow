@@ -536,12 +536,12 @@ extern "C" __global__ void PrefilterKernel(
 
     // Note: Desaturation applied via separate kernel after Prefilter
 
-    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
+    // Write output
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = 1.0f;
+    output[outIdx + 3] = sumA;
 }
 
 // ============================================================================
@@ -686,12 +686,12 @@ extern "C" __global__ void Prefilter25TapKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
+    // Write output
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = 1.0f;
+    output[outIdx + 3] = sumA;
 }
 
 // ============================================================================
@@ -825,12 +825,12 @@ extern "C" __global__ void PrefilterSep5VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
+    // Write output
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = 1.0f;
+    output[outIdx + 3] = sumA;
 }
 
 // ============================================================================
@@ -989,12 +989,12 @@ extern "C" __global__ void PrefilterSep9VKernel(
 
     softThreshold(resR, resG, resB, threshold, softKnee);
 
-    // Write output - alpha=1 for glow buffer (padding area needs full opacity for blending)
+    // Write output
     int outIdx = (y * dstPitch + x) * 4;
     output[outIdx + 0] = resR;
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
-    output[outIdx + 3] = 1.0f;
+    output[outIdx + 3] = sumA;
 }
 
 // ============================================================================
