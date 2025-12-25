@@ -120,16 +120,19 @@ __device__ __forceinline__ float fromLinear(float c, int profile) {
 
 // Unpremultiply alpha (AE uses premultiplied alpha)
 // Converts from premultiplied to straight alpha for correct threshold calculation
-__device__ __forceinline__ void unpremultiply(float& r, float& g, float& b, float a) {
-    // Higher threshold (0.01) to avoid extreme values at anti-aliased edges
-    // Also clamp result to prevent fireflies from edge artifacts
-    if (a > 0.01f) {
+// alphaThreshold: configurable cutoff (like paddingThreshold for RGB)
+//   - 0 = process all pixels (only prevent divide by zero)
+//   - higher = skip more low-alpha pixels (reduces padding range needed)
+__device__ __forceinline__ void unpremultiply(float& r, float& g, float& b, float a, float alphaThreshold = 0.0f) {
+    float threshold = fmaxf(alphaThreshold, EPSILON);  // At least EPSILON to prevent divide by zero
+
+    if (a > threshold) {
         float invA = 1.0f / a;
-        r = fminf(r * invA, 10.0f);  // Clamp to reasonable max
-        g = fminf(g * invA, 10.0f);
-        b = fminf(b * invA, 10.0f);
+        r = fminf(r * invA, 100.0f);
+        g = fminf(g * invA, 100.0f);
+        b = fminf(b * invA, 100.0f);
     } else {
-        // Very low alpha - treat as transparent (zero contribution)
+        // Below threshold - zero contribution (matches paddingThreshold behavior)
         r = 0.0f;
         g = 0.0f;
         b = 0.0f;
@@ -381,8 +384,8 @@ extern "C" __global__ void PrefilterKernel(
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
-    float offsetPrefilter)  // 0-10: sampling offset multiplier
-    // Note: Desaturation now applied via separate DesaturationKernel before Prefilter
+    float offsetPrefilter,  // 0-10: sampling offset multiplier
+    float paddingThreshold)  // Alpha threshold for unpremultiply (like RGB paddingThreshold)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -508,17 +511,9 @@ extern "C" __global__ void PrefilterKernel(
     float resR, resG, resB;
 
     if (useLinear) {
-        // Step 1: Unpremultiply
-        float straightR, straightG, straightB;
-        if (sumA > 0.001f) {
-            straightR = sumR / sumA;
-            straightG = sumG / sumA;
-            straightB = sumB / sumA;
-        } else {
-            straightR = 0.0f;
-            straightG = 0.0f;
-            straightB = 0.0f;
-        }
+        // Step 1: Unpremultiply (using paddingThreshold as alpha cutoff)
+        float straightR = sumR, straightG = sumG, straightB = sumB;
+        unpremultiply(straightR, straightG, straightB, sumA, paddingThreshold);
 
         // Step 2: Input Profile → Linear
         straightR = toLinear(straightR, inputProfile);
@@ -564,8 +559,8 @@ extern "C" __global__ void Prefilter25TapKernel(
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
-    float offsetPrefilter)
-    // Note: Desaturation now applied via separate DesaturationKernel after Prefilter
+    float offsetPrefilter,
+    float paddingThreshold)  // Alpha threshold for unpremultiply
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -675,14 +670,8 @@ extern "C" __global__ void Prefilter25TapKernel(
     (void)useHDR;
 
     if (useLinear) {
-        float straightR, straightG, straightB;
-        if (sumA > 0.001f) {
-            straightR = sumR / sumA;
-            straightG = sumG / sumA;
-            straightB = sumB / sumA;
-        } else {
-            straightR = straightG = straightB = 0.0f;
-        }
+        float straightR = sumR, straightG = sumG, straightB = sumB;
+        unpremultiply(straightR, straightG, straightB, sumA, paddingThreshold);
         straightR = toLinear(straightR, inputProfile);
         straightG = toLinear(straightG, inputProfile);
         straightB = toLinear(straightB, inputProfile);
@@ -777,8 +766,8 @@ extern "C" __global__ void PrefilterSep5VKernel(
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
-    float offsetPrefilter)
-    // Note: Desaturation now applied via separate DesaturationKernel after Prefilter
+    float offsetPrefilter,
+    float paddingThreshold)  // Alpha threshold for unpremultiply
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -820,14 +809,8 @@ extern "C" __global__ void PrefilterSep5VKernel(
     (void)useHDR;
 
     if (useLinear) {
-        float straightR, straightG, straightB;
-        if (sumA > 0.001f) {
-            straightR = sumR / sumA;
-            straightG = sumG / sumA;
-            straightB = sumB / sumA;
-        } else {
-            straightR = straightG = straightB = 0.0f;
-        }
+        float straightR = sumR, straightG = sumG, straightB = sumB;
+        unpremultiply(straightR, straightG, straightB, sumA, paddingThreshold);
         straightR = toLinear(straightR, inputProfile);
         straightG = toLinear(straightG, inputProfile);
         straightB = toLinear(straightB, inputProfile);
@@ -934,8 +917,8 @@ extern "C" __global__ void PrefilterSep9VKernel(
     float colorR, float colorG, float colorB,
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
-    float offsetPrefilter)
-    // Note: Desaturation now applied via separate DesaturationKernel after Prefilter
+    float offsetPrefilter,
+    float paddingThreshold)  // Alpha threshold for unpremultiply
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -990,14 +973,8 @@ extern "C" __global__ void PrefilterSep9VKernel(
     (void)useHDR;
 
     if (useLinear) {
-        float straightR, straightG, straightB;
-        if (sumA > 0.001f) {
-            straightR = sumR / sumA;
-            straightG = sumG / sumA;
-            straightB = sumB / sumA;
-        } else {
-            straightR = straightG = straightB = 0.0f;
-        }
+        float straightR = sumR, straightG = sumG, straightB = sumB;
+        unpremultiply(straightR, straightG, straightB, sumA, paddingThreshold);
         straightR = toLinear(straightR, inputProfile);
         straightG = toLinear(straightG, inputProfile);
         straightB = toLinear(straightB, inputProfile);
