@@ -58,6 +58,12 @@ cbuffer GlowParams : register(b0)
     int     g_useHDR;
     float   g_texelSizeX;
     float   g_texelSizeY;
+
+    // Debug options (16 bytes)
+    int     g_unpremultiply;
+    int     _debugPad0;
+    int     _debugPad1;
+    int     _debugPad2;
 };
 
 // ============================================================================

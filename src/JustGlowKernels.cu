@@ -282,7 +282,7 @@ __device__ void sampleBilinearZeroPad(
 // ============================================================================
 
 __device__ void softThreshold(
-    float& r, float& g, float& b,
+    float& r, float& g, float& b, float& a,
     float threshold, float softness)
 {
     // Threshold 0 = bypass (모든 픽셀 통과)
@@ -300,11 +300,12 @@ __device__ void softThreshold(
     float lowerBound = threshold - K;
     float upperBound = threshold + K;
 
-    // Below T-K: contribution = 0
+    // Below T-K: contribution = 0 (fully transparent)
     if (brightness <= lowerBound) {
         r = 0.0f;
         g = 0.0f;
         b = 0.0f;
+        a = 0.0f;  // Alpha도 0으로 → 진짜 투명
         return;
     }
 
@@ -319,6 +320,7 @@ __device__ void softThreshold(
             r = 0.0f;
             g = 0.0f;
             b = 0.0f;
+            a = 0.0f;  // Alpha도 0으로
         }
         return;
     }
@@ -333,6 +335,7 @@ __device__ void softThreshold(
     r *= contribution;
     g *= contribution;
     b *= contribution;
+    a *= contribution;  // Alpha도 동일하게 감쇠
 }
 
 // ============================================================================
@@ -426,34 +429,53 @@ extern "C" __global__ void PrefilterKernel(
     float Mr, Mg, Mb, Ma;
 
     // =========================================
-    // 13-tap sampling with ZERO PADDING
+    // 13-tap sampling with ZERO PADDING + Per-Sample Threshold
     // Out-of-bounds samples return 0 for natural edge fade
-    // No edge stretching - pixels blend with black at boundaries
-    // offsetPrefilter controls the sampling distance (default 1.0)
+    // RGB below threshold → treat as (0,0,0,0) to exclude dark pixels from glow
+    // This ensures opaque black background behaves same as transparent background
     // =========================================
     float outerOffset = 2.0f * offsetPrefilter;
     float innerOffset = 1.0f * offsetPrefilter;
 
+    // Helper macro: apply threshold to sample (dark pixels → transparent)
+    #define THRESHOLD_SAMPLE(R, G, B, A) \
+        if (fmaxf(fmaxf(R, G), B) < threshold) { R = G = B = A = 0.0f; }
+
     // Outer corners
     sampleBilinearZeroPad(input, u - outerOffset * texelX, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
+    THRESHOLD_SAMPLE(Ar, Ag, Ab, Aa);
     sampleBilinearZeroPad(input, u + outerOffset * texelX, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
+    THRESHOLD_SAMPLE(Cr, Cg, Cb, Ca);
     sampleBilinearZeroPad(input, u - outerOffset * texelX, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
+    THRESHOLD_SAMPLE(Kr, Kg, Kb, Ka);
     sampleBilinearZeroPad(input, u + outerOffset * texelX, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
+    THRESHOLD_SAMPLE(Mr, Mg, Mb, Ma);
 
     // Outer cross
     sampleBilinearZeroPad(input, u, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
+    THRESHOLD_SAMPLE(Br, Bg, Bb, Ba);
     sampleBilinearZeroPad(input, u - outerOffset * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
+    THRESHOLD_SAMPLE(Fr, Fg, Fb, Fa);
     sampleBilinearZeroPad(input, u + outerOffset * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
+    THRESHOLD_SAMPLE(Hr, Hg, Hb, Ha);
     sampleBilinearZeroPad(input, u, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
+    THRESHOLD_SAMPLE(Lr, Lg, Lb, La);
 
     // Inner corners
     sampleBilinearZeroPad(input, u - innerOffset * texelX, v - innerOffset * texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
+    THRESHOLD_SAMPLE(Dr, Dg, Db, Da);
     sampleBilinearZeroPad(input, u + innerOffset * texelX, v - innerOffset * texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
+    THRESHOLD_SAMPLE(Er, Eg, Eb, Ea);
     sampleBilinearZeroPad(input, u - innerOffset * texelX, v + innerOffset * texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
+    THRESHOLD_SAMPLE(Ir, Ig, Ib, Ia);
     sampleBilinearZeroPad(input, u + innerOffset * texelX, v + innerOffset * texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
+    THRESHOLD_SAMPLE(Jr, Jg, Jb, Ja);
 
     // Center
     sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
+    THRESHOLD_SAMPLE(Gr, Gg, Gb, Ga);
+
+    #undef THRESHOLD_SAMPLE
 
     // =========================================
     // Weighted Average using Gaussian kernel
@@ -532,7 +554,8 @@ extern "C" __global__ void PrefilterKernel(
     }
 
     // Soft threshold on Premultiplied (통일된 위치)
-    softThreshold(resR, resG, resB, threshold, softKnee);
+    // Alpha도 threshold에 따라 감쇠 → 어두운 픽셀은 완전 투명
+    softThreshold(resR, resG, resB, sumA, threshold, softKnee);
 
     // Note: Desaturation applied via separate kernel after Prefilter
 
@@ -684,7 +707,7 @@ extern "C" __global__ void Prefilter25TapKernel(
         resB = sumB;
     }
 
-    softThreshold(resR, resG, resB, threshold, softKnee);
+    softThreshold(resR, resG, resB, sumA, threshold, softKnee);
 
     // Write output
     int outIdx = (y * dstPitch + x) * 4;
@@ -823,7 +846,7 @@ extern "C" __global__ void PrefilterSep5VKernel(
         resB = sumB;
     }
 
-    softThreshold(resR, resG, resB, threshold, softKnee);
+    softThreshold(resR, resG, resB, sumA, threshold, softKnee);
 
     // Write output
     int outIdx = (y * dstPitch + x) * 4;
@@ -987,7 +1010,7 @@ extern "C" __global__ void PrefilterSep9VKernel(
         resB = sumB;
     }
 
-    softThreshold(resR, resG, resB, threshold, softKnee);
+    softThreshold(resR, resG, resB, sumA, threshold, softKnee);
 
     // Write output
     int outIdx = (y * dstPitch + x) * 4;
@@ -1682,7 +1705,8 @@ extern "C" __global__ void DebugOutputKernel(
     float dither,           // Dithering amount (0-1)
     float chromaticAberration,  // CA amount (0-100)
     float caTintRr, float caTintRg, float caTintRb,  // CA Red channel tint
-    float caTintBr, float caTintBg, float caTintBb)  // CA Blue channel tint
+    float caTintBr, float caTintBg, float caTintBb,  // CA Blue channel tint
+    int unpremultiply)  // Unpremultiply glow before composite (for testing)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1784,8 +1808,14 @@ extern "C" __global__ void DebugOutputKernel(
         // (via glowColor with preserveColor blending)
         // Do NOT apply again here - causes blue channel to zero out completely
 
-        // Glow stays in premultiplied space (AE native format)
-        // Do NOT unpremultiply - causes artifacts at transparent edges
+        // Optional: Unpremultiply glow (for testing alpha behavior)
+        if (unpremultiply && glowA > 0.001f) {
+            float invA = 1.0f / glowA;
+            glowR *= invA;
+            glowG *= invA;
+            glowB *= invA;
+            // After unpremult: straight alpha RGB with glowA
+        }
 
         // Apply exposure and glow opacity
         glowR *= exposure * glowOpacity;

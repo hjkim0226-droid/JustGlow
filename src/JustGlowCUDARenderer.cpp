@@ -1028,6 +1028,9 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     float caTintBg = params.caTintB[1];
     float caTintBb = params.caTintB[2];
 
+    // Unpremultiply option
+    int unpremultiply = params.unpremultiply ? 1 : 0;
+
     void* kernelParams[] = {
         &original,
         &debugBuffer,
@@ -1062,7 +1065,8 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&caTintRb,
         (void*)&caTintBr,
         (void*)&caTintBg,
-        (void*)&caTintBb
+        (void*)&caTintBb,
+        (void*)&unpremultiply
     };
 
     CUresult err = cuLaunchKernel(

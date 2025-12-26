@@ -677,6 +677,15 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_PADDING_THRESHOLD);
 
+    // Unpremultiply (for composite testing)
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_CHECKBOX(
+        "Unpremultiply",
+        "Unpremultiply glow before composite",
+        0,  // Default: OFF
+        0,
+        DISK_ID_UNPREMULTIPLY);
+
     out_data->num_params = PARAM_COUNT;
 
     return err;
@@ -961,10 +970,15 @@ PF_Err PreRender(
     //   offset = offsetDown + spreadDown × levelRatio
     //   padding = ceil(offset) × 2 × 2^level (converted to mip[0] resolution)
 
-    // Prefilter padding
-    float prefilterMaxOffset = (prefilterQuality == PrefilterQuality::Sep9) ? 4.0f : 2.0f;
-    prefilterMaxOffset *= offsetPrefilter;
-    int prefilterPadding = static_cast<int>(std::ceil(prefilterMaxOffset)) * 2;
+    // Prefilter padding (13-tap Star pattern)
+    // 13-tap samples at outerOffset = 2.0 * offsetPrefilter
+    // Diagonal reach = sqrt(2) * outerOffset = 2.83 * offsetPrefilter
+    // Apply 3x margin for proper glow spread
+    constexpr float SQRT2 = 1.414f;
+    constexpr float PREFILTER_MARGIN = 3.0f;  // Safety margin for glow spread
+    float prefilterOuterOffset = 2.0f * offsetPrefilter;
+    float prefilterDiagonalReach = prefilterOuterOffset * SQRT2 * PREFILTER_MARGIN;
+    int prefilterPadding = static_cast<int>(std::ceil(prefilterDiagonalReach)) * 2;
 
     // Downsample padding (accumulated across all levels)
     int totalDownPadding = 0;
@@ -1265,6 +1279,12 @@ PF_Err PreRender(
         PF_CHECKOUT_PARAM(in_data, PARAM_PADDING_THRESHOLD, in_data->current_time,
             in_data->time_step, in_data->time_scale, &param);
         preRenderData->paddingThreshold = param.u.fs_d.value / 100.0f;  // Convert % to 0-0.1
+
+        // Unpremultiply
+        AEFX_CLR_STRUCT(param);
+        PF_CHECKOUT_PARAM(in_data, PARAM_UNPREMULTIPLY, in_data->current_time,
+            in_data->time_step, in_data->time_scale, &param);
+        preRenderData->unpremultiply = (param.u.bd.value != 0);
 
         // ===========================================
         // Computed Values (The Secret Sauce)

@@ -117,6 +117,7 @@ enum ParamID {
     PARAM_SOURCE_OPACITY,       // Source layer opacity (0-100%)
     PARAM_GLOW_OPACITY,         // Glow opacity (0-200%)
     PARAM_PADDING_THRESHOLD,    // Padding clipping threshold (0-10%)
+    PARAM_UNPREMULTIPLY,        // Unpremultiply in composite (checkbox)
 
     PARAM_COUNT
 };
@@ -155,7 +156,8 @@ enum ParamDiskID {
     DISK_ID_DEBUG_VIEW,
     DISK_ID_SOURCE_OPACITY,
     DISK_ID_GLOW_OPACITY,
-    DISK_ID_PADDING_THRESHOLD
+    DISK_ID_PADDING_THRESHOLD,
+    DISK_ID_UNPREMULTIPLY
 };
 
 // ============================================================================
@@ -387,6 +389,7 @@ struct JustGlowPreRenderData {
     float sourceOpacity;        // 0-100%
     float glowOpacity;          // 0-200%
     float paddingThreshold;     // 0-10%: clip dark values for padding optimization
+    bool unpremultiply;         // Unpremultiply glow before composite
 
     // Computed values
     int mipLevels;          // Based on quality setting

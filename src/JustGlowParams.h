@@ -68,6 +68,12 @@ CONSTANT_BUFFER_BEGIN(GlowParams)
     int     useHDR;             // Enable Karis Average
     float   texelSizeX;         // 1.0 / width
     float   texelSizeY;         // 1.0 / height
+
+    // Debug options (16 bytes)
+    int     unpremultiply;      // Unpremultiply glow before composite
+    int     _debugPad0;
+    int     _debugPad1;
+    int     _debugPad2;
 CONSTANT_BUFFER_END
 
 // ============================================================================
@@ -221,6 +227,7 @@ struct RenderParams {
     float   sourceOpacity;      // 0-1 (from 0-100%)
     float   glowOpacity;        // 0-2 (from 0-200%)
     float   paddingThreshold;   // 0-0.1: clip dark values for padding optimization (0-10%)
+    bool    unpremultiply;      // Enable unpremultiply in composite
 
     // Image info (output dimensions - may be expanded for glow)
     int     width;
@@ -279,6 +286,8 @@ inline void FillGlowParams(GlowParams& cb, const RenderParams& rp) {
 
     cb.texelSizeX = 1.0f / static_cast<float>(rp.width);
     cb.texelSizeY = 1.0f / static_cast<float>(rp.height);
+
+    cb.unpremultiply = rp.unpremultiply ? 1 : 0;
 }
 
 // Fill BlurPassParams for a specific pass

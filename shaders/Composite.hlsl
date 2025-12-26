@@ -28,7 +28,13 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     float4 original = g_inputTex.SampleLevel(g_linearSampler, uv, 0);
 
     // Sample glow (accumulated blur result)
-    float3 glow = g_prevLevelTex.SampleLevel(g_linearSampler, uv, 0).rgb;
+    float4 glowSample = g_prevLevelTex.SampleLevel(g_linearSampler, uv, 0);
+    float3 glow = glowSample.rgb;
+
+    // Optional: Unpremultiply glow (for testing alpha behavior)
+    if (g_unpremultiply && glowSample.a > 0.001f) {
+        glow /= glowSample.a;
+    }
 
     // Apply color temperature
     glow.r *= g_colorTempR;
