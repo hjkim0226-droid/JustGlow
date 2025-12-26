@@ -136,6 +136,38 @@ cmake --install build
 2. **9-tap 2D Gaussian Downsample:** Single-pass 9-tap 2D Gaussian for all levels. No temp buffer needed, no H→V sync required. Temporally stable (no flickering on subpixel movement).
 3. **Dynamic MIP Levels:** Ultra quality goes to 12 levels (until 16px), providing Deep Glow-like "atmosphere" feel
 4. **Falloff Blending:** `levelWeight = pow(falloff, level)` during upsample for physical light decay
+5. **DispatchIndirect Optimization (DirectX):** GPU-driven BoundingBox optimization eliminates CPU-GPU synchronization
+
+## DispatchIndirect 최적화 (DirectX 12)
+
+**목적:** 작은 콘텐츠 영역만 처리하여 GPU 연산량 대폭 감소 (예: 1920×1080 → 320×320 = 36배 성능 향상)
+
+**파이프라인:**
+```
+[RefineCS] → atomicMin/Max로 BoundingBox 계산
+    ↓
+[CalcIndirectArgsCS] → ThreadGroupCount 계산 → IndirectArgsBuffer에 저장
+    ↓
+[ExecuteIndirect] → GPU가 버퍼를 읽어 dispatch 크기 결정 (CPU 개입 없음!)
+    ↓
+[PrefilterWithBounds] → BoundsOutput에서 오프셋 읽어 좌표 변환
+```
+
+**관련 파일:**
+- `shaders/Refine.hlsl` - RefineCS, CalcIndirectArgsCS, ResetBoundsCS
+- `shaders/Prefilter.hlsl` - mainWithBounds 엔트리포인트 추가
+- `src/JustGlowGPURenderer.cpp` - ExecuteRefine, ExecutePrefilterIndirect
+
+**버퍼 구조:**
+- `m_atomicBoundsBuffer` - [minX, maxX, minY, maxY] (atomic 연산용)
+- `m_indirectArgsBuffer` - [ThreadGroupCountX, Y, Z] × MIP 레벨
+- `m_boundsOutputBuffer` - [minX, maxX, minY, maxY] × MIP 레벨 (다음 단계에서 읽음)
+
+**성능 개선:**
+- CPU-GPU 동기화: N+1회 → **1회** (최종만)
+- 동기화 대기 시간: 0.8-4ms → **~0.1ms**
+
+상세 내용: `docs/plans/PLAN_HYBRID_DX_CUDA.md`
 
 ## 알려진 이슈
 

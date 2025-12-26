@@ -710,12 +710,33 @@ bool JustGlowCUDARenderer::ExecuteRefine(
 bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdeviceptr input) {
     auto& dstMip = m_mipChain[0];
 
-    // Calculate grid dimensions
-    int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-    int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    // Calculate BoundingBox in output coordinates
+    // Input BoundingBox (m_mipBounds[0]) is in input coordinates
+    // Need to transform to output coordinates (with padding offset)
+    int offsetX = (dstMip.width - params.inputWidth) / 2;
+    int offsetY = (dstMip.height - params.inputHeight) / 2;
 
-    CUDA_LOG("Prefilter: %dx%d -> %dx%d, grid: %dx%d, quality: %d",
-        params.width, params.height, dstMip.width, dstMip.height, gridX, gridY, params.prefilterQuality);
+    // Blur margin based on offsetPrefilter (sampling radius)
+    int blurMargin = static_cast<int>(params.offsetPrefilter * 2.0f + 0.5f);
+
+    // Transform input BoundingBox to output coordinates with blur margin
+    const auto& inBounds = m_mipBounds[0];
+    int boundMinX = std::max(0, inBounds.minX + offsetX - blurMargin);
+    int boundMinY = std::max(0, inBounds.minY + offsetY - blurMargin);
+    int boundMaxX = std::min(dstMip.width - 1, inBounds.maxX + offsetX + blurMargin);
+    int boundMaxY = std::min(dstMip.height - 1, inBounds.maxY + offsetY + blurMargin);
+    int boundWidth = boundMaxX - boundMinX + 1;
+    int boundHeight = boundMaxY - boundMinY + 1;
+
+    // Grid size based on BoundingBox
+    int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+    float reduction = 100.0f * boundWidth * boundHeight / (dstMip.width * dstMip.height);
+    CUDA_LOG("Prefilter: %dx%d -> %dx%d, BBox [%d,%d]-[%d,%d] = %dx%d (%.1f%% of full), quality: %d",
+        params.width, params.height, dstMip.width, dstMip.height,
+        boundMinX, boundMinY, boundMaxX, boundMaxY,
+        boundWidth, boundHeight, reduction, params.prefilterQuality);
 
     // Calculate color temperature multipliers
     float colorTempR = 1.0f, colorTempG = 1.0f, colorTempB = 1.0f;
@@ -743,9 +764,12 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
     if (params.prefilterQuality == 3 || params.prefilterQuality == 4) {
         // =========================================
         // Separable mode: H pass -> V pass
+        // NOTE: Separable kernels don't support BoundingBox yet, use full grid
         // =========================================
         bool isSep9 = (params.prefilterQuality == 4);
-        CUDA_LOG("Prefilter: Separable %s mode", isSep9 ? "9+9" : "5+5");
+        int fullGridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int fullGridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        CUDA_LOG("Prefilter: Separable %s mode (full grid, no BBox optimization)", isSep9 ? "9+9" : "5+5");
 
         // H pass: input -> temp
         void* hParams[] = {
@@ -764,7 +788,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
 
         err = cuLaunchKernel(
             isSep9 ? m_prefilterSep9HKernel : m_prefilterSep5HKernel,
-            gridX, gridY, 1,
+            fullGridX, fullGridY, 1,
             THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
             0, m_stream,
             hParams, nullptr);
@@ -806,7 +830,7 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
 
         err = cuLaunchKernel(
             isSep9 ? m_prefilterSep9VKernel : m_prefilterSep5VKernel,
-            gridX, gridY, 1,
+            fullGridX, fullGridY, 1,
             THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
             0, m_stream,
             vParams, nullptr);
@@ -847,7 +871,11 @@ bool JustGlowCUDARenderer::ExecutePrefilter(const RenderParams& params, CUdevice
             (void*)&useLinear,
             (void*)&inputProfile,
             (void*)&params.offsetPrefilter,
-            (void*)&params.paddingThreshold  // Alpha threshold for unpremultiply
+            (void*)&params.paddingThreshold,  // Alpha threshold for unpremultiply
+            (void*)&boundMinX,
+            (void*)&boundMinY,
+            (void*)&boundWidth,
+            (void*)&boundHeight
         };
 
         err = cuLaunchKernel(

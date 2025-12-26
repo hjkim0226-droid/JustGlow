@@ -66,6 +66,7 @@ set(SHADER_FILES
     shaders/Upsample.hlsl
     shaders/PostProcess.hlsl
     shaders/Composite.hlsl
+    shaders/Refine.hlsl
 )
 
 # ============================================================================
@@ -235,21 +236,34 @@ if(WIN32)
 
     if(DXC_EXECUTABLE)
         # Compile each shader
+        # Format: "ShaderFile:EntryPoint" or "ShaderFile:EntryPoint:OutputName"
         set(SHADER_ENTRY_POINTS
             "Prefilter:main"
+            "Prefilter:mainWithBounds:PrefilterWithBounds"
             "Downsample:main"
             "Upsample:main"
             "PostProcess:main_anamorphic"
             "Composite:main"
+            "Refine:RefineCS:Refine"
+            "Refine:CalcIndirectArgsCS:CalcIndirectArgs"
+            "Refine:ResetBoundsCS:ResetBounds"
         )
 
         foreach(SHADER_ENTRY ${SHADER_ENTRY_POINTS})
             string(REPLACE ":" ";" SHADER_PARTS ${SHADER_ENTRY})
+            list(LENGTH SHADER_PARTS PARTS_COUNT)
             list(GET SHADER_PARTS 0 SHADER_NAME)
             list(GET SHADER_PARTS 1 ENTRY_POINT)
 
+            # Use optional output name if provided, otherwise use shader name
+            if(PARTS_COUNT GREATER 2)
+                list(GET SHADER_PARTS 2 OUTPUT_NAME)
+            else()
+                set(OUTPUT_NAME ${SHADER_NAME})
+            endif()
+
             set(SHADER_INPUT "${CMAKE_SOURCE_DIR}/shaders/${SHADER_NAME}.hlsl")
-            set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.cso")
+            set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${OUTPUT_NAME}.cso")
 
             add_custom_command(
                 OUTPUT "${SHADER_OUTPUT}"
@@ -260,7 +274,7 @@ if(WIN32)
                     -I "${CMAKE_SOURCE_DIR}/shaders"
                     "${SHADER_INPUT}"
                 DEPENDS "${SHADER_INPUT}" "${CMAKE_SOURCE_DIR}/shaders/Common.hlsli"
-                COMMENT "Compiling shader: ${SHADER_NAME}.hlsl"
+                COMMENT "Compiling shader: ${SHADER_NAME}.hlsl -> ${OUTPUT_NAME}.cso (entry: ${ENTRY_POINT})"
                 VERBATIM
             )
 

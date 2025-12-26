@@ -435,10 +435,19 @@ extern "C" __global__ void PrefilterKernel(
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
     float offsetPrefilter,  // 0-10: sampling offset multiplier
-    float paddingThreshold)  // Alpha threshold for unpremultiply (like RGB paddingThreshold)
+    float paddingThreshold,  // Alpha threshold for unpremultiply (like RGB paddingThreshold)
+    int boundMinX, int boundMinY, int boundWidth, int boundHeight)  // BoundingBox for Grid optimization
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Early exit if outside BoundingBox
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    // Convert to actual output coordinates
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
 
     if (x >= dstWidth || y >= dstHeight)
         return;
@@ -610,10 +619,19 @@ extern "C" __global__ void Prefilter25TapKernel(
     float colorTempR, float colorTempG, float colorTempB,
     float preserveColor, int useHDR, int useLinear, int inputProfile,
     float offsetPrefilter,
-    float paddingThreshold)  // Alpha threshold for unpremultiply
+    float paddingThreshold,  // Alpha threshold for unpremultiply
+    int boundMinX, int boundMinY, int boundWidth, int boundHeight)  // BoundingBox for Grid optimization
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Early exit if outside BoundingBox
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    // Convert to actual output coordinates
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
 
     if (x >= dstWidth || y >= dstHeight)
         return;

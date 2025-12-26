@@ -82,6 +82,20 @@ constexpr UINT COMPOSITE_SRV_PAIR = 18;      // t0=original, t1=glow
 constexpr UINT EXTERNAL_OUTPUT_UAV = 20;
 constexpr UINT PASS_SRV_PAIRS_START = 21;    // For downsample/upsample passes
 
+// DispatchIndirect resource indices (for Refine shaders)
+// SRV table must be consecutive: t0, t1, t2
+constexpr UINT REFINE_SRV_START = 40;        // Start of SRV table for Refine shaders
+constexpr UINT REFINE_INPUT_SRV = 40;        // t0: input texture
+constexpr UINT REFINE_DUMMY_SRV = 41;        // t1: dummy (same as input)
+constexpr UINT REFINE_BOUNDS_SRV = 42;       // t2: bounds input (StructuredBuffer)
+
+// UAV table must be consecutive: u0, u1, u2, u3
+constexpr UINT REFINE_UAV_START = 43;        // Start of UAV table for Refine shaders
+constexpr UINT REFINE_OUTPUT_UAV = 43;       // u0: output texture
+constexpr UINT ATOMIC_BOUNDS_UAV = 44;       // u1: atomic bounds
+constexpr UINT INDIRECT_ARGS_UAV = 45;       // u2: indirect args
+constexpr UINT BOUNDS_OUTPUT_UAV = 46;       // u3: bounds output
+
 // ============================================================================
 // Helper to get DLL module handle
 // ============================================================================
@@ -145,6 +159,27 @@ bool JustGlowGPURenderer::Initialize(
     }
     LOG("Constant buffers created");
 
+    // Create DispatchIndirect resources (for BoundingBox optimization)
+    if (!CreateDispatchIndirectResources()) {
+        LOG("ERROR: Failed to create DispatchIndirect resources");
+        return false;
+    }
+    LOG("DispatchIndirect resources created");
+
+    // Create Refine root signature (with additional UAVs)
+    if (!CreateRefineRootSignature()) {
+        LOG("ERROR: Failed to create Refine root signature");
+        return false;
+    }
+    LOG("Refine root signature created");
+
+    // Create command signature for ExecuteIndirect
+    if (!CreateCommandSignature()) {
+        LOG("ERROR: Failed to create command signature");
+        return false;
+    }
+    LOG("Command signature created");
+
     // Load shaders
     if (!LoadShaders()) {
         LOG("ERROR: Failed to load shaders");
@@ -174,6 +209,18 @@ void JustGlowGPURenderer::Shutdown() {
         m_blurPassBuffer->Unmap(0, nullptr);
         m_blurPassBufferPtr = nullptr;
     }
+
+    // Release DispatchIndirect resources
+    if (m_refineConstBufferPtr) {
+        m_refineConstBuffer->Unmap(0, nullptr);
+        m_refineConstBufferPtr = nullptr;
+    }
+    m_refineConstBuffer.Reset();
+    m_atomicBoundsBuffer.Reset();
+    m_indirectArgsBuffer.Reset();
+    m_boundsOutputBuffer.Reset();
+    m_dispatchIndirectSignature.Reset();
+    m_refineRootSignature.Reset();
 
     if (m_fenceEvent) {
         CloseHandle(m_fenceEvent);
@@ -653,6 +700,14 @@ bool JustGlowGPURenderer::LoadShaders() {
     success &= LoadShader(ShaderType::Anamorphic, GetShaderPath(ShaderType::Anamorphic), sharedRootSig);
     success &= LoadShader(ShaderType::Composite, GetShaderPath(ShaderType::Composite), sharedRootSig);
 
+    // Load PrefilterWithBounds with Refine root sig (needs t2 for bounds input)
+    success &= LoadShader(ShaderType::PrefilterWithBounds, GetShaderPath(ShaderType::PrefilterWithBounds), m_refineRootSignature);
+
+    // Load Refine shaders with Refine root signature (needs extra UAVs)
+    success &= LoadShader(ShaderType::Refine, GetShaderPath(ShaderType::Refine), m_refineRootSignature);
+    success &= LoadShader(ShaderType::CalcIndirectArgs, GetShaderPath(ShaderType::CalcIndirectArgs), m_refineRootSignature);
+    success &= LoadShader(ShaderType::ResetBounds, GetShaderPath(ShaderType::ResetBounds), m_refineRootSignature);
+
     return success;
 }
 
@@ -717,12 +772,16 @@ std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
     path += L"DirectX_Assets\\";
 
     switch (type) {
-        case ShaderType::Prefilter:     return path + L"Prefilter.cso";
-        case ShaderType::Downsample:    return path + L"Downsample.cso";
-        case ShaderType::Upsample:      return path + L"Upsample.cso";
-        case ShaderType::Anamorphic:    return path + L"PostProcess.cso";
-        case ShaderType::Composite:     return path + L"Composite.cso";
-        default:                        return L"";
+        case ShaderType::Prefilter:         return path + L"Prefilter.cso";
+        case ShaderType::PrefilterWithBounds: return path + L"PrefilterWithBounds.cso";
+        case ShaderType::Downsample:        return path + L"Downsample.cso";
+        case ShaderType::Upsample:          return path + L"Upsample.cso";
+        case ShaderType::Anamorphic:        return path + L"PostProcess.cso";
+        case ShaderType::Composite:         return path + L"Composite.cso";
+        case ShaderType::Refine:            return path + L"Refine.cso";
+        case ShaderType::CalcIndirectArgs:  return path + L"CalcIndirectArgs.cso";
+        case ShaderType::ResetBounds:       return path + L"ResetBounds.cso";
+        default:                            return L"";
     }
 }
 
@@ -876,6 +935,96 @@ void JustGlowGPURenderer::CreateExternalResourceViews(
             &glowSrvDesc,
             GetCPUDescriptorHandle(COMPOSITE_SRV_PAIR + 1));
     }
+
+    // === DispatchIndirect Resource Views ===
+    if (m_useDispatchIndirect && m_atomicBoundsBuffer) {
+        // SRV table for Refine shaders: t0, t1, t2 must be consecutive
+
+        // t0: Input texture SRV
+        m_device->CreateShaderResourceView(
+            input,
+            &srvDesc,
+            GetCPUDescriptorHandle(REFINE_INPUT_SRV));
+
+        // t1: Dummy SRV (same as input, not used by Prefilter)
+        m_device->CreateShaderResourceView(
+            input,
+            &srvDesc,
+            GetCPUDescriptorHandle(REFINE_DUMMY_SRV));
+
+        // t2: Bounds SRV (StructuredBuffer<int>)
+        D3D12_SHADER_RESOURCE_VIEW_DESC boundsSrvDesc = {};
+        boundsSrvDesc.Format = DXGI_FORMAT_UNKNOWN;
+        boundsSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        boundsSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        boundsSrvDesc.Buffer.FirstElement = 0;
+        boundsSrvDesc.Buffer.NumElements = MAX_MIP_LEVELS * 4;  // 4 ints per level
+        boundsSrvDesc.Buffer.StructureByteStride = sizeof(INT);
+
+        m_device->CreateShaderResourceView(
+            m_boundsOutputBuffer.Get(),
+            &boundsSrvDesc,
+            GetCPUDescriptorHandle(REFINE_BOUNDS_SRV));
+
+        // UAV table for Refine shaders: u0, u1, u2, u3 must be consecutive
+
+        // u0: Output UAV (placeholder - will be overwritten in ExecutePrefilterIndirect)
+        // Use atomicBoundsBuffer as placeholder since Refine doesn't write to u0
+        D3D12_UNORDERED_ACCESS_VIEW_DESC placeholderUavDesc = {};
+        placeholderUavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        placeholderUavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        placeholderUavDesc.Buffer.FirstElement = 0;
+        placeholderUavDesc.Buffer.NumElements = 4;
+        placeholderUavDesc.Buffer.StructureByteStride = sizeof(UINT);
+
+        m_device->CreateUnorderedAccessView(
+            m_atomicBoundsBuffer.Get(),
+            nullptr,
+            &placeholderUavDesc,
+            GetCPUDescriptorHandle(REFINE_OUTPUT_UAV));
+
+        // u1: Atomic bounds UAV
+        D3D12_UNORDERED_ACCESS_VIEW_DESC atomicUavDesc = {};
+        atomicUavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        atomicUavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        atomicUavDesc.Buffer.FirstElement = 0;
+        atomicUavDesc.Buffer.NumElements = 4;
+        atomicUavDesc.Buffer.StructureByteStride = sizeof(UINT);
+
+        m_device->CreateUnorderedAccessView(
+            m_atomicBoundsBuffer.Get(),
+            nullptr,
+            &atomicUavDesc,
+            GetCPUDescriptorHandle(ATOMIC_BOUNDS_UAV));
+
+        // Indirect args UAV (u2)
+        D3D12_UNORDERED_ACCESS_VIEW_DESC indirectUavDesc = {};
+        indirectUavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        indirectUavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        indirectUavDesc.Buffer.FirstElement = 0;
+        indirectUavDesc.Buffer.NumElements = MAX_MIP_LEVELS * 3;
+        indirectUavDesc.Buffer.StructureByteStride = sizeof(UINT);
+
+        m_device->CreateUnorderedAccessView(
+            m_indirectArgsBuffer.Get(),
+            nullptr,
+            &indirectUavDesc,
+            GetCPUDescriptorHandle(INDIRECT_ARGS_UAV));
+
+        // Bounds output UAV (u3)
+        D3D12_UNORDERED_ACCESS_VIEW_DESC boundsUavDesc = {};
+        boundsUavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        boundsUavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        boundsUavDesc.Buffer.FirstElement = 0;
+        boundsUavDesc.Buffer.NumElements = MAX_MIP_LEVELS * 4;
+        boundsUavDesc.Buffer.StructureByteStride = sizeof(INT);
+
+        m_device->CreateUnorderedAccessView(
+            m_boundsOutputBuffer.Get(),
+            nullptr,
+            &boundsUavDesc,
+            GetCPUDescriptorHandle(BOUNDS_OUTPUT_UAV));
+    }
 }
 
 // ============================================================================
@@ -944,11 +1093,34 @@ bool JustGlowGPURenderer::Render(
     LOG("Constant buffer updated");
 
     // === Pipeline Execution ===
-    LOG("--- Prefilter ---");
-    ExecutePrefilter(params, inputBuffer);
+    // Check if DispatchIndirect optimization is enabled and shaders are loaded
+    bool useIndirect = m_useDispatchIndirect &&
+        m_shaders[static_cast<size_t>(ShaderType::Refine)].loaded &&
+        m_shaders[static_cast<size_t>(ShaderType::CalcIndirectArgs)].loaded &&
+        m_shaders[static_cast<size_t>(ShaderType::ResetBounds)].loaded;
 
-    LOG("--- Downsample Chain ---");
-    ExecuteDownsampleChain(params);
+    if (useIndirect) {
+        // DispatchIndirect optimized pipeline
+        LOG("=== Using DispatchIndirect Pipeline ===");
+
+        LOG("--- Refine (BoundingBox) ---");
+        ExecuteRefine(params, inputBuffer, 0);
+
+        LOG("--- PrefilterIndirect ---");
+        ExecutePrefilterIndirect(params, inputBuffer);
+
+        LOG("--- Downsample Chain ---");
+        ExecuteDownsampleChainIndirect(params);
+    } else {
+        // Standard pipeline
+        LOG("=== Using Standard Pipeline ===");
+
+        LOG("--- Prefilter ---");
+        ExecutePrefilter(params, inputBuffer);
+
+        LOG("--- Downsample Chain ---");
+        ExecuteDownsampleChain(params);
+    }
 
     LOG("--- Upsample Chain ---");
     ExecuteUpsampleChain(params);
@@ -1267,6 +1439,261 @@ void JustGlowGPURenderer::ExecuteComposite(
     TransitionResource(m_mipChain[0].resource.Get(),
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+// ============================================================================
+// DispatchIndirect Optimized Stages
+// ============================================================================
+
+void JustGlowGPURenderer::ExecuteRefine(
+    const RenderParams& params,
+    ID3D12Resource* input,
+    int mipLevel)
+{
+    if (!m_useDispatchIndirect) return;
+
+    LOG("ExecuteRefine: mipLevel=%d, size=%dx%d",
+        mipLevel, mipLevel == 0 ? params.width : m_mipChain[mipLevel-1].width,
+        mipLevel == 0 ? params.height : m_mipChain[mipLevel-1].height);
+
+    int refineWidth = mipLevel == 0 ? params.width : m_mipChain[mipLevel-1].width;
+    int refineHeight = mipLevel == 0 ? params.height : m_mipChain[mipLevel-1].height;
+
+    // Update RefineParams constant buffer (b2)
+    struct RefineParams {
+        int refineWidth;
+        int refineHeight;
+        float refineThreshold;
+        int blurRadius;
+        int mipLevel;
+        int maxMipLevels;
+        int pad0, pad1;
+    };
+    RefineParams refineParams = {};
+    refineParams.refineWidth = refineWidth;
+    refineParams.refineHeight = refineHeight;
+    refineParams.refineThreshold = params.threshold;
+    refineParams.blurRadius = static_cast<int>(params.offsetPrefilter);
+    refineParams.mipLevel = mipLevel;
+    refineParams.maxMipLevels = params.mipLevels;
+    memcpy(m_refineConstBufferPtr, &refineParams, sizeof(refineParams));
+
+    // === Step 1: Reset atomic bounds ===
+    {
+        auto& shader = m_shaders[static_cast<size_t>(ShaderType::ResetBounds)];
+        if (!shader.loaded) {
+            LOG("ResetBounds shader not loaded!");
+            return;
+        }
+
+        m_commandList->SetComputeRootSignature(m_refineRootSignature.Get());
+        m_commandList->SetPipelineState(shader.pipelineState.Get());
+
+        m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+        m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
+        m_commandList->SetComputeRootConstantBufferView(2, m_refineConstBuffer->GetGPUVirtualAddress());
+
+        // SRV table (t0, t1, t2) - we need 3 SRVs for Refine root sig
+        m_commandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(REFINE_INPUT_SRV));
+
+        // UAV table (u0, u1, u2, u3)
+        m_commandList->SetComputeRootDescriptorTable(4, GetGPUDescriptorHandle(REFINE_OUTPUT_UAV));
+
+        m_commandList->Dispatch(1, 1, 1);
+        InsertUAVBarrier(m_atomicBoundsBuffer.Get());
+    }
+
+    // === Step 2: Execute RefineCS ===
+    {
+        auto& shader = m_shaders[static_cast<size_t>(ShaderType::Refine)];
+        if (!shader.loaded) {
+            LOG("Refine shader not loaded!");
+            return;
+        }
+
+        m_commandList->SetPipelineState(shader.pipelineState.Get());
+
+        UINT groupsX = (refineWidth + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+        UINT groupsY = (refineHeight + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+        LOG("RefineCS Dispatch: %u x %u groups", groupsX, groupsY);
+
+        m_commandList->Dispatch(groupsX, groupsY, 1);
+        InsertUAVBarrier(m_atomicBoundsBuffer.Get());
+    }
+
+    // === Step 3: Calculate IndirectArgs ===
+    {
+        auto& shader = m_shaders[static_cast<size_t>(ShaderType::CalcIndirectArgs)];
+        if (!shader.loaded) {
+            LOG("CalcIndirectArgs shader not loaded!");
+            return;
+        }
+
+        // Transition IndirectArgs to UAV for writing
+        TransitionResource(m_indirectArgsBuffer.Get(),
+            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        m_commandList->SetPipelineState(shader.pipelineState.Get());
+        m_commandList->Dispatch(1, 1, 1);
+
+        InsertUAVBarrier(m_indirectArgsBuffer.Get());
+        InsertUAVBarrier(m_boundsOutputBuffer.Get());
+
+        // Transition IndirectArgs back to INDIRECT_ARGUMENT for ExecuteIndirect
+        TransitionResource(m_indirectArgsBuffer.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    }
+
+    LOG("ExecuteRefine complete for mipLevel=%d", mipLevel);
+}
+
+void JustGlowGPURenderer::ExecutePrefilterIndirect(
+    const RenderParams& params,
+    ID3D12Resource* input)
+{
+    auto& shader = m_shaders[static_cast<size_t>(ShaderType::PrefilterWithBounds)];
+    if (!shader.loaded) {
+        LOG("PrefilterWithBounds shader not loaded, falling back to regular Prefilter");
+        ExecutePrefilter(params, input);
+        return;
+    }
+
+    LOG("ExecutePrefilterIndirect: using DispatchIndirect");
+
+    // Update BlurPassParams
+    BlurPassParams passParams = {};
+    passParams.srcWidth = params.width;
+    passParams.srcHeight = params.height;
+    passParams.dstWidth = m_mipChain[0].width;
+    passParams.dstHeight = m_mipChain[0].height;
+    passParams.srcTexelX = 1.0f / static_cast<float>(params.width);
+    passParams.srcTexelY = 1.0f / static_cast<float>(params.height);
+    passParams.dstTexelX = 1.0f / static_cast<float>(passParams.dstWidth);
+    passParams.dstTexelY = 1.0f / static_cast<float>(passParams.dstHeight);
+    passParams.blurOffset = 0.0f;
+    passParams.passIndex = 0;
+    passParams.totalPasses = params.mipLevels;
+    memcpy(m_blurPassBufferPtr, &passParams, sizeof(passParams));
+
+    // Refine root signature has 5 parameters:
+    // [0] CBV - GlowParams (b0)
+    // [1] CBV - BlurPassParams (b1)
+    // [2] CBV - RefineParams (b2)
+    // [3] Descriptor Table - SRVs (t0, t1, t2)
+    // [4] Descriptor Table - UAVs (u0, u1, u2, u3)
+
+    m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
+    m_commandList->SetPipelineState(shader.pipelineState.Get());
+
+    m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+    m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
+    m_commandList->SetComputeRootConstantBufferView(2, m_refineConstBuffer->GetGPUVirtualAddress());
+
+    // Set up SRV table (t0=input, t1=dummy, t2=bounds)
+    // Use REFINE_INPUT_SRV which has consecutive descriptors for t0, t1, t2
+    m_commandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(REFINE_INPUT_SRV));
+
+    // Set up UAV table (u0=mip[0] output, u1-u3 unused for Prefilter)
+    m_commandList->SetComputeRootDescriptorTable(4, GetGPUDescriptorHandle(REFINE_OUTPUT_UAV));
+
+    // Create UAV for mip[0] at REFINE_OUTPUT_UAV position (u0)
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+    uavDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    m_device->CreateUnorderedAccessView(
+        m_mipChain[0].resource.Get(),
+        nullptr,
+        &uavDesc,
+        GetCPUDescriptorHandle(REFINE_OUTPUT_UAV));
+
+    // ExecuteIndirect - GPU determines dispatch size from IndirectArgsBuffer
+    // Offset = mipLevel * 3 * sizeof(UINT) = 0 for prefilter
+    m_commandList->ExecuteIndirect(
+        m_dispatchIndirectSignature.Get(),
+        1,
+        m_indirectArgsBuffer.Get(),
+        0,  // Offset for mip level 0
+        nullptr,
+        0);
+
+    InsertUAVBarrier(m_mipChain[0].resource.Get());
+    LOG("ExecutePrefilterIndirect complete");
+}
+
+void JustGlowGPURenderer::ExecuteDownsampleChainIndirect(const RenderParams& params) {
+    auto& shader = m_shaders[static_cast<size_t>(ShaderType::Downsample)];
+    if (!shader.loaded) {
+        LOG("Downsample shader not loaded!");
+        return;
+    }
+
+    LOG("ExecuteDownsampleChainIndirect: %d levels", params.mipLevels);
+
+    m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
+    m_commandList->SetPipelineState(shader.pipelineState.Get());
+    m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+
+    for (int i = 0; i < params.mipLevels - 1; ++i) {
+        auto& srcMip = m_mipChain[i];
+        auto& dstMip = m_mipChain[i + 1];
+
+        LOG("Downsample pass %d (Indirect): mip[%d](%dx%d) -> mip[%d](%dx%d)",
+            i, i, srcMip.width, srcMip.height, i+1, dstMip.width, dstMip.height);
+
+        // Update BlurPassParams
+        BlurPassParams passParams = {};
+        passParams.srcWidth = srcMip.width;
+        passParams.srcHeight = srcMip.height;
+        passParams.dstWidth = dstMip.width;
+        passParams.dstHeight = dstMip.height;
+        passParams.srcPitch = srcMip.width;
+        passParams.dstPitch = dstMip.width;
+        passParams.srcTexelX = 1.0f / static_cast<float>(srcMip.width);
+        passParams.srcTexelY = 1.0f / static_cast<float>(srcMip.height);
+        passParams.dstTexelX = 1.0f / static_cast<float>(dstMip.width);
+        passParams.dstTexelY = 1.0f / static_cast<float>(dstMip.height);
+        passParams.blurOffset = params.blurOffsets[i];
+        passParams.fractionalBlend = 0.0f;
+        passParams.passIndex = i;
+        passParams.totalPasses = params.mipLevels;
+        memcpy(m_blurPassBufferPtr, &passParams, sizeof(passParams));
+        m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
+
+        // Transition source to SRV
+        TransitionResource(srcMip.resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // Create SRV pair for this pass
+        UINT pairIndex = PASS_SRV_PAIRS_START + i * 2;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MipLevels = 1;
+
+        m_device->CreateShaderResourceView(srcMip.resource.Get(), &srvDesc,
+            GetCPUDescriptorHandle(pairIndex));
+        m_device->CreateShaderResourceView(srcMip.resource.Get(), &srvDesc,
+            GetCPUDescriptorHandle(pairIndex + 1));
+
+        m_commandList->SetComputeRootDescriptorTable(2, GetGPUDescriptorHandle(pairIndex));
+        m_commandList->SetComputeRootDescriptorTable(3, GetGPUDescriptorHandle(dstMip.uavIndex));
+
+        // For now, use regular Dispatch for downsample
+        // (Full DispatchIndirect for downsample would require per-level Refine)
+        UINT groupsX = (dstMip.width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+        UINT groupsY = (dstMip.height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+        m_commandList->Dispatch(groupsX, groupsY, 1);
+
+        TransitionResource(srcMip.resource.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        InsertUAVBarrier(dstMip.resource.Get());
+    }
 }
 
 // ============================================================================
