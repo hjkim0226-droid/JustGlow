@@ -28,11 +28,15 @@ using Microsoft::WRL::ComPtr;
 // ============================================================================
 
 enum class ShaderType {
-    Prefilter,          // Soft Threshold + Karis Average + 13-Tap Downsample
-    Downsample,         // Dual Kawase 4-tap downsample
-    Upsample,           // 9-Tap Tent upsample with progressive blend
-    Anamorphic,         // Directional stretch
-    Composite,          // Final blend with original
+    Prefilter,              // Soft Threshold + Karis Average + 13-Tap Downsample
+    PrefilterWithBounds,    // Same as Prefilter but reads BoundingBox for offset
+    Downsample,             // Dual Kawase 4-tap downsample
+    Upsample,               // 9-Tap Tent upsample with progressive blend
+    Anamorphic,             // Directional stretch
+    Composite,              // Final blend with original
+    Refine,                 // Calculate BoundingBox using atomics
+    CalcIndirectArgs,       // Convert bounds to thread group counts
+    ResetBounds,            // Reset atomic bounds for next frame
     COUNT
 };
 
@@ -106,11 +110,47 @@ private:
     std::vector<MipBuffer> m_mipChain;
     int m_currentMipLevels = 0;
 
+    // =========================================
+    // DispatchIndirect Optimization Resources
+    // =========================================
+
+    // Atomic bounds buffer: [minX, maxX, minY, maxY] - written by RefineCS
+    ComPtr<ID3D12Resource> m_atomicBoundsBuffer;
+    UINT m_atomicBoundsUavIndex = 0;
+
+    // IndirectArgs buffer: { ThreadGroupCountX, Y, Z } per MIP level
+    // Used by ExecuteIndirect to determine dispatch size
+    ComPtr<ID3D12Resource> m_indirectArgsBuffer;
+
+    // Bounds output buffer: [minX, maxX, minY, maxY] per MIP level
+    // Read by Prefilter/Downsample to offset coordinates
+    ComPtr<ID3D12Resource> m_boundsOutputBuffer;
+    UINT m_boundsOutputSrvIndex = 0;
+    UINT m_boundsOutputUavIndex = 0;
+
+    // Refine constant buffer (b2)
+    ComPtr<ID3D12Resource> m_refineConstBuffer;
+    void* m_refineConstBufferPtr = nullptr;
+
+    // Command signature for ExecuteIndirect
+    ComPtr<ID3D12CommandSignature> m_dispatchIndirectSignature;
+
+    // Root signature for Refine shaders (needs additional UAVs)
+    ComPtr<ID3D12RootSignature> m_refineRootSignature;
+
+    // Flag to enable/disable DispatchIndirect optimization
+    bool m_useDispatchIndirect = true;
+
+    static constexpr int MAX_MIP_LEVELS = 12;
+
     // Initialization helpers
     bool CreateCommandObjects();
     bool CreateDescriptorHeaps();
     bool CreateConstantBuffers();
     bool CreateRootSignature(ComPtr<ID3D12RootSignature>& rootSig);
+    bool CreateRefineRootSignature();      // Root sig for Refine shaders (extra UAVs)
+    bool CreateDispatchIndirectResources(); // IndirectArgs, bounds buffers
+    bool CreateCommandSignature();          // For ExecuteIndirect
     bool LoadShaders();
     bool LoadShader(ShaderType type, const std::wstring& csoPath,
                    const ComPtr<ID3D12RootSignature>& rootSig);
@@ -127,6 +167,11 @@ private:
     void ExecuteAnamorphic(const RenderParams& params);
     void ExecuteComposite(const RenderParams& params,
         ID3D12Resource* original, ID3D12Resource* output);
+
+    // DispatchIndirect optimized stages
+    void ExecuteRefine(const RenderParams& params, ID3D12Resource* input, int mipLevel);
+    void ExecutePrefilterIndirect(const RenderParams& params, ID3D12Resource* input);
+    void ExecuteDownsampleChainIndirect(const RenderParams& params);
 
     // Utility
     void TransitionResource(ID3D12Resource* resource,

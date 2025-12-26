@@ -395,6 +395,246 @@ bool JustGlowGPURenderer::CreateRootSignature(ComPtr<ID3D12RootSignature>& rootS
 }
 
 // ============================================================================
+// Create Refine Root Signature (with additional UAVs for atomics)
+// ============================================================================
+
+bool JustGlowGPURenderer::CreateRefineRootSignature() {
+    // Root parameters for Refine shaders:
+    // [0] CBV - GlowParams (b0)
+    // [1] CBV - BlurPassParams (b1)
+    // [2] CBV - RefineParams (b2)
+    // [3] Descriptor Table - SRVs (t0, t1, t2)
+    // [4] Descriptor Table - UAVs (u0, u1, u2, u3)
+
+    D3D12_ROOT_PARAMETER rootParams[5] = {};
+
+    // CBV for GlowParams (b0)
+    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[0].Descriptor.ShaderRegister = 0;
+    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // CBV for BlurPassParams (b1)
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[1].Descriptor.ShaderRegister = 1;
+    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // CBV for RefineParams (b2)
+    rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[2].Descriptor.ShaderRegister = 2;
+    rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // SRV descriptor table (t0, t1, t2)
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 3;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[3].DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // UAV descriptor table (u0, u1, u2, u3)
+    D3D12_DESCRIPTOR_RANGE uavRange = {};
+    uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    uavRange.NumDescriptors = 4;
+    uavRange.BaseShaderRegister = 0;
+    uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[4].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[4].DescriptorTable.pDescriptorRanges = &uavRange;
+    rootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Static samplers
+    D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+    staticSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].ShaderRegister = 0;
+    staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    staticSamplers[1] = staticSamplers[0];
+    staticSamplers[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSamplers[1].ShaderRegister = 1;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+    rootSigDesc.NumParameters = 5;
+    rootSigDesc.pParameters = rootParams;
+    rootSigDesc.NumStaticSamplers = 2;
+    rootSigDesc.pStaticSamplers = staticSamplers;
+
+    ComPtr<ID3DBlob> serializedRootSig;
+    ComPtr<ID3DBlob> errorBlob;
+
+    HRESULT hr = D3D12SerializeRootSignature(
+        &rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+        &serializedRootSig, &errorBlob);
+    if (FAILED(hr)) {
+        LOG("ERROR: Failed to serialize Refine root signature");
+        return false;
+    }
+
+    hr = m_device->CreateRootSignature(
+        0, serializedRootSig->GetBufferPointer(),
+        serializedRootSig->GetBufferSize(),
+        IID_PPV_ARGS(&m_refineRootSignature));
+    if (FAILED(hr)) {
+        LOG("ERROR: Failed to create Refine root signature");
+        return false;
+    }
+
+    LOG("Refine root signature created");
+    return true;
+}
+
+// ============================================================================
+// Create DispatchIndirect Resources
+// ============================================================================
+
+bool JustGlowGPURenderer::CreateDispatchIndirectResources() {
+    D3D12_HEAP_PROPERTIES defaultHeapProps = {};
+    defaultHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    // 1. Atomic bounds buffer: 4 uints [minX, maxX, minY, maxY]
+    {
+        D3D12_RESOURCE_DESC bufferDesc = {};
+        bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufferDesc.Width = 4 * sizeof(UINT);
+        bufferDesc.Height = 1;
+        bufferDesc.DepthOrArraySize = 1;
+        bufferDesc.MipLevels = 1;
+        bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        bufferDesc.SampleDesc.Count = 1;
+        bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bufferDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        HRESULT hr = m_device->CreateCommittedResource(
+            &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+            IID_PPV_ARGS(&m_atomicBoundsBuffer));
+        if (FAILED(hr)) {
+            LOG("ERROR: Failed to create atomic bounds buffer");
+            return false;
+        }
+        LOG("Atomic bounds buffer created");
+    }
+
+    // 2. IndirectArgs buffer: 3 uints per MIP level (X, Y, Z thread group counts)
+    {
+        D3D12_RESOURCE_DESC bufferDesc = {};
+        bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufferDesc.Width = MAX_MIP_LEVELS * 3 * sizeof(UINT);
+        bufferDesc.Height = 1;
+        bufferDesc.DepthOrArraySize = 1;
+        bufferDesc.MipLevels = 1;
+        bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        bufferDesc.SampleDesc.Count = 1;
+        bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bufferDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        HRESULT hr = m_device->CreateCommittedResource(
+            &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, nullptr,
+            IID_PPV_ARGS(&m_indirectArgsBuffer));
+        if (FAILED(hr)) {
+            LOG("ERROR: Failed to create indirect args buffer");
+            return false;
+        }
+        LOG("Indirect args buffer created (%d MIP levels)", MAX_MIP_LEVELS);
+    }
+
+    // 3. Bounds output buffer: 4 ints per MIP level [minX, maxX, minY, maxY]
+    {
+        D3D12_RESOURCE_DESC bufferDesc = {};
+        bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufferDesc.Width = MAX_MIP_LEVELS * 4 * sizeof(INT);
+        bufferDesc.Height = 1;
+        bufferDesc.DepthOrArraySize = 1;
+        bufferDesc.MipLevels = 1;
+        bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        bufferDesc.SampleDesc.Count = 1;
+        bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bufferDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        HRESULT hr = m_device->CreateCommittedResource(
+            &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+            IID_PPV_ARGS(&m_boundsOutputBuffer));
+        if (FAILED(hr)) {
+            LOG("ERROR: Failed to create bounds output buffer");
+            return false;
+        }
+        LOG("Bounds output buffer created");
+    }
+
+    // 4. Refine constant buffer (b2)
+    {
+        D3D12_HEAP_PROPERTIES uploadHeapProps = {};
+        uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+        // RefineParams: 8 ints = 32 bytes, aligned to 256
+        UINT cbSize = 256;
+        D3D12_RESOURCE_DESC bufferDesc = {};
+        bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufferDesc.Width = cbSize;
+        bufferDesc.Height = 1;
+        bufferDesc.DepthOrArraySize = 1;
+        bufferDesc.MipLevels = 1;
+        bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        bufferDesc.SampleDesc.Count = 1;
+        bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        HRESULT hr = m_device->CreateCommittedResource(
+            &uploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(&m_refineConstBuffer));
+        if (FAILED(hr)) {
+            LOG("ERROR: Failed to create refine constant buffer");
+            return false;
+        }
+
+        hr = m_refineConstBuffer->Map(0, nullptr, &m_refineConstBufferPtr);
+        if (FAILED(hr)) {
+            LOG("ERROR: Failed to map refine constant buffer");
+            return false;
+        }
+        LOG("Refine constant buffer created");
+    }
+
+    return true;
+}
+
+// ============================================================================
+// Create Command Signature for ExecuteIndirect
+// ============================================================================
+
+bool JustGlowGPURenderer::CreateCommandSignature() {
+    // Command signature for Dispatch (3 uints: X, Y, Z)
+    D3D12_INDIRECT_ARGUMENT_DESC argDesc = {};
+    argDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+
+    D3D12_COMMAND_SIGNATURE_DESC sigDesc = {};
+    sigDesc.ByteStride = 3 * sizeof(UINT);  // ThreadGroupCountX, Y, Z
+    sigDesc.NumArgumentDescs = 1;
+    sigDesc.pArgumentDescs = &argDesc;
+    sigDesc.NodeMask = 0;
+
+    HRESULT hr = m_device->CreateCommandSignature(
+        &sigDesc, nullptr,  // No root signature needed for Dispatch
+        IID_PPV_ARGS(&m_dispatchIndirectSignature));
+    if (FAILED(hr)) {
+        LOG("ERROR: Failed to create dispatch indirect command signature");
+        return false;
+    }
+
+    LOG("Dispatch indirect command signature created");
+    return true;
+}
+
+// ============================================================================
 // Load Shaders
 // ============================================================================
 
