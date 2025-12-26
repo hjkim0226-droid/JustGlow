@@ -221,7 +221,8 @@ enum class DebugViewMode : int {
     Up4 = 13,       // Upsample level 4
     Up5 = 14,       // Upsample level 5
     Up6 = 15,       // Upsample level 6
-    GlowOnly = 16   // Final glow without source
+    GlowOnly = 16,  // Final glow without source
+    BoundingBox = 17 // Show BoundingBox overlay on final output
 };
 
 // ============================================================================

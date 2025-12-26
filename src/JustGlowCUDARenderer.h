@@ -26,6 +26,36 @@ struct CUDAMipBuffer {
 };
 
 // ============================================================================
+// BoundingBox Structure for Adaptive Resolution
+// ============================================================================
+
+struct BoundingBox {
+    int minX, minY, maxX, maxY;
+
+    int width() const { return (maxX >= minX) ? (maxX - minX + 1) : 0; }
+    int height() const { return (maxY >= minY) ? (maxY - minY + 1) : 0; }
+    bool valid() const { return maxX >= minX && maxY >= minY; }
+
+    // Initialize to invalid state (will be updated by atomic operations)
+    void reset(int imgWidth, int imgHeight) {
+        minX = imgWidth;   // Start at max, atomicMin will reduce
+        minY = imgHeight;
+        maxX = -1;         // Start at min, atomicMax will increase
+        maxY = -1;
+    }
+
+    // Initialize to full image (fallback)
+    void setFull(int imgWidth, int imgHeight) {
+        minX = 0;
+        minY = 0;
+        maxX = imgWidth - 1;
+        maxY = imgHeight - 1;
+    }
+};
+
+static const int MAX_MIP_LEVELS = 12;
+
+// ============================================================================
 // JustGlowCUDARenderer Class
 // ============================================================================
 
@@ -72,6 +102,8 @@ private:
     CUfunction m_debugOutputKernel;
     // Desaturation kernel (runs after Prefilter, before Downsample)
     CUfunction m_desaturationKernel;
+    // Refine kernel (BoundingBox calculation)
+    CUfunction m_refineKernel;
 
     // MIP chain buffers (stores downsampled textures - read during upsample)
     std::vector<CUDAMipBuffer> m_mipChain;
@@ -87,6 +119,10 @@ private:
     int m_currentWidth;
     int m_currentHeight;
 
+    // BoundingBox for adaptive resolution
+    BoundingBox m_mipBounds[MAX_MIP_LEVELS];  // BoundingBox for each MIP level
+    CUdeviceptr m_refineBoundsGPU;            // GPU buffer for 4 ints (minX, maxX, minY, maxY)
+
     // State
     bool m_initialized;
 
@@ -96,6 +132,8 @@ private:
     bool LoadKernels();
 
     // Rendering stages
+    bool ExecuteRefine(CUdeviceptr input, int width, int height, int pitchPixels,
+                       float threshold, int blurRadius, int mipLevel);
     bool ExecutePrefilter(const RenderParams& params, CUdeviceptr input);
     bool ExecuteDownsampleChain(const RenderParams& params);
     bool ExecuteUpsampleChain(const RenderParams& params);

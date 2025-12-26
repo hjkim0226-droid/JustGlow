@@ -14,6 +14,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdarg>
+#include <algorithm>  // for std::min, std::max
 
 // ============================================================================
 // Debug Logging
@@ -107,6 +108,8 @@ JustGlowCUDARenderer::JustGlowCUDARenderer()
     , m_gaussianDownsampleVKernel(nullptr)
     , m_debugOutputKernel(nullptr)
     , m_desaturationKernel(nullptr)
+    , m_refineKernel(nullptr)
+    , m_refineBoundsGPU(0)
     , m_horizontalTemp{}
     , m_gaussianDownsampleTemp{}
     , m_prefilterSepTemp{}
@@ -174,6 +177,15 @@ bool JustGlowCUDARenderer::Initialize(CUcontext context, CUstream stream) {
         return false;
     }
     CUDA_LOG("Sync event created");
+
+    // Allocate GPU buffer for RefineKernel bounds (4 ints: minX, maxX, minY, maxY)
+    err = cuMemAlloc(&m_refineBoundsGPU, 4 * sizeof(int));
+    if (!CheckCUDAError(err, "cuMemAlloc(refineBoundsGPU)")) {
+        CUDA_LOG("ERROR: Failed to allocate refine bounds buffer");
+        cuCtxPopCurrent(nullptr);
+        return false;
+    }
+    CUDA_LOG("Refine bounds GPU buffer allocated");
 
     // Pop context
     cuCtxPopCurrent(nullptr);
@@ -295,6 +307,12 @@ bool JustGlowCUDARenderer::LoadKernels() {
     }
     CUDA_LOG("DesaturationKernel loaded");
 
+    err = cuModuleGetFunction(&m_refineKernel, m_module, "RefineKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(RefineKernel)")) {
+        return false;
+    }
+    CUDA_LOG("RefineKernel loaded");
+
     return true;
 }
 
@@ -309,6 +327,13 @@ void JustGlowCUDARenderer::Shutdown() {
         cuCtxPushCurrent(m_context);
 
         ReleaseMipChain();
+
+        // Free refine bounds GPU buffer
+        if (m_refineBoundsGPU) {
+            cuMemFree(m_refineBoundsGPU);
+            m_refineBoundsGPU = 0;
+            CUDA_LOG("Refine bounds GPU buffer freed");
+        }
 
         // Destroy sync event
         if (m_syncEvent) {
@@ -534,8 +559,18 @@ bool JustGlowCUDARenderer::Render(
     }
 
     // Execute pipeline
+
+    // Step 0: Refine - Calculate BoundingBox for input
+    // Use offsetPrefilter as blur radius margin
+    int blurRadiusForPrefilter = static_cast<int>(params.offsetPrefilter * 10.0f + 0.5f);
+    CUDA_LOG("--- Refine (Input) ---");
+    if (!ExecuteRefine(inputBuffer, params.width, params.height, params.width,
+                       params.threshold, blurRadiusForPrefilter, 0)) {
+        success = false;
+    }
+
     CUDA_LOG("--- Prefilter ---");
-    if (!ExecutePrefilter(params, inputBuffer)) {
+    if (success && !ExecutePrefilter(params, inputBuffer)) {
         success = false;
     }
 
@@ -581,6 +616,91 @@ bool JustGlowCUDARenderer::Render(
 
     CUDA_LOG("=== CUDA Render %s ===", success ? "Complete" : "Failed");
     return success;
+}
+
+// ============================================================================
+// Execute Refine (BoundingBox Calculation)
+// ============================================================================
+
+bool JustGlowCUDARenderer::ExecuteRefine(
+    CUdeviceptr input, int width, int height, int pitchPixels,
+    float threshold, int blurRadius, int mipLevel)
+{
+    // Initialize bounds to invalid state on GPU
+    // minX = width, minY = height (max values, will be reduced by atomicMin)
+    // maxX = -1, maxY = -1 (min values, will be increased by atomicMax)
+    int initBounds[4] = { width, -1, height, -1 };  // minX, maxX, minY, maxY
+    CUresult err = cuMemcpyHtoDAsync(m_refineBoundsGPU, initBounds, 4 * sizeof(int), m_stream);
+    if (!CheckCUDAError(err, "cuMemcpyHtoD(refineBounds init)")) {
+        return false;
+    }
+
+    // Calculate grid dimensions
+    int gridX = (width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    int gridY = (height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+    // Get pointers to each bound value in GPU buffer
+    CUdeviceptr ptrMinX = m_refineBoundsGPU + 0 * sizeof(int);
+    CUdeviceptr ptrMaxX = m_refineBoundsGPU + 1 * sizeof(int);
+    CUdeviceptr ptrMinY = m_refineBoundsGPU + 2 * sizeof(int);
+    CUdeviceptr ptrMaxY = m_refineBoundsGPU + 3 * sizeof(int);
+
+    // Kernel parameters
+    void* args[] = {
+        const_cast<CUdeviceptr*>(&input),
+        &width, &height, &pitchPixels,
+        &threshold, &blurRadius,
+        &ptrMinX, &ptrMaxX, &ptrMinY, &ptrMaxY
+    };
+
+    // Launch kernel
+    err = cuLaunchKernel(
+        m_refineKernel,
+        gridX, gridY, 1,
+        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+        0, m_stream,
+        args, nullptr);
+
+    if (!CheckCUDAError(err, "cuLaunchKernel(RefineKernel)")) {
+        return false;
+    }
+
+    // Synchronize to ensure kernel completes before reading back
+    err = cuStreamSynchronize(m_stream);
+    if (!CheckCUDAError(err, "cuStreamSynchronize(Refine)")) {
+        return false;
+    }
+
+    // Read back bounds from GPU
+    int resultBounds[4];
+    err = cuMemcpyDtoH(resultBounds, m_refineBoundsGPU, 4 * sizeof(int));
+    if (!CheckCUDAError(err, "cuMemcpyDtoH(refineBounds)")) {
+        return false;
+    }
+
+    // Store in m_mipBounds
+    m_mipBounds[mipLevel].minX = resultBounds[0];
+    m_mipBounds[mipLevel].maxX = resultBounds[1];
+    m_mipBounds[mipLevel].minY = resultBounds[2];
+    m_mipBounds[mipLevel].maxY = resultBounds[3];
+
+    // Check if bounds are valid (at least one pixel above threshold)
+    if (!m_mipBounds[mipLevel].valid()) {
+        // No pixels above threshold - use full image as fallback
+        m_mipBounds[mipLevel].setFull(width, height);
+        CUDA_LOG("Refine MIP[%d]: No active pixels, using full image %dx%d",
+            mipLevel, width, height);
+    } else {
+        CUDA_LOG("Refine MIP[%d]: BoundingBox [%d,%d]-[%d,%d] = %dx%d (%.1f%% of %dx%d)",
+            mipLevel,
+            m_mipBounds[mipLevel].minX, m_mipBounds[mipLevel].minY,
+            m_mipBounds[mipLevel].maxX, m_mipBounds[mipLevel].maxY,
+            m_mipBounds[mipLevel].width(), m_mipBounds[mipLevel].height(),
+            100.0f * m_mipBounds[mipLevel].width() * m_mipBounds[mipLevel].height() / (width * height),
+            width, height);
+    }
+
+    return true;
 }
 
 // ============================================================================
@@ -786,12 +906,44 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         auto& srcMip = m_mipChain[i];
         auto& dstMip = m_mipChain[i + 1];
 
+        // Calculate blur radius for this level (based on offset + spread)
+        float levelRatio = (params.mipLevels > 1) ?
+            static_cast<float>(i) / (params.mipLevels - 1) : 0.0f;
+        float effectiveOffset = params.offsetDown + params.spreadDown * levelRatio;
+        int blurRadiusForLevel = static_cast<int>(effectiveOffset * 5.0f + 0.5f);
+
+        // Execute Refine on source MIP to calculate BoundingBox
+        if (!ExecuteRefine(srcMip.devicePtr, srcMip.width, srcMip.height, srcMip.width,
+                           params.threshold, blurRadiusForLevel, i + 1)) {
+            CUDA_LOG("Warning: Refine failed for MIP[%d], continuing with full size", i);
+            m_mipBounds[i + 1].setFull(srcMip.width, srcMip.height);
+        }
+
         // =========================================
         // 2D Gaussian 9-tap (single pass, ZeroPad)
         // Temporally stable - no flickering on movement
         // =========================================
-        int gridX = (dstMip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-        int gridY = (dstMip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+        // Calculate destination BoundingBox from source BoundingBox (divide by 2)
+        // Source BoundingBox is stored in m_mipBounds[i+1] from RefineKernel
+        const auto& srcBounds = m_mipBounds[i + 1];
+        int dstBoundMinX = srcBounds.minX / 2;
+        int dstBoundMinY = srcBounds.minY / 2;
+        int dstBoundMaxX = (srcBounds.maxX + 1) / 2;  // Round up to include edge pixels
+        int dstBoundMaxY = (srcBounds.maxY + 1) / 2;
+
+        // Clamp to destination dimensions
+        dstBoundMinX = max(0, min(dstBoundMinX, dstMip.width - 1));
+        dstBoundMinY = max(0, min(dstBoundMinY, dstMip.height - 1));
+        dstBoundMaxX = max(0, min(dstBoundMaxX, dstMip.width - 1));
+        dstBoundMaxY = max(0, min(dstBoundMaxY, dstMip.height - 1));
+
+        int boundWidth = dstBoundMaxX - dstBoundMinX + 1;
+        int boundHeight = dstBoundMaxY - dstBoundMinY + 1;
+
+        // Grid size based on BoundingBox (not full image!)
+        int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
         int srcPitchPixels = srcMip.width;
         int dstPitchPixels = dstMip.width;
@@ -803,8 +955,11 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         int maxLevels = params.mipLevels;
         float paddingThreshold = params.paddingThreshold;
 
-        CUDA_LOG("Downsample[%d]: 2D Gaussian %dx%d -> %dx%d (ZeroPad, offset=%.2f, spread=%.2f, padThresh=%.4f)",
-            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height, offsetDown, spreadDown, paddingThreshold);
+        float reduction = 100.0f * boundWidth * boundHeight / (dstMip.width * dstMip.height);
+        CUDA_LOG("Downsample[%d]: %dx%d -> %dx%d, BBox [%d,%d]-[%d,%d] = %dx%d (%.1f%% of full)",
+            i, srcMip.width, srcMip.height, dstMip.width, dstMip.height,
+            dstBoundMinX, dstBoundMinY, dstBoundMaxX, dstBoundMaxY,
+            boundWidth, boundHeight, reduction);
 
         void* kernelParams[] = {
             &srcMip.devicePtr,
@@ -819,7 +974,11 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
             (void*)&spreadDown,
             (void*)&level,
             (void*)&maxLevels,
-            (void*)&paddingThreshold
+            (void*)&paddingThreshold,
+            (void*)&dstBoundMinX,
+            (void*)&dstBoundMinY,
+            (void*)&boundWidth,
+            (void*)&boundHeight
         };
 
         CUresult err = cuLaunchKernel(
@@ -860,8 +1019,29 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         auto& currMip = m_mipChain[i];       // Current level's stored downsample (input)
         auto& dstUpsample = m_upsampleChain[i];  // Output
 
-        int gridX = (dstUpsample.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
-        int gridY = (dstUpsample.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        // BoundingBox for this level
+        // m_mipBounds[i+1] was calculated on m_mipChain[i] during downsample
+        // For level 0, use m_mipBounds[1] (calculated on MIP[0])
+        // For deeper levels, use m_mipBounds[i+1]
+        int boundIdx = (i + 1 < MAX_MIP_LEVELS) ? (i + 1) : i;
+        const auto& bounds = m_mipBounds[boundIdx];
+
+        int boundMinX = bounds.minX;
+        int boundMinY = bounds.minY;
+        int boundWidth = bounds.width();
+        int boundHeight = bounds.height();
+
+        // Clamp to destination dimensions
+        boundMinX = max(0, min(boundMinX, dstUpsample.width - 1));
+        boundMinY = max(0, min(boundMinY, dstUpsample.height - 1));
+        int boundMaxX = min(boundMinX + boundWidth - 1, dstUpsample.width - 1);
+        int boundMaxY = min(boundMinY + boundHeight - 1, dstUpsample.height - 1);
+        boundWidth = boundMaxX - boundMinX + 1;
+        boundHeight = boundMaxY - boundMinY + 1;
+
+        // Grid size based on BoundingBox
+        int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
         // offsetUp + spreadUp for dynamic offset calculation in kernel
         float offsetUp = params.offsetUp;
@@ -887,9 +1067,10 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int blurMode = params.blurMode;
         int compositeMode = params.compositeMode;  // 1=Add, 2=Screen, 3=Overlay
 
-        CUDA_LOG("Upsample[%d]: %s %dx%d -> %dx%d (offset=%.2f, spread=%.2f, blend=%d)",
-            i, blurMode == 2 ? "5x5 Gaussian" : "3x3 Gaussian",
-            prevWidth, prevHeight, dstUpsample.width, dstUpsample.height, offsetUp, spreadUp, compositeMode);
+        float reduction = 100.0f * boundWidth * boundHeight / (dstUpsample.width * dstUpsample.height);
+        CUDA_LOG("Upsample[%d]: %dx%d -> %dx%d, BBox [%d,%d] %dx%d (%.1f%% of full)",
+            i, prevWidth, prevHeight, dstUpsample.width, dstUpsample.height,
+            boundMinX, boundMinY, boundWidth, boundHeight, reduction);
 
         int srcPitchPixels = currMip.width;
         int dstPitchPixels = dstUpsample.width;
@@ -920,7 +1101,11 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
             (void*)&params.falloffType,
             (void*)&maxLevels,
             (void*)&blurMode,
-            (void*)&compositeMode
+            (void*)&compositeMode,
+            (void*)&boundMinX,
+            (void*)&boundMinY,
+            (void*)&boundWidth,
+            (void*)&boundHeight
         };
 
         CUresult err = cuLaunchKernel(
@@ -1031,6 +1216,13 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     // Unpremultiply option
     int unpremultiply = params.unpremultiply ? 1 : 0;
 
+    // BoundingBox for debug mode 17
+    int boundMinX = m_mipBounds[0].minX;
+    int boundMaxX = m_mipBounds[0].maxX;
+    int boundMinY = m_mipBounds[0].minY;
+    int boundMaxY = m_mipBounds[0].maxY;
+    CUDA_LOG("Composite: BoundingBox [%d,%d]-[%d,%d]", boundMinX, boundMinY, boundMaxX, boundMaxY);
+
     void* kernelParams[] = {
         &original,
         &debugBuffer,
@@ -1066,7 +1258,11 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         (void*)&caTintBr,
         (void*)&caTintBg,
         (void*)&caTintBb,
-        (void*)&unpremultiply
+        (void*)&unpremultiply,
+        (void*)&boundMinX,
+        (void*)&boundMaxX,
+        (void*)&boundMinY,
+        (void*)&boundMaxY
     };
 
     CUresult err = cuLaunchKernel(

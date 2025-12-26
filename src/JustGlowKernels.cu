@@ -373,6 +373,53 @@ extern "C" __global__ void DesaturationKernel(
 }
 
 // ============================================================================
+// Refine Kernel (BoundingBox Calculation)
+// Calculates the bounding box of active pixels for adaptive resolution
+// Uses atomicMin/Max for thread-safe global bounds update
+// ============================================================================
+
+extern "C" __global__ void RefineKernel(
+    const float* __restrict__ input,
+    int width, int height, int pitch,
+    float threshold,
+    int blurRadius,
+    int* __restrict__ globalMinX,
+    int* __restrict__ globalMaxX,
+    int* __restrict__ globalMinY,
+    int* __restrict__ globalMaxY)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    int idx = (y * pitch + x) * 4;
+    float r = input[idx + 0];
+    float g = input[idx + 1];
+    float b = input[idx + 2];
+    // Note: Input is premultiplied, so RGB already has alpha factored in
+
+    // Calculate luminance (Rec.601 weights, same as used in softThreshold)
+    float L = 0.299f * r + 0.587f * g + 0.114f * b;
+
+    // If pixel is above threshold, expand bounding box
+    if (L >= threshold) {
+        // Expand by blurRadius to ensure blur kernel has full coverage
+        int expandedMinX = max(0, x - blurRadius);
+        int expandedMaxX = min(width - 1, x + blurRadius);
+        int expandedMinY = max(0, y - blurRadius);
+        int expandedMaxY = min(height - 1, y + blurRadius);
+
+        // Thread-safe update of global bounds
+        atomicMin(globalMinX, expandedMinX);
+        atomicMax(globalMaxX, expandedMaxX);
+        atomicMin(globalMinY, expandedMinY);
+        atomicMax(globalMaxY, expandedMaxY);
+    }
+}
+
+// ============================================================================
 // Prefilter Kernel
 // Driver API entry point
 // ============================================================================
@@ -429,53 +476,33 @@ extern "C" __global__ void PrefilterKernel(
     float Mr, Mg, Mb, Ma;
 
     // =========================================
-    // 13-tap sampling with ZERO PADDING + Per-Sample Threshold
+    // 13-tap sampling with ZERO PADDING
     // Out-of-bounds samples return 0 for natural edge fade
-    // RGB below threshold → treat as (0,0,0,0) to exclude dark pixels from glow
-    // This ensures opaque black background behaves same as transparent background
+    // Threshold is applied AFTER blur (softThreshold) for smooth edges
     // =========================================
     float outerOffset = 2.0f * offsetPrefilter;
     float innerOffset = 1.0f * offsetPrefilter;
 
-    // Helper macro: apply threshold to sample (dark pixels → transparent)
-    #define THRESHOLD_SAMPLE(R, G, B, A) \
-        if (fmaxf(fmaxf(R, G), B) < threshold) { R = G = B = A = 0.0f; }
-
     // Outer corners
     sampleBilinearZeroPad(input, u - outerOffset * texelX, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Ar, Ag, Ab, Aa);
-    THRESHOLD_SAMPLE(Ar, Ag, Ab, Aa);
     sampleBilinearZeroPad(input, u + outerOffset * texelX, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Cr, Cg, Cb, Ca);
-    THRESHOLD_SAMPLE(Cr, Cg, Cb, Ca);
     sampleBilinearZeroPad(input, u - outerOffset * texelX, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Kr, Kg, Kb, Ka);
-    THRESHOLD_SAMPLE(Kr, Kg, Kb, Ka);
     sampleBilinearZeroPad(input, u + outerOffset * texelX, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Mr, Mg, Mb, Ma);
-    THRESHOLD_SAMPLE(Mr, Mg, Mb, Ma);
 
     // Outer cross
     sampleBilinearZeroPad(input, u, v - outerOffset * texelY, inputWidth, inputHeight, srcPitch, Br, Bg, Bb, Ba);
-    THRESHOLD_SAMPLE(Br, Bg, Bb, Ba);
     sampleBilinearZeroPad(input, u - outerOffset * texelX, v, inputWidth, inputHeight, srcPitch, Fr, Fg, Fb, Fa);
-    THRESHOLD_SAMPLE(Fr, Fg, Fb, Fa);
     sampleBilinearZeroPad(input, u + outerOffset * texelX, v, inputWidth, inputHeight, srcPitch, Hr, Hg, Hb, Ha);
-    THRESHOLD_SAMPLE(Hr, Hg, Hb, Ha);
     sampleBilinearZeroPad(input, u, v + outerOffset * texelY, inputWidth, inputHeight, srcPitch, Lr, Lg, Lb, La);
-    THRESHOLD_SAMPLE(Lr, Lg, Lb, La);
 
     // Inner corners
     sampleBilinearZeroPad(input, u - innerOffset * texelX, v - innerOffset * texelY, inputWidth, inputHeight, srcPitch, Dr, Dg, Db, Da);
-    THRESHOLD_SAMPLE(Dr, Dg, Db, Da);
     sampleBilinearZeroPad(input, u + innerOffset * texelX, v - innerOffset * texelY, inputWidth, inputHeight, srcPitch, Er, Eg, Eb, Ea);
-    THRESHOLD_SAMPLE(Er, Eg, Eb, Ea);
     sampleBilinearZeroPad(input, u - innerOffset * texelX, v + innerOffset * texelY, inputWidth, inputHeight, srcPitch, Ir, Ig, Ib, Ia);
-    THRESHOLD_SAMPLE(Ir, Ig, Ib, Ia);
     sampleBilinearZeroPad(input, u + innerOffset * texelX, v + innerOffset * texelY, inputWidth, inputHeight, srcPitch, Jr, Jg, Jb, Ja);
-    THRESHOLD_SAMPLE(Jr, Jg, Jb, Ja);
 
     // Center
     sampleBilinearZeroPad(input, u, v, inputWidth, inputHeight, srcPitch, Gr, Gg, Gb, Ga);
-    THRESHOLD_SAMPLE(Gr, Gg, Gb, Ga);
-
-    #undef THRESHOLD_SAMPLE
 
     // =========================================
     // Weighted Average using Gaussian kernel
@@ -1033,11 +1060,21 @@ extern "C" __global__ void Gaussian2DDownsampleKernel(
     int srcWidth, int srcHeight, int srcPitch,
     int dstWidth, int dstHeight, int dstPitch,
     float offsetDown, float spreadDown, int level, int maxLevels,
-    float paddingThreshold)  // Clip dark values for padding optimization
+    float paddingThreshold,  // Clip dark values for padding optimization
+    int boundMinX, int boundMinY, int boundWidth, int boundHeight)  // BoundingBox for Grid optimization
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
 
+    // Early exit if outside BoundingBox (Grid is sized to BoundingBox)
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    // Convert local coordinates to actual output coordinates
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    // Safety check (should not happen if BoundingBox is correct)
     if (x >= dstWidth || y >= dstHeight)
         return;
 
@@ -1357,10 +1394,19 @@ extern "C" __global__ void UpsampleKernel(
     int falloffType,
     int maxLevels,      // total MIP levels
     int blurMode,       // ignored, always use 9-tap Discrete Gaussian
-    int compositeMode)  // 1=Add, 2=Screen, 3=Overlay
+    int compositeMode,  // 1=Add, 2=Screen, 3=Overlay
+    int boundMinX, int boundMinY, int boundWidth, int boundHeight)  // BoundingBox for Grid optimization
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Early exit if outside BoundingBox
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    // Convert to actual output coordinates
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
 
     if (x >= dstWidth || y >= dstHeight)
         return;
@@ -1706,7 +1752,8 @@ extern "C" __global__ void DebugOutputKernel(
     float chromaticAberration,  // CA amount (0-100)
     float caTintRr, float caTintRg, float caTintRb,  // CA Red channel tint
     float caTintBr, float caTintBg, float caTintBb,  // CA Blue channel tint
-    int unpremultiply)  // Unpremultiply glow before composite (for testing)
+    int unpremultiply,  // Unpremultiply glow before composite (for testing)
+    int boundMinX, int boundMaxX, int boundMinY, int boundMaxY)  // BoundingBox for debug mode 17
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1808,15 +1855,6 @@ extern "C" __global__ void DebugOutputKernel(
         // (via glowColor with preserveColor blending)
         // Do NOT apply again here - causes blue channel to zero out completely
 
-        // Optional: Unpremultiply glow (for testing alpha behavior)
-        if (unpremultiply && glowA > 0.001f) {
-            float invA = 1.0f / glowA;
-            glowR *= invA;
-            glowG *= invA;
-            glowB *= invA;
-            // After unpremult: straight alpha RGB with glowA
-        }
-
         // Apply exposure and glow opacity
         glowR *= exposure * glowOpacity;
         glowG *= exposure * glowOpacity;
@@ -1878,10 +1916,18 @@ extern "C" __global__ void DebugOutputKernel(
             }
         }
 
-        // 4. Unmult: divide by resA to get normalized premultiplied RGB
-        resR = (resA > 0.001f) ? tempR / resA : 0.0f;
-        resG = (resA > 0.001f) ? tempG / resA : 0.0f;
-        resB = (resA > 0.001f) ? tempB / resA : 0.0f;
+        // 4. Optional unmult: controlled by unpremultiply parameter
+        if (unpremultiply) {
+            // Unmult: divide by resA to get normalized premultiplied RGB
+            resR = (resA > 0.001f) ? tempR / resA : 0.0f;
+            resG = (resA > 0.001f) ? tempG / resA : 0.0f;
+            resB = (resA > 0.001f) ? tempB / resA : 0.0f;
+        } else {
+            // No unmult: keep blended result as-is
+            resR = tempR;
+            resG = tempG;
+            resB = tempB;
+        }
     }
     else if (debugMode == 16) {
         // GlowOnly: just glow with exposure and opacity
@@ -1929,6 +1975,117 @@ extern "C" __global__ void DebugOutputKernel(
         // Alpha for GlowOnly: based on glow brightness
         float glowBrightness = fmaxf(fmaxf(resR, resG), resB);
         resA = fminf(glowBrightness, 1.0f);
+    }
+    else if (debugMode == 17) {
+        // BoundingBox mode: Final output with BoundingBox overlay
+        // First, render the same as Final mode
+        float glowR, glowG, glowB, glowA;
+
+        if (chromaticAberration > 0.001f) {
+            float caAmount = chromaticAberration * 0.002f;
+            float dirX = u - 0.5f;
+            float dirY = v - 0.5f;
+
+            float uR = u + dirX * caAmount;
+            float vR = v + dirY * caAmount;
+            float uB = u - dirX * caAmount;
+            float vB = v - dirY * caAmount;
+
+            float rSampleR, rSampleG, rSampleB, rSampleA;
+            float gSampleR, gSampleG, gSampleB, gSampleA;
+            float bSampleR, bSampleG, bSampleB, bSampleA;
+
+            sampleBilinear(glow, uR, vR, glowWidth, glowHeight, glowPitch, rSampleR, rSampleG, rSampleB, rSampleA);
+            sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, gSampleR, gSampleG, gSampleB, gSampleA);
+            sampleBilinear(glow, uB, vB, glowWidth, glowHeight, glowPitch, bSampleR, bSampleG, bSampleB, bSampleA);
+
+            float rChannel = rSampleR;
+            float gChannel = gSampleG;
+            float bChannel = bSampleB;
+
+            glowR = rChannel * caTintRr + bChannel * caTintBr;
+            glowG = rChannel * caTintRg + gChannel + bChannel * caTintBg;
+            glowB = rChannel * caTintRb + bChannel * caTintBb;
+            glowA = gSampleA;
+        } else {
+            sampleBilinear(glow, u, v, glowWidth, glowHeight, glowPitch, glowR, glowG, glowB, glowA);
+        }
+
+        glowR *= exposure * glowOpacity * glowTintR;
+        glowG *= exposure * glowOpacity * glowTintG;
+        glowB *= exposure * glowOpacity * glowTintB;
+
+        float srcR = origR * sourceOpacity;
+        float srcG = origG * sourceOpacity;
+        float srcB = origB * sourceOpacity;
+        float srcA = origA * sourceOpacity;
+        resA = srcA + glowA * (1.0f - srcA);
+
+        float tempR, tempG, tempB;
+        switch (compositeMode) {
+            case 1: { // Screen
+                tempR = 1.0f - (1.0f - srcR) * (1.0f - glowR);
+                tempG = 1.0f - (1.0f - srcG) * (1.0f - glowG);
+                tempB = 1.0f - (1.0f - srcB) * (1.0f - glowB);
+                break;
+            }
+            case 2: { // Overlay
+                tempR = (srcR < 0.5f) ? 2.0f * srcR * glowR : 1.0f - 2.0f * (1.0f - srcR) * (1.0f - glowR);
+                tempG = (srcG < 0.5f) ? 2.0f * srcG * glowG : 1.0f - 2.0f * (1.0f - srcG) * (1.0f - glowG);
+                tempB = (srcB < 0.5f) ? 2.0f * srcB * glowB : 1.0f - 2.0f * (1.0f - srcB) * (1.0f - glowB);
+                break;
+            }
+            default: { // Add (mode 0)
+                tempR = srcR + glowR;
+                tempG = srcG + glowG;
+                tempB = srcB + glowB;
+                break;
+            }
+        }
+
+        if (unpremultiply) {
+            resR = (resA > 0.001f) ? tempR / resA : 0.0f;
+            resG = (resA > 0.001f) ? tempG / resA : 0.0f;
+            resB = (resA > 0.001f) ? tempB / resA : 0.0f;
+        } else {
+            resR = tempR;
+            resG = tempG;
+            resB = tempB;
+        }
+
+        // Now overlay the BoundingBox border
+        // Account for offset (expanded output area)
+        int offsetX = (width - inputWidth) / 2;
+        int offsetY = (height - inputHeight) / 2;
+        int localX = x - offsetX;
+        int localY = y - offsetY;
+
+        // Check if this pixel is on the BoundingBox border (2 pixel width)
+        bool isOnBorder = false;
+        if (boundMaxX >= boundMinX && boundMaxY >= boundMinY) {
+            // Horizontal borders (top and bottom)
+            if (localX >= boundMinX && localX <= boundMaxX) {
+                if ((localY >= boundMinY && localY < boundMinY + 2) ||
+                    (localY <= boundMaxY && localY > boundMaxY - 2)) {
+                    isOnBorder = true;
+                }
+            }
+            // Vertical borders (left and right)
+            if (localY >= boundMinY && localY <= boundMaxY) {
+                if ((localX >= boundMinX && localX < boundMinX + 2) ||
+                    (localX <= boundMaxX && localX > boundMaxX - 2)) {
+                    isOnBorder = true;
+                }
+            }
+        }
+
+        // Draw red border for BoundingBox
+        if (isOnBorder) {
+            resR = 1.0f;
+            resG = 0.0f;
+            resB = 0.0f;
+            resA = 1.0f;
+        }
     }
     else {
         // Debug view: show specific buffer (Prefilter, Down1-6, Up0-6)
