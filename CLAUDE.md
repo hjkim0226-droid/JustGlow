@@ -56,17 +56,20 @@ cmake --install build
 ## CUDA 렌더러
 
 **파일:**
-- `src/JustGlowCUDARenderer.h/cpp` - CUDA Driver API 기반 렌더러 (~1600줄)
-- `src/JustGlowKernels.cu` - CUDA 커널 구현 (~1900줄)
+- `src/JustGlowCUDARenderer.h/cpp` - CUDA Driver API 기반 렌더러 (~1640줄)
+- `src/JustGlowKernels.cu` - CUDA 커널 구현 (~2040줄)
 
-**커널 목록:**
-- `PrefilterKernel` - 13-tap + Soft Threshold + ZeroPad
-- `Gaussian2DDownsampleKernel` - 9-tap 2D Gaussian + ZeroPad (all levels)
-- `UpsampleKernel` - 9-tap Tent + Falloff
-- `DebugOutputKernel` - 디버그 뷰 및 최종 합성
-- `DesaturationKernel` - Glow 채도 조절
+**커널 목록 (13개):**
 - `RefineKernel` - BoundingBox 계산 (atomicMin/Max)
-- `PreblurGaussianH/VKernel` - 병렬 Pre-blur (Separable Gaussian)
+- `DesaturationKernel` - Max 채널로 채도 감소
+- `PrefilterKernel` - 13-tap + Soft Threshold + ZeroPad
+- `Prefilter25TapKernel` - 25-tap (5x5) 고품질 prefilter
+- `PrefilterSep5H/VKernel` - Separable 5-tap prefilter
+- `PrefilterSep9H/VKernel` - Separable 9-tap prefilter
+- `Gaussian2DDownsampleKernel` - 9-tap 2D Gaussian + ZeroPad
+- `UpsampleKernel` - 9-tap Tent + Falloff
+- `PreblurGaussianH/VKernel` - 병렬 Pre-blur (σ=baseSigma×√level)
+- `DebugOutputKernel` - 디버그 뷰 및 최종 합성
 
 **버퍼 구조:**
 - `m_mipChain[]` - 다운샘플 결과 저장

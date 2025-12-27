@@ -5,15 +5,22 @@
  * Uses Driver API compatible signatures for PTX loading.
  *
  * Kernels:
- * - PrefilterKernel: 13-tap downsample + soft threshold + alpha-weighted average
- * - Gaussian2DDownsampleKernel: 9-tap 2D Gaussian for ALL levels (temporal stability)
- * - UpsampleKernel: 9-tap Gaussian with progressive blend
+ * - RefineKernel: BoundingBox calculation using atomicMin/Max
+ * - DesaturationKernel: Max-based desaturation (adds toward white)
+ * - PrefilterKernel: 13-tap blur + soft threshold + sRGB→Linear
+ * - Prefilter25TapKernel: 25-tap (5×5) high-quality prefilter
+ * - PrefilterSep5H/VKernel: Separable 5-tap prefilter (H+V passes)
+ * - PrefilterSep9H/VKernel: Separable 9-tap prefilter (H+V passes)
+ * - Gaussian2DDownsampleKernel: 9-tap 2D Gaussian (ZeroPad) for ALL levels
+ * - UpsampleKernel: 9-tap Gaussian with falloff-based progressive blend
+ * - PreblurGaussianH/VKernel: Separable Gaussian for parallel stream execution
  * - DebugOutputKernel: Final composite + debug view modes
  *
  * Notes:
  * - Karis Average removed (v1.4.0) - caused artifacts on transparent backgrounds
  * - Kawase downsample removed (v1.5.0) - caused temporal flickering on movement
  * - All sampling uses ZeroPad for consistent edge behavior
+ * - Pre-blur uses σ = baseSigma × √level for progressive blur effect
  */
 
 #include <cuda_runtime.h>
@@ -1401,6 +1408,154 @@ extern "C" __global__ void UpsampleKernel(
     output[outIdx + 1] = resG;
     output[outIdx + 2] = resB;
     output[outIdx + 3] = resA;
+}
+
+// ============================================================================
+// Pre-blur Gaussian Kernels (Separable, for Parallel Stream Execution)
+// σ = baseSigma × √level for progressive blur effect
+// Used by ExecutePreblurParallel() in parallel CUDA streams
+// ============================================================================
+
+// Horizontal pass: input → temp
+extern "C" __global__ void PreblurGaussianHKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height,
+    int srcPitch, int dstPitch,
+    int level,
+    float baseSigma,
+    int boundMinX, int boundMinY, int boundWidth, int boundHeight)
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    if (x >= width || y >= height)
+        return;
+
+    // Calculate sigma for this level: σ = baseSigma × √level
+    // Level 1: σ = baseSigma
+    // Level 4: σ = 2 × baseSigma
+    // Level 9: σ = 3 × baseSigma
+    float sigma = baseSigma * sqrtf((float)level);
+    sigma = fmaxf(sigma, 0.5f);  // Minimum sigma
+
+    // Kernel radius = 3σ (covers 99.7% of Gaussian)
+    int radius = (int)ceilf(sigma * 3.0f);
+    radius = min(radius, 15);  // Cap at 15 for performance
+
+    // Precompute Gaussian weights (normalized)
+    float weights[31];  // Max radius 15 → 31 taps
+    float sumWeight = 0.0f;
+    float twoSigmaSq = 2.0f * sigma * sigma;
+
+    for (int i = -radius; i <= radius; i++) {
+        float w = expf(-(float)(i * i) / twoSigmaSq);
+        weights[i + radius] = w;
+        sumWeight += w;
+    }
+
+    // Normalize weights
+    for (int i = 0; i <= 2 * radius; i++) {
+        weights[i] /= sumWeight;
+    }
+
+    // Horizontal blur
+    float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f, sumA = 0.0f;
+
+    for (int dx = -radius; dx <= radius; dx++) {
+        int sampleX = x + dx;
+        float w = weights[dx + radius];
+
+        // ZeroPad: out-of-bounds → 0
+        if (sampleX >= 0 && sampleX < width) {
+            int idx = (y * srcPitch + sampleX) * 4;
+            sumR += input[idx + 0] * w;
+            sumG += input[idx + 1] * w;
+            sumB += input[idx + 2] * w;
+            sumA += input[idx + 3] * w;
+        }
+        // else: ZeroPad contributes 0
+    }
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = sumR;
+    output[outIdx + 1] = sumG;
+    output[outIdx + 2] = sumB;
+    output[outIdx + 3] = sumA;
+}
+
+// Vertical pass: temp → output
+extern "C" __global__ void PreblurGaussianVKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height,
+    int srcPitch, int dstPitch,
+    int level,
+    float baseSigma,
+    int boundMinX, int boundMinY, int boundWidth, int boundHeight)
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    if (x >= width || y >= height)
+        return;
+
+    // Calculate sigma for this level (same as H-pass)
+    float sigma = baseSigma * sqrtf((float)level);
+    sigma = fmaxf(sigma, 0.5f);
+
+    int radius = (int)ceilf(sigma * 3.0f);
+    radius = min(radius, 15);
+
+    // Precompute Gaussian weights
+    float weights[31];
+    float sumWeight = 0.0f;
+    float twoSigmaSq = 2.0f * sigma * sigma;
+
+    for (int i = -radius; i <= radius; i++) {
+        float w = expf(-(float)(i * i) / twoSigmaSq);
+        weights[i + radius] = w;
+        sumWeight += w;
+    }
+
+    for (int i = 0; i <= 2 * radius; i++) {
+        weights[i] /= sumWeight;
+    }
+
+    // Vertical blur
+    float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f, sumA = 0.0f;
+
+    for (int dy = -radius; dy <= radius; dy++) {
+        int sampleY = y + dy;
+        float w = weights[dy + radius];
+
+        // ZeroPad: out-of-bounds → 0
+        if (sampleY >= 0 && sampleY < height) {
+            int idx = (sampleY * srcPitch + x) * 4;
+            sumR += input[idx + 0] * w;
+            sumG += input[idx + 1] * w;
+            sumB += input[idx + 2] * w;
+            sumA += input[idx + 3] * w;
+        }
+    }
+
+    int outIdx = (y * dstPitch + x) * 4;
+    output[outIdx + 0] = sumR;
+    output[outIdx + 1] = sumG;
+    output[outIdx + 2] = sumB;
+    output[outIdx + 3] = sumA;
 }
 
 // ============================================================================
