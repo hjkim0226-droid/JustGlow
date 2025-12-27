@@ -2223,3 +2223,706 @@ extern "C" __global__ void DebugOutputKernel(
     output[outIdx + 2] = resB;
     output[outIdx + 3] = resA;
 }
+
+// ============================================================================
+// DX12-CUDA Interop Kernels (Hybrid Mode)
+// ============================================================================
+
+// ============================================================================
+// Unmult Kernel (√max Formula)
+//
+// Converts premultiplied RGBA to straight RGBA using the √max formula.
+// This ensures black background and transparent background produce
+// identical glow results.
+//
+// Mathematical derivation:
+//   Condition 1: premult = EstRGB × EstA
+//   Condition 2: EstA = max(EstRGB)
+//
+//   If max channel is R:
+//     EstA = EstR
+//     premult.R = EstR × EstR = EstR²
+//     EstR = √(premult.R)
+//
+//   Therefore:
+//     EstA = √(max(premult.R, premult.G, premult.B))
+//     EstRGB = premult / EstA
+// ============================================================================
+
+extern "C" __global__ void UnmultKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height, int srcPitch, int dstPitch)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    int srcIdx = (y * srcPitch + x) * 4;
+    float premultR = input[srcIdx + 0];
+    float premultG = input[srcIdx + 1];
+    float premultB = input[srcIdx + 2];
+    float premultA = input[srcIdx + 3];
+
+    // √max formula
+    float maxP = fmaxf(fmaxf(premultR, premultG), premultB);
+
+    float estR, estG, estB, estA;
+
+    if (maxP < EPSILON) {
+        // Black or transparent -> zero output
+        estR = 0.0f;
+        estG = 0.0f;
+        estB = 0.0f;
+        estA = 0.0f;
+    } else {
+        // EstA = √(max(premult))
+        estA = sqrtf(maxP);
+        float invEstA = 1.0f / estA;
+
+        // EstRGB = premult / EstA
+        estR = premultR * invEstA;
+        estG = premultG * invEstA;
+        estB = premultB * invEstA;
+    }
+
+    int dstIdx = (y * dstPitch + x) * 4;
+    output[dstIdx + 0] = estR;
+    output[dstIdx + 1] = estG;
+    output[dstIdx + 2] = estB;
+    output[dstIdx + 3] = estA;
+}
+
+// ============================================================================
+// Log-Transmittance Pre-blur Kernel
+//
+// Applies Gaussian blur in log-transmittance space.
+// This makes Screen blending commutative with blur.
+//
+// Mathematical basis (Beer-Lambert Law):
+//   - Screen: result = 1 - (1-A)(1-B) = 1 - T_A × T_B
+//   - Log space: log(T_A × T_B) = log(T_A) + log(T_B)
+//   - Blur is linear: blur(log(T_A) + log(T_B)) = blur(log(T_A)) + blur(log(T_B))
+//
+// Gaussian variance composition (σ×√N optimization):
+//   - N sequential blurs with σ = σ × √N single blur
+//   - Level i: σ_effective = baseSigma × √i
+//
+// Parameters:
+//   - level: MIP level index (1-6)
+//   - baseSigma: Base blur radius in pixels
+// ============================================================================
+
+// Separable Gaussian blur weight function
+__device__ __forceinline__ float gaussianWeight(float x, float sigma) {
+    return expf(-x * x / (2.0f * sigma * sigma));
+}
+
+extern "C" __global__ void LogTransmittancePreblurKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height, int srcPitch, int dstPitch,
+    int level,          // MIP level (1-6)
+    float baseSigma)    // Base sigma (typically 16.0)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    // Gaussian variance composition: σ = baseSigma × √level
+    float sigma = baseSigma * sqrtf((float)level);
+    int kernelRadius = (int)ceilf(sigma * 3.0f);  // 3σ covers 99.7%
+
+    // Accumulate in log-transmittance space
+    float4 sumLogT = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float weightSum = 0.0f;
+
+    for (int ky = -kernelRadius; ky <= kernelRadius; ky++) {
+        for (int kx = -kernelRadius; kx <= kernelRadius; kx++) {
+            // Clamp to image bounds (ZeroPad alternative: skip out-of-bounds)
+            int sx = x + kx;
+            int sy = y + ky;
+
+            // ZeroPad: out-of-bounds contributes T=1 (fully transparent)
+            // log(1) = 0, so we can skip these samples
+            if (sx < 0 || sx >= width || sy < 0 || sy >= height) {
+                // Skip (equivalent to adding 0 to log sum)
+                continue;
+            }
+
+            // Read sample
+            int srcIdx = (sy * srcPitch + sx) * 4;
+            float4 sample = make_float4(
+                input[srcIdx + 0],
+                input[srcIdx + 1],
+                input[srcIdx + 2],
+                input[srcIdx + 3]
+            );
+
+            // Convert to transmittance: T = 1 - color
+            float4 T = make_float4(
+                1.0f - sample.x,
+                1.0f - sample.y,
+                1.0f - sample.z,
+                1.0f - sample.w
+            );
+
+            // Clamp to avoid log(0)
+            T.x = fmaxf(T.x, 1e-6f);
+            T.y = fmaxf(T.y, 1e-6f);
+            T.z = fmaxf(T.z, 1e-6f);
+            T.w = fmaxf(T.w, 1e-6f);
+
+            // Convert to log space
+            float4 logT = make_float4(
+                logf(T.x),
+                logf(T.y),
+                logf(T.z),
+                logf(T.w)
+            );
+
+            // Gaussian weight
+            float dist2 = (float)(kx * kx + ky * ky);
+            float weight = gaussianWeight(sqrtf(dist2), sigma);
+
+            // Accumulate weighted log-transmittance
+            sumLogT.x += logT.x * weight;
+            sumLogT.y += logT.y * weight;
+            sumLogT.z += logT.z * weight;
+            sumLogT.w += logT.w * weight;
+            weightSum += weight;
+        }
+    }
+
+    // Normalize
+    if (weightSum > 0.0f) {
+        float invWeight = 1.0f / weightSum;
+        sumLogT.x *= invWeight;
+        sumLogT.y *= invWeight;
+        sumLogT.z *= invWeight;
+        sumLogT.w *= invWeight;
+    }
+
+    // Convert back: T = exp(logT), color = 1 - T
+    float4 result = make_float4(
+        1.0f - expf(sumLogT.x),
+        1.0f - expf(sumLogT.y),
+        1.0f - expf(sumLogT.z),
+        1.0f - expf(sumLogT.w)
+    );
+
+    // Write output
+    int dstIdx = (y * dstPitch + x) * 4;
+    output[dstIdx + 0] = result.x;
+    output[dstIdx + 1] = result.y;
+    output[dstIdx + 2] = result.z;
+    output[dstIdx + 3] = result.w;
+}
+
+// ============================================================================
+// Separable Log-Transmittance Pre-blur (Optimized)
+//
+// Two-pass separable Gaussian for better performance:
+// 1. Horizontal pass: LogTransmittancePreblurHKernel
+// 2. Vertical pass: LogTransmittancePreblurVKernel
+//
+// Total complexity: O(2 × kernelRadius) vs O(kernelRadius²)
+// ============================================================================
+
+extern "C" __global__ void LogTransmittancePreblurHKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height, int srcPitch, int dstPitch,
+    int level,
+    float baseSigma)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    float sigma = baseSigma * sqrtf((float)level);
+    int kernelRadius = (int)ceilf(sigma * 3.0f);
+
+    // Accumulate in log-transmittance space (horizontal pass)
+    float4 sumLogT = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float weightSum = 0.0f;
+
+    for (int kx = -kernelRadius; kx <= kernelRadius; kx++) {
+        int sx = x + kx;
+
+        if (sx < 0 || sx >= width) continue;
+
+        int srcIdx = (y * srcPitch + sx) * 4;
+        float4 sample = make_float4(
+            input[srcIdx + 0],
+            input[srcIdx + 1],
+            input[srcIdx + 2],
+            input[srcIdx + 3]
+        );
+
+        float4 T = make_float4(
+            fmaxf(1.0f - sample.x, 1e-6f),
+            fmaxf(1.0f - sample.y, 1e-6f),
+            fmaxf(1.0f - sample.z, 1e-6f),
+            fmaxf(1.0f - sample.w, 1e-6f)
+        );
+
+        float4 logT = make_float4(logf(T.x), logf(T.y), logf(T.z), logf(T.w));
+
+        float weight = gaussianWeight((float)kx, sigma);
+        sumLogT.x += logT.x * weight;
+        sumLogT.y += logT.y * weight;
+        sumLogT.z += logT.z * weight;
+        sumLogT.w += logT.w * weight;
+        weightSum += weight;
+    }
+
+    if (weightSum > 0.0f) {
+        float invWeight = 1.0f / weightSum;
+        sumLogT.x *= invWeight;
+        sumLogT.y *= invWeight;
+        sumLogT.z *= invWeight;
+        sumLogT.w *= invWeight;
+    }
+
+    // Keep in log space for vertical pass
+    int dstIdx = (y * dstPitch + x) * 4;
+    output[dstIdx + 0] = sumLogT.x;
+    output[dstIdx + 1] = sumLogT.y;
+    output[dstIdx + 2] = sumLogT.z;
+    output[dstIdx + 3] = sumLogT.w;
+}
+
+extern "C" __global__ void LogTransmittancePreblurVKernel(
+    const float* __restrict__ input,  // Log-transmittance from H pass
+    float* __restrict__ output,
+    int width, int height, int srcPitch, int dstPitch,
+    int level,
+    float baseSigma)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    float sigma = baseSigma * sqrtf((float)level);
+    int kernelRadius = (int)ceilf(sigma * 3.0f);
+
+    // Accumulate log-transmittance (vertical pass)
+    // Input is already in log space from H pass
+    float4 sumLogT = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float weightSum = 0.0f;
+
+    for (int ky = -kernelRadius; ky <= kernelRadius; ky++) {
+        int sy = y + ky;
+
+        if (sy < 0 || sy >= height) continue;
+
+        int srcIdx = (sy * srcPitch + x) * 4;
+        float4 logT = make_float4(
+            input[srcIdx + 0],
+            input[srcIdx + 1],
+            input[srcIdx + 2],
+            input[srcIdx + 3]
+        );
+
+        float weight = gaussianWeight((float)ky, sigma);
+        sumLogT.x += logT.x * weight;
+        sumLogT.y += logT.y * weight;
+        sumLogT.z += logT.z * weight;
+        sumLogT.w += logT.w * weight;
+        weightSum += weight;
+    }
+
+    if (weightSum > 0.0f) {
+        float invWeight = 1.0f / weightSum;
+        sumLogT.x *= invWeight;
+        sumLogT.y *= invWeight;
+        sumLogT.z *= invWeight;
+        sumLogT.w *= invWeight;
+    }
+
+    // Convert back: T = exp(logT), color = 1 - T
+    float4 result = make_float4(
+        1.0f - expf(sumLogT.x),
+        1.0f - expf(sumLogT.y),
+        1.0f - expf(sumLogT.z),
+        1.0f - expf(sumLogT.w)
+    );
+
+    int dstIdx = (y * dstPitch + x) * 4;
+    output[dstIdx + 0] = result.x;
+    output[dstIdx + 1] = result.y;
+    output[dstIdx + 2] = result.z;
+    output[dstIdx + 3] = result.w;
+}
+
+// ============================================================================
+// SURFACE-BASED KERNELS (Zero-Copy Interop Optimization)
+//
+// These kernels use surf2Dread/write for direct access to DX12 shared textures.
+// No intermediate copies needed - maximum performance for Interop pipeline.
+//
+// Key difference from linear memory kernels:
+// - surf2Dread: (&value, surface, x * sizeof(float4), y) - x is in BYTES
+// - surf2Dwrite: (value, surface, x * sizeof(float4), y)
+//
+// All Surface kernels support BoundingBox optimization:
+// - boundMinX, boundMinY: Offset of active region
+// - boundWidth, boundHeight: Size of active region to process
+// ============================================================================
+
+// ============================================================================
+// Surface Unmult Kernel (√max formula)
+// ============================================================================
+
+extern "C" __global__ void UnmultSurfaceKernel(
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t output,
+    int width, int height,
+    int boundMinX, int boundMinY,
+    int boundWidth, int boundHeight)
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    if (x >= width || y >= height)
+        return;
+
+    // Read premultiplied RGBA from surface
+    float4 premult;
+    surf2Dread(&premult, input, x * sizeof(float4), y);
+
+    // √max formula for Unmult
+    float maxP = fmaxf(fmaxf(premult.x, premult.y), premult.z);
+
+    float4 result;
+    if (maxP < EPSILON) {
+        result = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    } else {
+        float estA = sqrtf(maxP);
+        float invEstA = 1.0f / estA;
+        result = make_float4(
+            premult.x * invEstA,
+            premult.y * invEstA,
+            premult.z * invEstA,
+            estA
+        );
+    }
+
+    surf2Dwrite(result, output, x * sizeof(float4), y);
+}
+
+// ============================================================================
+// Surface Prefilter Kernel (Soft Threshold + 13-tap Gaussian + Unmult)
+// ============================================================================
+
+extern "C" __global__ void PrefilterSurfaceKernel(
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t output,
+    int width, int height,
+    float threshold, float softKnee,
+    float glowR, float glowG, float glowB,
+    float preserveColor,
+    int boundMinX, int boundMinY,
+    int boundWidth, int boundHeight)
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    if (x >= width || y >= height)
+        return;
+
+    // 13-tap star pattern
+    const int2 offsets[13] = {
+        {0, 0},
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+        {-2, 0}, {2, 0}, {0, -2}, {0, 2},
+        {-1, -1}, {1, -1}, {-1, 1}, {1, 1}
+    };
+    const float weights[13] = {
+        0.25f,
+        0.125f, 0.125f, 0.125f, 0.125f,
+        0.0625f, 0.0625f, 0.0625f, 0.0625f,
+        0.03125f, 0.03125f, 0.03125f, 0.03125f
+    };
+
+    float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float weightSum = 0.0f;
+
+    for (int i = 0; i < 13; i++) {
+        int sx = x + offsets[i].x;
+        int sy = y + offsets[i].y;
+
+        if (sx < 0 || sx >= width || sy < 0 || sy >= height)
+            continue;
+
+        float4 sample;
+        surf2Dread(&sample, input, sx * sizeof(float4), sy);
+
+        // Unmult (√max)
+        float maxP = fmaxf(fmaxf(sample.x, sample.y), sample.z);
+        if (maxP > EPSILON) {
+            float estA = sqrtf(maxP);
+            float invEstA = 1.0f / estA;
+            sample.x *= invEstA;
+            sample.y *= invEstA;
+            sample.z *= invEstA;
+            sample.w = estA;
+        } else {
+            sample = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+
+        // Soft threshold
+        float luma = sample.x * 0.2126f + sample.y * 0.7152f + sample.z * 0.0722f;
+        float knee = threshold * softKnee;
+        float t = smoothstep(threshold - knee, threshold + knee, luma);
+
+        if (t > 0.0f) {
+            float3 blended = make_float3(
+                lerp(sample.x * glowR, sample.x, preserveColor),
+                lerp(sample.y * glowG, sample.y, preserveColor),
+                lerp(sample.z * glowB, sample.z, preserveColor)
+            );
+
+            float w = weights[i];
+            sum.x += blended.x * t * w;
+            sum.y += blended.y * t * w;
+            sum.z += blended.z * t * w;
+            sum.w += sample.w * t * w;
+            weightSum += w;
+        }
+    }
+
+    float4 result;
+    if (weightSum > 0.0f) {
+        float inv = 1.0f / weightSum;
+        result = make_float4(sum.x * inv, sum.y * inv, sum.z * inv, sum.w * inv);
+    } else {
+        result = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    surf2Dwrite(result, output, x * sizeof(float4), y);
+}
+
+// ============================================================================
+// Surface 9-tap 2D Gaussian Downsample (ZeroPad)
+// ============================================================================
+
+extern "C" __global__ void DownsampleSurfaceKernel(
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t output,
+    int srcWidth, int srcHeight,
+    int dstWidth, int dstHeight,
+    float offset,
+    int boundMinX, int boundMinY,
+    int boundWidth, int boundHeight)
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int dstX = localX + boundMinX;
+    int dstY = localY + boundMinY;
+
+    if (dstX >= dstWidth || dstY >= dstHeight)
+        return;
+
+    float srcCenterX = (dstX + 0.5f) * 2.0f - 0.5f;
+    float srcCenterY = (dstY + 0.5f) * 2.0f - 0.5f;
+
+    const float2 offs[9] = {
+        {0, 0},
+        {-offset, 0}, {offset, 0}, {0, -offset}, {0, offset},
+        {-offset, -offset}, {offset, -offset}, {-offset, offset}, {offset, offset}
+    };
+    const float wts[9] = {0.25f, 0.125f, 0.125f, 0.125f, 0.125f, 0.0625f, 0.0625f, 0.0625f, 0.0625f};
+
+    float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float wSum = 0.0f;
+
+    for (int i = 0; i < 9; i++) {
+        int sx = (int)(srcCenterX + offs[i].x + 0.5f);
+        int sy = (int)(srcCenterY + offs[i].y + 0.5f);
+
+        if (sx < 0 || sx >= srcWidth || sy < 0 || sy >= srcHeight)
+            continue;
+
+        float4 s;
+        surf2Dread(&s, input, sx * sizeof(float4), sy);
+
+        sum.x += s.x * wts[i];
+        sum.y += s.y * wts[i];
+        sum.z += s.z * wts[i];
+        sum.w += s.w * wts[i];
+        wSum += wts[i];
+    }
+
+    float4 result = (wSum > 0.0f)
+        ? make_float4(sum.x/wSum, sum.y/wSum, sum.z/wSum, sum.w/wSum)
+        : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    surf2Dwrite(result, output, dstX * sizeof(float4), dstY);
+}
+
+// ============================================================================
+// Surface Log-Transmittance Pre-blur H (Horizontal, separable)
+// ============================================================================
+
+extern "C" __global__ void LogTransPreblurHSurfaceKernel(
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t output,
+    int width, int height,
+    int level,
+    float baseSigma,
+    int boundMinX, int boundMinY,
+    int boundWidth, int boundHeight)
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    if (x >= width || y >= height)
+        return;
+
+    float sigma = baseSigma * sqrtf((float)level);
+    int radius = (int)ceilf(sigma * 3.0f);
+
+    float4 sumLogT = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float wSum = 0.0f;
+
+    for (int kx = -radius; kx <= radius; kx++) {
+        int sx = x + kx;
+        if (sx < 0 || sx >= width) continue;
+
+        float4 sample;
+        surf2Dread(&sample, input, sx * sizeof(float4), y);
+
+        float4 T = make_float4(
+            fmaxf(1.0f - sample.x, 1e-6f),
+            fmaxf(1.0f - sample.y, 1e-6f),
+            fmaxf(1.0f - sample.z, 1e-6f),
+            fmaxf(1.0f - sample.w, 1e-6f)
+        );
+        float4 logT = make_float4(logf(T.x), logf(T.y), logf(T.z), logf(T.w));
+
+        float w = gaussianWeight((float)kx, sigma);
+        sumLogT.x += logT.x * w;
+        sumLogT.y += logT.y * w;
+        sumLogT.z += logT.z * w;
+        sumLogT.w += logT.w * w;
+        wSum += w;
+    }
+
+    if (wSum > 0.0f) {
+        float inv = 1.0f / wSum;
+        sumLogT.x *= inv; sumLogT.y *= inv; sumLogT.z *= inv; sumLogT.w *= inv;
+    }
+
+    surf2Dwrite(sumLogT, output, x * sizeof(float4), y);
+}
+
+// ============================================================================
+// Surface Log-Transmittance Pre-blur V (Vertical, final output)
+// ============================================================================
+
+extern "C" __global__ void LogTransPreblurVSurfaceKernel(
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t output,
+    int width, int height,
+    int level,
+    float baseSigma,
+    int boundMinX, int boundMinY,
+    int boundWidth, int boundHeight)
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    if (x >= width || y >= height)
+        return;
+
+    float sigma = baseSigma * sqrtf((float)level);
+    int radius = (int)ceilf(sigma * 3.0f);
+
+    float4 sumLogT = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float wSum = 0.0f;
+
+    for (int ky = -radius; ky <= radius; ky++) {
+        int sy = y + ky;
+        if (sy < 0 || sy >= height) continue;
+
+        float4 logT;
+        surf2Dread(&logT, input, x * sizeof(float4), sy);
+
+        float w = gaussianWeight((float)ky, sigma);
+        sumLogT.x += logT.x * w;
+        sumLogT.y += logT.y * w;
+        sumLogT.z += logT.z * w;
+        sumLogT.w += logT.w * w;
+        wSum += w;
+    }
+
+    if (wSum > 0.0f) {
+        float inv = 1.0f / wSum;
+        sumLogT.x *= inv; sumLogT.y *= inv; sumLogT.z *= inv; sumLogT.w *= inv;
+    }
+
+    float4 result = make_float4(
+        1.0f - expf(sumLogT.x),
+        1.0f - expf(sumLogT.y),
+        1.0f - expf(sumLogT.z),
+        1.0f - expf(sumLogT.w)
+    );
+
+    surf2Dwrite(result, output, x * sizeof(float4), y);
+}
+
+// ============================================================================
+// Surface Clear Kernel
+// ============================================================================
+
+extern "C" __global__ void ClearSurfaceKernel(
+    cudaSurfaceObject_t surface,
+    int width, int height)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+        return;
+
+    float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    surf2Dwrite(zero, surface, x * sizeof(float4), y);
+}

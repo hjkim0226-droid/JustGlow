@@ -14,6 +14,13 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdarg>
+#include <algorithm>  // for std::min
+
+// Interop support (CUDA hybrid mode)
+#if HAS_CUDA
+#include "JustGlowInterop.h"
+#include "JustGlowCUDARenderer.h"
+#endif
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -95,6 +102,15 @@ constexpr UINT REFINE_OUTPUT_UAV = 43;       // u0: output texture
 constexpr UINT ATOMIC_BOUNDS_UAV = 44;       // u1: atomic bounds
 constexpr UINT INDIRECT_ARGS_UAV = 45;       // u2: indirect args
 constexpr UINT BOUNDS_OUTPUT_UAV = 46;       // u3: bounds output
+
+// Interop descriptor indices (for hybrid DX12-CUDA mode)
+#if HAS_CUDA
+constexpr UINT INTEROP_INPUT_SRV = 47;       // Interop input texture SRV
+constexpr UINT INTEROP_INPUT_UAV = 48;       // Interop input texture UAV
+constexpr UINT INTEROP_BLURRED_SRV_START = 49;  // Blurred levels SRV (6 levels)
+constexpr UINT INTEROP_BLURRED_UAV_START = 55;  // Blurred levels UAV (6 levels)
+constexpr UINT SCREEN_BLEND_OUTPUT_UAV = 61; // Screen blend output UAV
+#endif
 
 // ============================================================================
 // Helper to get DLL module handle
@@ -197,6 +213,10 @@ bool JustGlowGPURenderer::Initialize(
 
 void JustGlowGPURenderer::Shutdown() {
     WaitForGPU();
+
+#if HAS_CUDA
+    ShutdownInterop();
+#endif
 
     ReleaseMipChain();
 
@@ -708,6 +728,11 @@ bool JustGlowGPURenderer::LoadShaders() {
     success &= LoadShader(ShaderType::CalcIndirectArgs, GetShaderPath(ShaderType::CalcIndirectArgs), m_refineRootSignature);
     success &= LoadShader(ShaderType::ResetBounds, GetShaderPath(ShaderType::ResetBounds), m_refineRootSignature);
 
+    // Load ScreenBlend shaders (for hybrid Interop mode)
+    // These are optional - hybrid mode only works if CUDA is available
+    LoadShader(ShaderType::ScreenBlend, GetShaderPath(ShaderType::ScreenBlend), sharedRootSig);
+    LoadShader(ShaderType::ScreenBlendDirect, GetShaderPath(ShaderType::ScreenBlendDirect), sharedRootSig);
+
     return success;
 }
 
@@ -781,6 +806,8 @@ std::wstring JustGlowGPURenderer::GetShaderPath(ShaderType type) {
         case ShaderType::Refine:            return path + L"Refine.cso";
         case ShaderType::CalcIndirectArgs:  return path + L"CalcIndirectArgs.cso";
         case ShaderType::ResetBounds:       return path + L"ResetBounds.cso";
+        case ShaderType::ScreenBlend:       return path + L"ScreenBlend.cso";
+        case ShaderType::ScreenBlendDirect: return path + L"ScreenBlendDirect.cso";
         default:                            return L"";
     }
 }
@@ -1044,6 +1071,14 @@ bool JustGlowGPURenderer::Render(
         LOG("ERROR: Invalid input/output buffers");
         return false;
     }
+
+#if HAS_CUDA
+    // Use hybrid DX12-CUDA pipeline if Interop is enabled
+    if (m_useInterop && m_interop && m_cudaRenderer) {
+        LOG("=== Using Hybrid DX12-CUDA Pipeline ===");
+        return RenderHybrid(params, inputBuffer, outputBuffer);
+    }
+#endif
 
     // Verify shaders are loaded
     bool shadersOk = m_shaders[static_cast<size_t>(ShaderType::Prefilter)].loaded &&
@@ -1745,5 +1780,442 @@ D3D12_CPU_DESCRIPTOR_HANDLE JustGlowGPURenderer::GetCPUDescriptorHandle(UINT ind
     handle.ptr += static_cast<SIZE_T>(index) * m_srvUavDescriptorSize;
     return handle;
 }
+
+// ============================================================================
+// DX12-CUDA Interop Methods (Hybrid Mode)
+// ============================================================================
+
+#if HAS_CUDA
+
+bool JustGlowGPURenderer::EnableInterop(CUcontext cudaContext, CUstream cudaStream) {
+    LOG("=== EnableInterop ===");
+
+    if (!m_device || !m_commandQueue) {
+        LOG("ERROR: DX12 device not initialized");
+        return false;
+    }
+
+    if (!cudaContext || !cudaStream) {
+        LOG("ERROR: Invalid CUDA context or stream");
+        return false;
+    }
+
+    // Store CUDA handles
+    m_cudaContext = cudaContext;
+    m_cudaStream = cudaStream;
+
+    // Create Interop manager
+    m_interop = new JustGlowInterop();
+    if (!m_interop->Initialize(m_device, m_commandQueue, cudaContext)) {
+        LOG("ERROR: Failed to initialize Interop");
+        delete m_interop;
+        m_interop = nullptr;
+        return false;
+    }
+
+    // Create fence for DX12-CUDA synchronization
+    m_interopFence = new InteropFence();
+    if (!m_interop->CreateFence(*m_interopFence)) {
+        LOG("ERROR: Failed to create Interop fence");
+        ShutdownInterop();
+        return false;
+    }
+
+    // Create CUDA renderer (for blur operations)
+    m_cudaRenderer = new JustGlowCUDARenderer();
+    if (!m_cudaRenderer->Initialize(cudaContext, cudaStream)) {
+        LOG("ERROR: Failed to initialize CUDA renderer");
+        ShutdownInterop();
+        return false;
+    }
+
+    // Create ScreenBlend constant buffer
+    if (!CreateScreenBlendResources()) {
+        LOG("ERROR: Failed to create ScreenBlend resources");
+        ShutdownInterop();
+        return false;
+    }
+
+    // Verify ScreenBlend shaders are loaded
+    if (!m_shaders[static_cast<size_t>(ShaderType::ScreenBlend)].loaded) {
+        LOG("WARNING: ScreenBlend shader not loaded, hybrid mode may not work optimally");
+    }
+
+    m_useInterop = true;
+    LOG("Interop enabled successfully");
+    return true;
+}
+
+void JustGlowGPURenderer::ShutdownInterop() {
+    LOG("=== ShutdownInterop ===");
+
+    m_useInterop = false;
+
+    // Release Interop textures
+    ReleaseInteropTextures();
+
+    // Release ScreenBlend buffer
+    if (m_screenBlendBufferPtr) {
+        m_screenBlendBuffer->Unmap(0, nullptr);
+        m_screenBlendBufferPtr = nullptr;
+    }
+    m_screenBlendBuffer.Reset();
+
+    // Release fence
+    if (m_interopFence) {
+        if (m_interop) {
+            m_interop->DestroyFence(*m_interopFence);
+        }
+        delete m_interopFence;
+        m_interopFence = nullptr;
+    }
+
+    // Release CUDA renderer
+    if (m_cudaRenderer) {
+        m_cudaRenderer->Shutdown();
+        delete m_cudaRenderer;
+        m_cudaRenderer = nullptr;
+    }
+
+    // Release Interop manager
+    if (m_interop) {
+        m_interop->Shutdown();
+        delete m_interop;
+        m_interop = nullptr;
+    }
+
+    m_cudaContext = nullptr;
+    m_cudaStream = nullptr;
+
+    LOG("Interop shutdown complete");
+}
+
+bool JustGlowGPURenderer::CreateInteropTextures(int width, int height) {
+    LOG("CreateInteropTextures: %dx%d", width, height);
+
+    // Release existing textures
+    ReleaseInteropTextures();
+
+    // Create input texture
+    m_interopInput = new InteropTexture();
+    if (!m_interop->CreateSharedTexture(width, height, *m_interopInput,
+            m_srvUavHeap.Get(), INTEROP_INPUT_SRV, INTEROP_INPUT_UAV)) {
+        LOG("ERROR: Failed to create Interop input texture");
+        ReleaseInteropTextures();
+        return false;
+    }
+
+    // Create blurred textures for each MIP level (6 levels max)
+    for (int i = 0; i < MAX_INTEROP_LEVELS; i++) {
+        int levelWidth = width >> (i + 1);
+        int levelHeight = height >> (i + 1);
+
+        if (levelWidth < 16 || levelHeight < 16) {
+            LOG("Interop level %d: skipped (too small)", i);
+            break;
+        }
+
+        m_interopBlurred[i] = new InteropTexture();
+        if (!m_interop->CreateSharedTexture(levelWidth, levelHeight, *m_interopBlurred[i],
+                m_srvUavHeap.Get(),
+                INTEROP_BLURRED_SRV_START + i,
+                INTEROP_BLURRED_UAV_START + i)) {
+            LOG("ERROR: Failed to create Interop blurred texture %d", i);
+            ReleaseInteropTextures();
+            return false;
+        }
+
+        LOG("Interop blurred[%d]: %dx%d", i, levelWidth, levelHeight);
+    }
+
+    LOG("Interop textures created successfully");
+    return true;
+}
+
+void JustGlowGPURenderer::ReleaseInteropTextures() {
+    LOG("ReleaseInteropTextures");
+
+    if (m_interopInput) {
+        if (m_interop) {
+            m_interop->DestroySharedTexture(*m_interopInput);
+        }
+        delete m_interopInput;
+        m_interopInput = nullptr;
+    }
+
+    for (int i = 0; i < MAX_INTEROP_LEVELS; i++) {
+        if (m_interopBlurred[i]) {
+            if (m_interop) {
+                m_interop->DestroySharedTexture(*m_interopBlurred[i]);
+            }
+            delete m_interopBlurred[i];
+            m_interopBlurred[i] = nullptr;
+        }
+    }
+}
+
+bool JustGlowGPURenderer::CreateScreenBlendResources() {
+    LOG("CreateScreenBlendResources");
+
+    // ScreenBlend constant buffer (b2)
+    // Contains: numLevels, baseWeight, falloff, levelWeights[6]
+    UINT cbSize = 256;  // Aligned to 256 bytes
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC bufferDesc = {};
+    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDesc.Width = cbSize;
+    bufferDesc.Height = 1;
+    bufferDesc.DepthOrArraySize = 1;
+    bufferDesc.MipLevels = 1;
+    bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+    bufferDesc.SampleDesc.Count = 1;
+    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    HRESULT hr = m_device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&m_screenBlendBuffer));
+
+    if (FAILED(hr)) {
+        LOG("ERROR: Failed to create ScreenBlend buffer, HR=0x%08X", hr);
+        return false;
+    }
+
+    hr = m_screenBlendBuffer->Map(0, nullptr, &m_screenBlendBufferPtr);
+    if (FAILED(hr)) {
+        LOG("ERROR: Failed to map ScreenBlend buffer, HR=0x%08X", hr);
+        return false;
+    }
+
+    LOG("ScreenBlend resources created");
+    return true;
+}
+
+bool JustGlowGPURenderer::RenderHybrid(
+    const RenderParams& params,
+    ID3D12Resource* inputBuffer,
+    ID3D12Resource* outputBuffer)
+{
+    LOG("=== RenderHybrid Begin ===");
+
+    // Ensure Interop textures are allocated
+    if (!m_interopInput || m_interopInput->width != params.width || m_interopInput->height != params.height) {
+        if (!CreateInteropTextures(params.width, params.height)) {
+            LOG("ERROR: Failed to create Interop textures, falling back to DX12");
+            m_useInterop = false;
+            return Render(params, inputBuffer, outputBuffer);
+        }
+    }
+
+    // Reset command list
+    HRESULT hr = m_commandAllocator->Reset();
+    if (FAILED(hr)) {
+        LOG("ERROR: CommandAllocator Reset failed");
+        return false;
+    }
+    hr = m_commandList->Reset(m_commandAllocator.Get(), nullptr);
+    if (FAILED(hr)) {
+        LOG("ERROR: CommandList Reset failed");
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvUavHeap.Get() };
+    m_commandList->SetDescriptorHeaps(1, heaps);
+
+    // Update main constant buffer
+    GlowParams cb;
+    FillGlowParams(cb, params);
+    memcpy(m_constantBufferPtr, &cb, sizeof(cb));
+
+    // ========================================
+    // Step 1: DX12 - Copy input to Interop texture
+    // ========================================
+    LOG("--- Step 1: Copy Input to Interop ---");
+    CopyInputToInterop(inputBuffer);
+
+    // Execute and wait (DX12 side complete)
+    hr = m_commandList->Close();
+    if (FAILED(hr)) {
+        LOG("ERROR: CommandList Close failed");
+        return false;
+    }
+
+    ID3D12CommandList* commandLists[] = { m_commandList.Get() };
+    m_commandQueue->ExecuteCommandLists(1, commandLists);
+
+    // Signal DX12 -> CUDA
+    m_interop->SignalFromDX12(*m_interopFence);
+    LOG("DX12 signaled, waiting on CUDA...");
+
+    // ========================================
+    // Step 2: CUDA - Blur operations
+    // ========================================
+    LOG("--- Step 2: CUDA Blur Operations ---");
+
+    // Wait for DX12 signal
+    m_interop->WaitOnCUDA(*m_interopFence, m_cudaStream);
+
+    // CUDA processes the shared texture:
+    // Unmult → Prefilter → Downsample → Log-Transmittance Pre-blur
+
+    // Calculate number of blur levels (max 6 for Interop)
+    int numBlurLevels = std::min(params.mipLevels, MAX_INTEROP_LEVELS);
+    LOG("CUDA: Processing %d blur levels", numBlurLevels);
+
+    // Call CUDA renderer with Interop textures
+    if (!m_cudaRenderer->RenderWithInterop(params, m_interopInput, m_interopBlurred, numBlurLevels)) {
+        LOG("ERROR: CUDA RenderWithInterop failed, falling back to DX12");
+        // On failure, disable Interop and retry with standard pipeline
+        m_useInterop = false;
+        return Render(params, inputBuffer, outputBuffer);
+    }
+
+    // Signal CUDA -> DX12
+    m_interop->SignalFromCUDA(*m_interopFence, m_cudaStream);
+    LOG("CUDA signaled, waiting on DX12...");
+
+    // ========================================
+    // Step 3: DX12 - Screen blend + Composite
+    // ========================================
+    LOG("--- Step 3: DX12 Screen Blend + Composite ---");
+
+    // Wait for CUDA signal
+    m_interop->WaitOnDX12(*m_interopFence);
+
+    // Reset command list for second DX12 pass
+    hr = m_commandAllocator->Reset();
+    if (FAILED(hr)) return false;
+    hr = m_commandList->Reset(m_commandAllocator.Get(), nullptr);
+    if (FAILED(hr)) return false;
+
+    m_commandList->SetDescriptorHeaps(1, heaps);
+
+    // Execute Screen blend (combines blurred levels)
+    ExecuteScreenBlend(params);
+
+    // Execute Composite (blend glow with original)
+    // For now, fall back to standard Composite
+    // which reads from m_mipChain[0] (we need to copy ScreenBlend result there first)
+
+    // Allocate MIP chain for Composite
+    if (!AllocateMipChain(params.width, params.height, params.mipLevels)) {
+        LOG("ERROR: Failed to allocate MIP chain");
+        return false;
+    }
+
+    CreateExternalResourceViews(inputBuffer, outputBuffer);
+    ExecuteComposite(params, inputBuffer, outputBuffer);
+
+    // Close and execute
+    hr = m_commandList->Close();
+    if (FAILED(hr)) return false;
+
+    m_commandQueue->ExecuteCommandLists(1, commandLists);
+    WaitForGPU();
+
+    LOG("=== RenderHybrid Complete ===");
+    return true;
+}
+
+void JustGlowGPURenderer::CopyInputToInterop(ID3D12Resource* input) {
+    if (!m_interopInput || !m_interopInput->d3d12Resource) {
+        LOG("ERROR: Interop input texture not allocated");
+        return;
+    }
+
+    // Transition Interop texture to COPY_DEST
+    TransitionResource(m_interopInput->d3d12Resource.Get(),
+        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    // Copy from AE input to Interop texture
+    m_commandList->CopyResource(m_interopInput->d3d12Resource.Get(), input);
+
+    // Transition back to COMMON for CUDA access
+    TransitionResource(m_interopInput->d3d12Resource.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+
+    LOG("Input copied to Interop texture");
+}
+
+void JustGlowGPURenderer::ExecuteScreenBlend(const RenderParams& params) {
+    auto& shader = m_shaders[static_cast<size_t>(ShaderType::ScreenBlend)];
+    if (!shader.loaded) {
+        LOG("ScreenBlend shader not loaded, skipping");
+        return;
+    }
+
+    // Count available blurred levels
+    int numLevels = 0;
+    for (int i = 0; i < MAX_INTEROP_LEVELS; i++) {
+        if (m_interopBlurred[i] && m_interopBlurred[i]->isValid()) {
+            numLevels++;
+        }
+    }
+
+    if (numLevels == 0) {
+        LOG("No blurred levels available for ScreenBlend");
+        return;
+    }
+
+    // Update ScreenBlend constant buffer
+    struct ScreenBlendParams {
+        int numLevels;
+        float baseWeight;
+        float falloff;
+        float _pad0;
+        float levelWeights[4];
+        float levelWeights56[2];
+        float _pad1[2];
+    };
+
+    ScreenBlendParams sbParams = {};
+    sbParams.numLevels = numLevels;
+    sbParams.baseWeight = params.intensity;
+    sbParams.falloff = params.falloff;
+
+    // Calculate level weights: weight = baseWeight * pow(falloff, level)
+    float decayRate = 1.0f - (params.falloff - 0.5f);
+    for (int i = 0; i < 4 && i < numLevels; i++) {
+        sbParams.levelWeights[i] = params.intensity * powf(decayRate, static_cast<float>(i + 1));
+    }
+    for (int i = 0; i < 2 && (i + 4) < numLevels; i++) {
+        sbParams.levelWeights56[i] = params.intensity * powf(decayRate, static_cast<float>(i + 5));
+    }
+
+    memcpy(m_screenBlendBufferPtr, &sbParams, sizeof(sbParams));
+
+    LOG("ScreenBlend: %d levels, intensity=%.2f, falloff=%.2f",
+        numLevels, params.intensity, params.falloff);
+
+    m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
+    m_commandList->SetPipelineState(shader.pipelineState.Get());
+
+    // Set constant buffers
+    m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
+    m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
+
+    // Bind blurred textures as SRVs (t2-t7)
+    // Note: ScreenBlend.hlsl expects these in t2-t7, need to create descriptor table
+    // For now, we skip this as it requires additional root signature setup
+
+    // TODO: Proper descriptor table binding for blurred levels
+
+    // Dispatch
+    UINT groupsX = (params.width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+    UINT groupsY = (params.height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+
+    LOG("ScreenBlend Dispatch: %u x %u groups", groupsX, groupsY);
+    m_commandList->Dispatch(groupsX, groupsY, 1);
+
+    // UAV barrier
+    if (m_mipChain.size() > 0) {
+        InsertUAVBarrier(m_mipChain[0].resource.Get());
+    }
+}
+
+#endif // HAS_CUDA
 
 #endif // _WIN32

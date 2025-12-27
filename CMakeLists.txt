@@ -53,6 +53,7 @@ set(PLUGIN_HEADERS
     src/JustGlowParams.h
     src/JustGlowGPURenderer.h
     src/JustGlowCUDARenderer.h
+    src/JustGlowInterop.h
 )
 
 set(CUDA_SOURCES
@@ -67,6 +68,7 @@ set(SHADER_FILES
     shaders/PostProcess.hlsl
     shaders/Composite.hlsl
     shaders/Refine.hlsl
+    shaders/ScreenBlend.hlsl
 )
 
 # ============================================================================
@@ -131,6 +133,7 @@ if(WIN32)
         )
         target_sources(${PROJECT_NAME} PRIVATE
             src/JustGlowCUDARenderer.cpp
+            src/JustGlowInterop.cpp
         )
     endif()
 
@@ -165,6 +168,7 @@ if(WIN32)
     if(CUDA_FOUND)
         target_link_libraries(${PROJECT_NAME} PRIVATE
             CUDA::cuda_driver
+            CUDA::cudart  # Required for Interop (cudaImportExternalMemory)
         )
     endif()
 
@@ -247,6 +251,8 @@ if(WIN32)
             "Refine:RefineCS:Refine"
             "Refine:CalcIndirectArgsCS:CalcIndirectArgs"
             "Refine:ResetBoundsCS:ResetBounds"
+            "ScreenBlend:main:ScreenBlend"
+            "ScreenBlend:main_direct:ScreenBlendDirect"
         )
 
         foreach(SHADER_ENTRY ${SHADER_ENTRY_POINTS})

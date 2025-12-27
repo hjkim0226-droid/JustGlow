@@ -9,6 +9,7 @@
 
 #include <windows.h>
 #include "JustGlowCUDARenderer.h"
+#include "JustGlowInterop.h"  // For InteropTexture struct
 #include <fstream>
 #include <ctime>
 #include <sstream>
@@ -62,6 +63,9 @@ static void CUDALogMessage(const char* format, ...) {
 // Thread group size (must match CUDA kernels)
 constexpr int THREAD_BLOCK_SIZE = 16;
 
+// Base sigma for Log-Transmittance Pre-blur (matches JustGlowInterop.h)
+constexpr float BASE_BLUR_SIGMA = 16.0f;
+
 // ============================================================================
 // Helper to get DLL module handle
 // ============================================================================
@@ -109,6 +113,14 @@ JustGlowCUDARenderer::JustGlowCUDARenderer()
     , m_debugOutputKernel(nullptr)
     , m_desaturationKernel(nullptr)
     , m_refineKernel(nullptr)
+    // Interop kernels
+    , m_unmultSurfaceKernel(nullptr)
+    , m_prefilterSurfaceKernel(nullptr)
+    , m_downsampleSurfaceKernel(nullptr)
+    , m_logTransPreblurHKernel(nullptr)
+    , m_logTransPreblurVKernel(nullptr)
+    , m_clearSurfaceKernel(nullptr)
+    , m_streamsInitialized(false)
     , m_refineBoundsGPU(0)
     , m_horizontalTemp{}
     , m_gaussianDownsampleTemp{}
@@ -186,6 +198,12 @@ bool JustGlowCUDARenderer::Initialize(CUcontext context, CUstream stream) {
         return false;
     }
     CUDA_LOG("Refine bounds GPU buffer allocated");
+
+    // Initialize parallel streams for Pre-blur
+    if (!InitializeStreams()) {
+        CUDA_LOG("WARNING: Failed to initialize parallel streams (non-critical)");
+        // Continue without parallel streams - they're optional
+    }
 
     // Pop context
     cuCtxPopCurrent(nullptr);
@@ -313,6 +331,89 @@ bool JustGlowCUDARenderer::LoadKernels() {
     }
     CUDA_LOG("RefineKernel loaded");
 
+    // ========================================
+    // Load Interop kernels (optional - may not exist in older PTX)
+    // ========================================
+
+    // Legacy linear buffer kernels
+    err = cuModuleGetFunction(&m_unmultSurfaceKernel, m_module, "UnmultKernel");
+    if (err == CUDA_SUCCESS) {
+        CUDA_LOG("UnmultKernel loaded (Interop)");
+    } else {
+        m_unmultSurfaceKernel = nullptr;
+        CUDA_LOG("UnmultKernel not found (optional)");
+    }
+
+    err = cuModuleGetFunction(&m_logTransPreblurHKernel, m_module, "LogTransmittancePreblurHKernel");
+    if (err == CUDA_SUCCESS) {
+        CUDA_LOG("LogTransmittancePreblurHKernel loaded (Interop)");
+    } else {
+        m_logTransPreblurHKernel = nullptr;
+        CUDA_LOG("LogTransmittancePreblurHKernel not found (optional)");
+    }
+
+    err = cuModuleGetFunction(&m_logTransPreblurVKernel, m_module, "LogTransmittancePreblurVKernel");
+    if (err == CUDA_SUCCESS) {
+        CUDA_LOG("LogTransmittancePreblurVKernel loaded (Interop)");
+    } else {
+        m_logTransPreblurVKernel = nullptr;
+        CUDA_LOG("LogTransmittancePreblurVKernel not found (optional)");
+    }
+
+    // ========================================
+    // Load Surface-based kernels (zero-copy Interop)
+    // ========================================
+
+    // Note: These kernels use cudaSurfaceObject_t for zero-copy access
+    // They are optional and will be loaded if available in the PTX
+
+    err = cuModuleGetFunction(&m_unmultSurfaceKernel, m_module, "UnmultSurfaceKernel");
+    if (err == CUDA_SUCCESS) {
+        CUDA_LOG("UnmultSurfaceKernel loaded (Surface Interop)");
+    } else {
+        // Keep previous m_unmultSurfaceKernel if UnmultSurfaceKernel not found
+        CUDA_LOG("UnmultSurfaceKernel not found, using linear version");
+    }
+
+    err = cuModuleGetFunction(&m_prefilterSurfaceKernel, m_module, "PrefilterSurfaceKernel");
+    if (err == CUDA_SUCCESS) {
+        CUDA_LOG("PrefilterSurfaceKernel loaded (Surface Interop)");
+    } else {
+        m_prefilterSurfaceKernel = nullptr;
+        CUDA_LOG("PrefilterSurfaceKernel not found (optional)");
+    }
+
+    err = cuModuleGetFunction(&m_downsampleSurfaceKernel, m_module, "DownsampleSurfaceKernel");
+    if (err == CUDA_SUCCESS) {
+        CUDA_LOG("DownsampleSurfaceKernel loaded (Surface Interop)");
+    } else {
+        m_downsampleSurfaceKernel = nullptr;
+        CUDA_LOG("DownsampleSurfaceKernel not found (optional)");
+    }
+
+    // Surface-based Pre-blur H/V kernels
+    CUfunction surfacePreblurH = nullptr, surfacePreblurV = nullptr;
+    err = cuModuleGetFunction(&surfacePreblurH, m_module, "LogTransPreblurHSurfaceKernel");
+    if (err == CUDA_SUCCESS) {
+        m_logTransPreblurHKernel = surfacePreblurH;  // Override with surface version
+        CUDA_LOG("LogTransPreblurHSurfaceKernel loaded (Surface Interop)");
+    }
+
+    err = cuModuleGetFunction(&surfacePreblurV, m_module, "LogTransPreblurVSurfaceKernel");
+    if (err == CUDA_SUCCESS) {
+        m_logTransPreblurVKernel = surfacePreblurV;  // Override with surface version
+        CUDA_LOG("LogTransPreblurVSurfaceKernel loaded (Surface Interop)");
+    }
+
+    // Clear surface kernel
+    err = cuModuleGetFunction(&m_clearSurfaceKernel, m_module, "ClearSurfaceKernel");
+    if (err == CUDA_SUCCESS) {
+        CUDA_LOG("ClearSurfaceKernel loaded (Surface Interop)");
+    } else {
+        m_clearSurfaceKernel = nullptr;
+        CUDA_LOG("ClearSurfaceKernel not found (optional)");
+    }
+
     return true;
 }
 
@@ -327,6 +428,9 @@ void JustGlowCUDARenderer::Shutdown() {
         cuCtxPushCurrent(m_context);
 
         ReleaseMipChain();
+
+        // Destroy parallel streams
+        DestroyStreams();
 
         // Free refine bounds GPU buffer
         if (m_refineBoundsGPU) {
@@ -360,6 +464,13 @@ void JustGlowCUDARenderer::Shutdown() {
     m_gaussianDownsampleVKernel = nullptr;
     m_debugOutputKernel = nullptr;
     m_desaturationKernel = nullptr;
+    // Interop kernels
+    m_unmultSurfaceKernel = nullptr;
+    m_prefilterSurfaceKernel = nullptr;
+    m_downsampleSurfaceKernel = nullptr;
+    m_logTransPreblurHKernel = nullptr;
+    m_logTransPreblurVKernel = nullptr;
+    m_clearSurfaceKernel = nullptr;
     m_context = nullptr;
     m_stream = nullptr;
     m_initialized = false;
@@ -1301,6 +1412,727 @@ bool JustGlowCUDARenderer::ExecuteComposite(
         kernelParams, nullptr);
 
     return CheckCUDAError(err, "cuLaunchKernel(DebugOutput)");
+}
+
+// ============================================================================
+// RenderWithInterop - Hybrid DX12-CUDA rendering pipeline
+// Optimized: Zero-copy Surface I/O + BoundingBox + Parallel Streams
+// ============================================================================
+
+bool JustGlowCUDARenderer::RenderWithInterop(
+    const RenderParams& params,
+    InteropTexture* input,
+    InteropTexture** blurredOutputs,
+    int numLevels)
+{
+    CUDA_LOG("=== RenderWithInterop Begin (Optimized) ===");
+    CUDA_LOG("Input: %dx%d, numLevels: %d, parallelStreams: %s",
+        input->width, input->height, numLevels,
+        m_streamsInitialized ? "YES" : "NO");
+
+    if (!m_initialized) {
+        CUDA_LOG("ERROR: Renderer not initialized");
+        return false;
+    }
+
+    if (!input || !input->isValid()) {
+        CUDA_LOG("ERROR: Invalid input texture");
+        return false;
+    }
+
+    // Check if Surface kernels are available for zero-copy path
+    bool useSurfaceKernels = (m_prefilterSurfaceKernel && m_downsampleSurfaceKernel);
+
+    // Check required kernels
+    if (!m_logTransPreblurHKernel || !m_logTransPreblurVKernel) {
+        CUDA_LOG("ERROR: Pre-blur kernels not loaded");
+        return false;
+    }
+
+    // Push context
+    CUresult err = cuCtxPushCurrent(m_context);
+    if (!CheckCUDAError(err, "cuCtxPushCurrent in RenderWithInterop")) {
+        return false;
+    }
+
+    bool success = true;
+    int inputWidth = input->width;
+    int inputHeight = input->height;
+
+    // ========================================
+    // Check for Surface-based zero-copy path
+    // ========================================
+
+    if (useSurfaceKernels) {
+        CUDA_LOG("Using Surface-based zero-copy pipeline");
+
+        // Collect surface objects and dimensions for MIP chain
+        cudaSurfaceObject_t mipSurfaces[MAX_MIP_LEVELS];
+        int mipWidths[MAX_MIP_LEVELS];
+        int mipHeights[MAX_MIP_LEVELS];
+        BoundingBox mipBounds[MAX_MIP_LEVELS];
+
+        // Input surface = level 0
+        mipSurfaces[0] = input->cudaSurface;
+        mipWidths[0] = inputWidth;
+        mipHeights[0] = inputHeight;
+        mipBounds[0].setFull(inputWidth, inputHeight);
+
+        // Calculate MIP dimensions
+        int w = inputWidth, h = inputHeight;
+        for (int i = 1; i <= numLevels && i < MAX_MIP_LEVELS; i++) {
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+            if (w < 1) w = 1;
+            if (h < 1) h = 1;
+
+            if (blurredOutputs[i - 1] && blurredOutputs[i - 1]->isValid()) {
+                mipSurfaces[i] = blurredOutputs[i - 1]->cudaSurface;
+                mipWidths[i] = blurredOutputs[i - 1]->width;
+                mipHeights[i] = blurredOutputs[i - 1]->height;
+            } else {
+                CUDA_LOG("ERROR: Blurred output %d is invalid", i);
+                success = false;
+                break;
+            }
+        }
+
+        if (success) {
+            // ========================================
+            // Step 1: Unmult + Prefilter on input surface
+            // ========================================
+
+            CUDA_LOG("--- Surface Prefilter (includes Unmult) ---");
+            // Prefilter reads from input surface and writes to output[0] surface
+            // It includes threshold + color processing
+            if (!ExecutePrefilterInterop(params,
+                    input->cudaSurface,
+                    blurredOutputs[0]->cudaSurface,
+                    inputWidth, inputHeight,
+                    &mipBounds[0])) {
+                CUDA_LOG("ERROR: Prefilter failed");
+                success = false;
+            }
+        }
+
+        if (success) {
+            // ========================================
+            // Step 2: Downsample chain (Surface-based)
+            // ========================================
+
+            CUDA_LOG("--- Surface Downsample Chain ---");
+            // Use blurredOutputs[0] as level 0 for downsample
+            mipSurfaces[0] = blurredOutputs[0]->cudaSurface;
+            mipWidths[0] = blurredOutputs[0]->width;
+            mipHeights[0] = blurredOutputs[0]->height;
+
+            if (!ExecuteDownsampleChainInterop(params,
+                    mipSurfaces, mipWidths, mipHeights,
+                    numLevels + 1, mipBounds)) {
+                CUDA_LOG("ERROR: Downsample chain failed");
+                success = false;
+            }
+        }
+
+        // Sync before parallel Pre-blur
+        cuEventRecord(m_syncEvent, m_stream);
+        cuStreamWaitEvent(m_stream, m_syncEvent, 0);
+
+        if (success) {
+            // ========================================
+            // Step 3: Parallel Pre-blur (CUDA Streams)
+            // ========================================
+
+            CUDA_LOG("--- Parallel Log-Transmittance Pre-blur ---");
+
+            // Use parallel streams if available
+            bool useParallel = m_streamsInitialized && (numLevels > 1);
+            CUDA_LOG("Pre-blur mode: %s", useParallel ? "PARALLEL" : "SEQUENTIAL");
+
+            // We need temp surfaces for H-pass output
+            // Use m_upsampleChain as temp buffers (already allocated)
+
+            for (int level = 1; level <= numLevels; level++) {
+                if (level - 1 >= (int)m_upsampleChain.size()) {
+                    CUDA_LOG("ERROR: No temp buffer for level %d", level);
+                    continue;
+                }
+
+                InteropTexture* output = blurredOutputs[level - 1];
+                if (!output || !output->isValid()) continue;
+
+                // Select stream for parallel execution
+                CUstream execStream = m_stream;
+                if (useParallel && level - 1 < MAX_PARALLEL_STREAMS) {
+                    execStream = m_preblurStreams[level - 1];
+                }
+
+                // Get bounds for this level
+                const BoundingBox* levelBounds = (level < MAX_MIP_LEVELS) ? &mipBounds[level] : nullptr;
+
+                // Create temp surface for H-pass output
+                // For now, use in-place processing with the output surface
+                // H-pass writes to a temp position, V-pass reads it
+
+                // Pre-blur: output surface → temp → output surface
+                // Since we need a temp buffer, use m_upsampleChain[level]
+                auto& tempBuffer = m_upsampleChain[level - 1];
+
+                int gridX = (output->width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+                int gridY = (output->height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+                float baseSigma = BASE_BLUR_SIGMA;
+                int width = output->width;
+                int height = output->height;
+
+                // BoundingBox parameters
+                int boundMinX = levelBounds ? levelBounds->minX : 0;
+                int boundMinY = levelBounds ? levelBounds->minY : 0;
+                int boundWidth = levelBounds ? levelBounds->width() : width;
+                int boundHeight = levelBounds ? levelBounds->height() : height;
+
+                CUDA_LOG("Pre-blur level %d: %dx%d, σ=%.1f×√%d=%.1f, stream=%p, BBox [%d,%d] %dx%d",
+                    level, width, height, baseSigma, level, baseSigma * sqrtf((float)level),
+                    execStream, boundMinX, boundMinY, boundWidth, boundHeight);
+
+                // H-pass: output surface → linear temp buffer
+                {
+                    // Copy surface to temp buffer for processing
+                    cudaError_t cudaErr = cudaMemcpy2DFromArrayAsync(
+                        (void*)tempBuffer.devicePtr,
+                        tempBuffer.pitchBytes,
+                        output->cudaArray,
+                        0, 0,
+                        width * 4 * sizeof(float),
+                        height,
+                        cudaMemcpyDeviceToDevice,
+                        (cudaStream_t)execStream);
+
+                    if (cudaErr != cudaSuccess) {
+                        CUDA_LOG("WARNING: Copy from surface failed for level %d", level);
+                        continue;
+                    }
+
+                    // H-pass on linear buffer
+                    int srcPitch = width;
+                    int dstPitch = tempBuffer.width;
+
+                    void* hParams[] = {
+                        &tempBuffer.devicePtr,
+                        &m_mipChain[level - 1].devicePtr,  // Use mipChain as temp
+                        &width, &height,
+                        &srcPitch, &dstPitch,
+                        &level, &baseSigma
+                    };
+
+                    err = cuLaunchKernel(
+                        m_logTransPreblurHKernel,
+                        gridX, gridY, 1,
+                        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+                        0, execStream,
+                        hParams, nullptr);
+
+                    if (!CheckCUDAError(err, "cuLaunchKernel(PreblurH)")) {
+                        success = false;
+                    }
+                }
+
+                // V-pass: mipChain → tempBuffer
+                if (success) {
+                    int srcPitch = m_mipChain[level - 1].width;
+                    int dstPitch = tempBuffer.width;
+
+                    void* vParams[] = {
+                        &m_mipChain[level - 1].devicePtr,
+                        &tempBuffer.devicePtr,
+                        &width, &height,
+                        &srcPitch, &dstPitch,
+                        &level, &baseSigma
+                    };
+
+                    err = cuLaunchKernel(
+                        m_logTransPreblurVKernel,
+                        gridX, gridY, 1,
+                        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+                        0, execStream,
+                        vParams, nullptr);
+
+                    if (!CheckCUDAError(err, "cuLaunchKernel(PreblurV)")) {
+                        success = false;
+                    }
+                }
+
+                // Copy result back to output surface
+                if (success) {
+                    cudaError_t cudaErr = cudaMemcpy2DToArrayAsync(
+                        output->cudaArray,
+                        0, 0,
+                        (void*)tempBuffer.devicePtr,
+                        tempBuffer.pitchBytes,
+                        width * 4 * sizeof(float),
+                        height,
+                        cudaMemcpyDeviceToDevice,
+                        (cudaStream_t)execStream);
+
+                    if (cudaErr != cudaSuccess) {
+                        CUDA_LOG("WARNING: Copy to surface failed for level %d", level);
+                    }
+                }
+            }
+
+            // Wait for all parallel streams to complete
+            if (useParallel) {
+                for (int i = 0; i < std::min(numLevels, MAX_PARALLEL_STREAMS); i++) {
+                    cuStreamSynchronize(m_preblurStreams[i]);
+                }
+            }
+        }
+
+    } else {
+        // ========================================
+        // Fallback: Copy-based pipeline (legacy)
+        // ========================================
+
+        CUDA_LOG("Using copy-based fallback pipeline");
+
+        size_t inputSize = inputWidth * inputHeight * 4 * sizeof(float);
+        CUdeviceptr inputBuffer = 0;
+        err = cuMemAlloc(&inputBuffer, inputSize);
+        if (!CheckCUDAError(err, "cuMemAlloc(inputBuffer)")) {
+            cuCtxPopCurrent(nullptr);
+            return false;
+        }
+
+        int processLevels = (numLevels < 2) ? 2 : numLevels;
+        if (!AllocateMipChain(inputWidth, inputHeight, processLevels + 1)) {
+            cuMemFree(inputBuffer);
+            cuCtxPopCurrent(nullptr);
+            return false;
+        }
+
+        // Copy input surface → linear buffer
+        cudaError_t cudaErr = cudaMemcpy2DFromArray(
+            (void*)inputBuffer,
+            inputWidth * 4 * sizeof(float),
+            input->cudaArray,
+            0, 0,
+            inputWidth * 4 * sizeof(float),
+            inputHeight,
+            cudaMemcpyDeviceToDevice);
+
+        if (cudaErr != cudaSuccess) {
+            CUDA_LOG("ERROR: cudaMemcpy2DFromArray failed");
+            cuMemFree(inputBuffer);
+            cuCtxPopCurrent(nullptr);
+            return false;
+        }
+
+        // Prefilter
+        if (!ExecutePrefilter(params, inputBuffer)) {
+            success = false;
+        }
+
+        // Downsample chain
+        if (success && !ExecuteDownsampleChain(params)) {
+            success = false;
+        }
+
+        cuEventRecord(m_syncEvent, m_stream);
+        cuStreamWaitEvent(m_stream, m_syncEvent, 0);
+
+        // Pre-blur and copy to output surfaces
+        if (success) {
+            for (int level = 1; level <= numLevels && level < processLevels + 1; level++) {
+                if (!blurredOutputs[level - 1] || !blurredOutputs[level - 1]->isValid()) continue;
+
+                auto& mip = m_mipChain[level];
+                auto& upsample = m_upsampleChain[level];
+
+                int gridX = (mip.width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+                int gridY = (mip.height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+                float baseSigma = BASE_BLUR_SIGMA;
+                int srcPitch = mip.width;
+                int dstPitch = upsample.width;
+
+                // H-pass
+                void* hParams[] = {
+                    &mip.devicePtr, &upsample.devicePtr,
+                    &mip.width, &mip.height,
+                    &srcPitch, &dstPitch,
+                    &level, &baseSigma
+                };
+                cuLaunchKernel(m_logTransPreblurHKernel, gridX, gridY, 1,
+                    THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1, 0, m_stream, hParams, nullptr);
+
+                cuEventRecord(m_syncEvent, m_stream);
+                cuStreamWaitEvent(m_stream, m_syncEvent, 0);
+
+                // V-pass
+                void* vParams[] = {
+                    &upsample.devicePtr, &mip.devicePtr,
+                    &mip.width, &mip.height,
+                    &dstPitch, &srcPitch,
+                    &level, &baseSigma
+                };
+                cuLaunchKernel(m_logTransPreblurVKernel, gridX, gridY, 1,
+                    THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1, 0, m_stream, vParams, nullptr);
+
+                cuStreamSynchronize(m_stream);
+
+                // Copy to output surface
+                InteropTexture* output = blurredOutputs[level - 1];
+                cudaMemcpy2DToArray(output->cudaArray, 0, 0,
+                    (void*)mip.devicePtr,
+                    mip.width * 4 * sizeof(float),
+                    output->width * 4 * sizeof(float),
+                    output->height,
+                    cudaMemcpyDeviceToDevice);
+            }
+        }
+
+        cuMemFree(inputBuffer);
+    }
+
+    // Final synchronize
+    err = cuStreamSynchronize(m_stream);
+    CheckCUDAError(err, "cuStreamSynchronize");
+
+    // Pop context
+    cuCtxPopCurrent(nullptr);
+
+    CUDA_LOG("=== RenderWithInterop %s ===", success ? "Complete" : "Failed");
+    return success;
+}
+
+// ============================================================================
+// Initialize/Destroy Parallel Streams
+// ============================================================================
+
+bool JustGlowCUDARenderer::InitializeStreams() {
+    if (m_streamsInitialized) {
+        return true;
+    }
+
+    CUDA_LOG("Initializing %d parallel streams for Pre-blur", MAX_PARALLEL_STREAMS);
+
+    for (int i = 0; i < MAX_PARALLEL_STREAMS; i++) {
+        CUresult err = cuStreamCreate(&m_preblurStreams[i], CU_STREAM_NON_BLOCKING);
+        if (err != CUDA_SUCCESS) {
+            CUDA_LOG("ERROR: Failed to create stream %d", i);
+            // Clean up already created streams
+            for (int j = 0; j < i; j++) {
+                cuStreamDestroy(m_preblurStreams[j]);
+                m_preblurStreams[j] = nullptr;
+            }
+            return false;
+        }
+    }
+
+    m_streamsInitialized = true;
+    CUDA_LOG("Parallel streams initialized successfully");
+    return true;
+}
+
+void JustGlowCUDARenderer::DestroyStreams() {
+    if (!m_streamsInitialized) {
+        return;
+    }
+
+    CUDA_LOG("Destroying parallel streams");
+    for (int i = 0; i < MAX_PARALLEL_STREAMS; i++) {
+        if (m_preblurStreams[i]) {
+            cuStreamDestroy(m_preblurStreams[i]);
+            m_preblurStreams[i] = nullptr;
+        }
+    }
+
+    m_streamsInitialized = false;
+}
+
+// ============================================================================
+// Execute Clear Surface
+// ============================================================================
+
+bool JustGlowCUDARenderer::ExecuteClearSurface(
+    cudaSurfaceObject_t surface,
+    int width, int height)
+{
+    if (!m_clearSurfaceKernel) {
+        CUDA_LOG("WARNING: ClearSurfaceKernel not loaded");
+        return false;
+    }
+
+    int gridX = (width + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    int gridY = (height + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+    void* args[] = {
+        &surface,
+        &width, &height
+    };
+
+    CUresult err = cuLaunchKernel(
+        m_clearSurfaceKernel,
+        gridX, gridY, 1,
+        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+        0, m_stream,
+        args, nullptr);
+
+    return CheckCUDAError(err, "cuLaunchKernel(ClearSurface)");
+}
+
+// ============================================================================
+// Interop Helper Methods (Surface-based with BoundingBox)
+// ============================================================================
+
+bool JustGlowCUDARenderer::ExecuteUnmultInterop(
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t output,
+    int width, int height,
+    const BoundingBox* bounds)
+{
+    if (!m_unmultSurfaceKernel) {
+        CUDA_LOG("ERROR: UnmultSurfaceKernel not loaded");
+        return false;
+    }
+
+    // Use BoundingBox if provided, otherwise full image
+    int boundMinX = bounds ? bounds->minX : 0;
+    int boundMinY = bounds ? bounds->minY : 0;
+    int boundWidth = bounds ? bounds->width() : width;
+    int boundHeight = bounds ? bounds->height() : height;
+
+    int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+    CUDA_LOG("ExecuteUnmultInterop: %dx%d, BBox [%d,%d] %dx%d (%.1f%%)",
+        width, height, boundMinX, boundMinY, boundWidth, boundHeight,
+        100.0f * boundWidth * boundHeight / (width * height));
+
+    void* args[] = {
+        &input, &output,
+        &width, &height,
+        &boundMinX, &boundMinY, &boundWidth, &boundHeight
+    };
+
+    CUresult err = cuLaunchKernel(
+        m_unmultSurfaceKernel,
+        gridX, gridY, 1,
+        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+        0, m_stream,
+        args, nullptr);
+
+    return CheckCUDAError(err, "cuLaunchKernel(UnmultSurface)");
+}
+
+bool JustGlowCUDARenderer::ExecutePrefilterInterop(
+    const RenderParams& params,
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t output,
+    int width, int height,
+    const BoundingBox* bounds)
+{
+    if (!m_prefilterSurfaceKernel) {
+        CUDA_LOG("ERROR: PrefilterSurfaceKernel not loaded");
+        return false;
+    }
+
+    // Use BoundingBox if provided, otherwise full image
+    int boundMinX = bounds ? bounds->minX : 0;
+    int boundMinY = bounds ? bounds->minY : 0;
+    int boundWidth = bounds ? bounds->width() : width;
+    int boundHeight = bounds ? bounds->height() : height;
+
+    int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+    CUDA_LOG("ExecutePrefilterInterop: %dx%d, threshold=%.2f, softKnee=%.2f, BBox %dx%d",
+        width, height, params.threshold, params.softKnee, boundWidth, boundHeight);
+
+    float threshold = params.threshold;
+    float softKnee = params.softKnee;
+    float glowR = params.glowColor[0];
+    float glowG = params.glowColor[1];
+    float glowB = params.glowColor[2];
+    float preserveColor = params.preserveColor;
+
+    void* args[] = {
+        &input, &output,
+        &width, &height,
+        &threshold, &softKnee,
+        &glowR, &glowG, &glowB, &preserveColor,
+        &boundMinX, &boundMinY, &boundWidth, &boundHeight
+    };
+
+    CUresult err = cuLaunchKernel(
+        m_prefilterSurfaceKernel,
+        gridX, gridY, 1,
+        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+        0, m_stream,
+        args, nullptr);
+
+    return CheckCUDAError(err, "cuLaunchKernel(PrefilterSurface)");
+}
+
+bool JustGlowCUDARenderer::ExecuteDownsampleChainInterop(
+    const RenderParams& params,
+    cudaSurfaceObject_t* mipSurfaces,
+    int* mipWidths, int* mipHeights,
+    int numLevels,
+    BoundingBox* mipBounds)
+{
+    if (!m_downsampleSurfaceKernel) {
+        CUDA_LOG("ERROR: DownsampleSurfaceKernel not loaded");
+        return false;
+    }
+
+    // Initialize first level bounds to full image if not provided
+    if (mipBounds) {
+        mipBounds[0].setFull(mipWidths[0], mipHeights[0]);
+    }
+
+    for (int i = 0; i < numLevels - 1; i++) {
+        int srcWidth = mipWidths[i];
+        int srcHeight = mipHeights[i];
+        int dstWidth = mipWidths[i + 1];
+        int dstHeight = mipHeights[i + 1];
+
+        // Calculate destination BoundingBox from source BoundingBox
+        int boundMinX = 0, boundMinY = 0, boundWidth = dstWidth, boundHeight = dstHeight;
+        if (mipBounds) {
+            const auto& srcBounds = mipBounds[i];
+            boundMinX = srcBounds.minX / 2;
+            boundMinY = srcBounds.minY / 2;
+            int boundMaxX = (srcBounds.maxX + 1) / 2;
+            int boundMaxY = (srcBounds.maxY + 1) / 2;
+            boundMinX = std::max(0, std::min(boundMinX, dstWidth - 1));
+            boundMinY = std::max(0, std::min(boundMinY, dstHeight - 1));
+            boundMaxX = std::max(0, std::min(boundMaxX, dstWidth - 1));
+            boundMaxY = std::max(0, std::min(boundMaxY, dstHeight - 1));
+            boundWidth = boundMaxX - boundMinX + 1;
+            boundHeight = boundMaxY - boundMinY + 1;
+
+            // Store destination bounds for next level
+            mipBounds[i + 1].minX = boundMinX;
+            mipBounds[i + 1].minY = boundMinY;
+            mipBounds[i + 1].maxX = boundMaxX;
+            mipBounds[i + 1].maxY = boundMaxY;
+        }
+
+        int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+        int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+        float offset = params.offsetDown;
+        cudaSurfaceObject_t srcSurf = mipSurfaces[i];
+        cudaSurfaceObject_t dstSurf = mipSurfaces[i + 1];
+
+        CUDA_LOG("DownsampleInterop[%d]: %dx%d -> %dx%d, BBox [%d,%d] %dx%d",
+            i, srcWidth, srcHeight, dstWidth, dstHeight,
+            boundMinX, boundMinY, boundWidth, boundHeight);
+
+        void* args[] = {
+            &srcSurf, &dstSurf,
+            &srcWidth, &srcHeight, &dstWidth, &dstHeight,
+            &offset,
+            &boundMinX, &boundMinY, &boundWidth, &boundHeight
+        };
+
+        CUresult err = cuLaunchKernel(
+            m_downsampleSurfaceKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, m_stream,
+            args, nullptr);
+
+        if (!CheckCUDAError(err, "cuLaunchKernel(DownsampleSurface)")) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool JustGlowCUDARenderer::ExecuteLogTransPreblurInterop(
+    cudaSurfaceObject_t input,
+    cudaSurfaceObject_t tempBuffer,
+    cudaSurfaceObject_t output,
+    int width, int height,
+    int level,
+    float baseSigma,
+    const BoundingBox* bounds,
+    CUstream stream)
+{
+    if (!m_logTransPreblurHKernel || !m_logTransPreblurVKernel) {
+        CUDA_LOG("ERROR: Pre-blur kernels not loaded");
+        return false;
+    }
+
+    // Use provided stream or default
+    CUstream execStream = stream ? stream : m_stream;
+
+    // Use BoundingBox if provided, otherwise full image
+    int boundMinX = bounds ? bounds->minX : 0;
+    int boundMinY = bounds ? bounds->minY : 0;
+    int boundWidth = bounds ? bounds->width() : width;
+    int boundHeight = bounds ? bounds->height() : height;
+
+    int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+    CUDA_LOG("PreblurInterop level %d: %dx%d, σ=%.1f×√%d=%.1f, BBox [%d,%d] %dx%d",
+        level, width, height, baseSigma, level, baseSigma * sqrtf((float)level),
+        boundMinX, boundMinY, boundWidth, boundHeight);
+
+    // H-pass: input → tempBuffer
+    {
+        void* hArgs[] = {
+            &input, &tempBuffer,
+            &width, &height, &level, &baseSigma,
+            &boundMinX, &boundMinY, &boundWidth, &boundHeight
+        };
+
+        CUresult err = cuLaunchKernel(
+            m_logTransPreblurHKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, execStream,
+            hArgs, nullptr);
+
+        if (!CheckCUDAError(err, "cuLaunchKernel(PreblurH Surface)")) {
+            return false;
+        }
+    }
+
+    // Sync between H and V passes (within this stream)
+    if (execStream == m_stream) {
+        cuEventRecord(m_syncEvent, execStream);
+        cuStreamWaitEvent(execStream, m_syncEvent, 0);
+    } else {
+        // For parallel streams, use stream synchronization
+        cuStreamSynchronize(execStream);
+    }
+
+    // V-pass: tempBuffer → output
+    {
+        void* vArgs[] = {
+            &tempBuffer, &output,
+            &width, &height, &level, &baseSigma,
+            &boundMinX, &boundMinY, &boundWidth, &boundHeight
+        };
+
+        CUresult err = cuLaunchKernel(
+            m_logTransPreblurVKernel,
+            gridX, gridY, 1,
+            THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+            0, execStream,
+            vArgs, nullptr);
+
+        if (!CheckCUDAError(err, "cuLaunchKernel(PreblurV Surface)")) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 #endif // _WIN32
