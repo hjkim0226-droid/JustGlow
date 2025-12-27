@@ -17,9 +17,18 @@
 #ifdef _WIN32
 
 #include <d3d12.h>
-#include <cuda.h>
-#include <cuda_runtime.h>
 #include <wrl/client.h>
+
+// Forward declare CUDA types to avoid header conflicts with DirectX
+// Actual CUDA headers are included only in .cpp files
+typedef struct CUctx_st* CUcontext;
+typedef struct CUstream_st* CUstream;
+typedef void* cudaExternalMemory_t;
+typedef void* cudaExternalSemaphore_t;
+typedef struct cudaMipmappedArray* cudaMipmappedArray_t;
+typedef struct cudaArray* cudaArray_t;
+typedef unsigned long long cudaSurfaceObject_t;
+typedef unsigned long long cudaTextureObject_t;
 
 using Microsoft::WRL::ComPtr;
 

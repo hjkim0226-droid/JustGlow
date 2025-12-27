@@ -58,7 +58,7 @@ struct BoundingBox {
     }
 };
 
-static const int MAX_MIP_LEVELS = 12;
+// MAX_MIP_LEVELS is already defined in JustGlowParams.h (included above)
 
 // ============================================================================
 // JustGlowCUDARenderer Class
