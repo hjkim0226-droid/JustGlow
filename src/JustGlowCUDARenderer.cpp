@@ -7,6 +7,11 @@
 
 #ifdef _WIN32
 
+// Prevent Windows.h from defining min/max macros (conflicts with std::min/max)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <windows.h>
 #include "JustGlowCUDARenderer.h"
 #include "JustGlowInterop.h"  // For InteropTexture struct
@@ -63,8 +68,7 @@ static void CUDALogMessage(const char* format, ...) {
 // Thread group size (must match CUDA kernels)
 constexpr int THREAD_BLOCK_SIZE = 16;
 
-// Base sigma for Log-Transmittance Pre-blur (matches JustGlowInterop.h)
-constexpr float BASE_BLUR_SIGMA = 16.0f;
+// Note: BASE_BLUR_SIGMA is defined in JustGlowInterop.h
 
 // ============================================================================
 // Helper to get DLL module handle

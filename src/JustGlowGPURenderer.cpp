@@ -7,6 +7,15 @@
 
 #ifdef _WIN32
 
+// IMPORTANT: CUDA headers MUST be included first to define vector types
+// before JustGlowParams.h (which is included by JustGlowGPURenderer.h)
+#if HAS_CUDA
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include "JustGlowInterop.h"
+#include "JustGlowCUDARenderer.h"
+#endif
+
 #include "JustGlowGPURenderer.h"
 #include <d3dcompiler.h>
 #include <fstream>
@@ -15,12 +24,6 @@
 #include <iomanip>
 #include <cstdarg>
 #include <algorithm>  // for std::min
-
-// Interop support (CUDA hybrid mode)
-#if HAS_CUDA
-#include "JustGlowInterop.h"
-#include "JustGlowCUDARenderer.h"
-#endif
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
