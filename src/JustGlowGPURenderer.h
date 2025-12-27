@@ -23,16 +23,6 @@
 
 using Microsoft::WRL::ComPtr;
 
-// Forward declarations for Interop (CUDA support)
-#if HAS_CUDA
-class JustGlowInterop;
-class JustGlowCUDARenderer;
-struct InteropTexture;
-struct InteropFence;
-typedef struct CUctx_st* CUcontext;
-typedef struct CUstream_st* CUstream;
-#endif
-
 // ============================================================================
 // Shader Types
 // ============================================================================
@@ -86,13 +76,6 @@ public:
     // Initialization
     bool Initialize(ID3D12Device* device, ID3D12CommandQueue* commandQueue);
     void Shutdown();
-
-#if HAS_CUDA
-    // Interop initialization (call after Initialize)
-    // Enables hybrid DX12-CUDA rendering pipeline
-    bool EnableInterop(CUcontext cudaContext, CUstream cudaStream);
-    bool IsInteropEnabled() const { return m_useInterop; }
-#endif
 
     // Rendering
     bool Render(
@@ -164,60 +147,6 @@ private:
     bool m_useDispatchIndirect = true;
 
     static constexpr int MAX_MIP_LEVELS = 12;
-
-    // =========================================
-    // DX12-CUDA Interop Resources (Hybrid Mode)
-    // =========================================
-#if HAS_CUDA
-    // Interop manager
-    JustGlowInterop* m_interop = nullptr;
-
-    // CUDA renderer for blur operations
-    JustGlowCUDARenderer* m_cudaRenderer = nullptr;
-
-    // CUDA context and stream (from AE)
-    CUcontext m_cudaContext = nullptr;
-    CUstream m_cudaStream = nullptr;
-
-    // Shared textures for DX12-CUDA data exchange
-    // These are created with D3D12_HEAP_FLAG_SHARED and imported to CUDA
-    static constexpr int MAX_INTEROP_LEVELS = 6;
-
-    // Input texture (AE input -> CUDA processing)
-    InteropTexture* m_interopInput = nullptr;
-
-    // Blurred output textures (CUDA blur results -> DX12 Screen blend)
-    InteropTexture* m_interopBlurred[MAX_INTEROP_LEVELS] = {};
-
-    // Fence for DX12-CUDA synchronization
-    InteropFence* m_interopFence = nullptr;
-
-    // Screen blend constant buffer (b2 for ScreenBlend shader)
-    ComPtr<ID3D12Resource> m_screenBlendBuffer;
-    void* m_screenBlendBufferPtr = nullptr;
-
-    // Flag to enable/disable Interop (set during initialization)
-    bool m_useInterop = false;
-
-    // Interop initialization
-    bool InitializeInterop(CUcontext cudaContext, CUstream cudaStream);
-    void ShutdownInterop();
-
-    // Interop resource management
-    bool CreateInteropTextures(int width, int height);
-    void ReleaseInteropTextures();
-    bool CreateScreenBlendResources();
-
-    // Hybrid rendering pipeline
-    bool RenderHybrid(
-        const RenderParams& params,
-        ID3D12Resource* inputBuffer,
-        ID3D12Resource* outputBuffer);
-
-    // DX12 -> CUDA -> DX12 stages
-    void CopyInputToInterop(ID3D12Resource* input);
-    void ExecuteScreenBlend(const RenderParams& params);
-#endif
 
     // Initialization helpers
     bool CreateCommandObjects();

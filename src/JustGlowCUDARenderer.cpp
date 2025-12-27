@@ -1596,3 +1596,4 @@ bool JustGlowCUDARenderer::ExecuteComposite(
     return CheckCUDAError(err, "cuLaunchKernel(DebugOutput)");
 }
 
+#endif // _WIN32
