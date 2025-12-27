@@ -2695,13 +2695,14 @@ extern "C" __global__ void PrefilterSurfaceKernel(
         // Soft threshold
         float luma = sample.x * 0.2126f + sample.y * 0.7152f + sample.z * 0.0722f;
         float knee = threshold * softKnee;
-        float t = smoothstep(threshold - knee, threshold + knee, luma);
+        float t = smoothstepf(threshold - knee, threshold + knee, luma);
 
         if (t > 0.0f) {
+            // lerp(a, b, t) = a + (b - a) * t
             float3 blended = make_float3(
-                lerp(sample.x * glowR, sample.x, preserveColor),
-                lerp(sample.y * glowG, sample.y, preserveColor),
-                lerp(sample.z * glowB, sample.z, preserveColor)
+                sample.x * glowR + (sample.x - sample.x * glowR) * preserveColor,
+                sample.y * glowG + (sample.y - sample.y * glowG) * preserveColor,
+                sample.z * glowB + (sample.z - sample.z * glowB) * preserveColor
             );
 
             float w = weights[i];
