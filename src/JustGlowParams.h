@@ -14,11 +14,14 @@
     #include <cmath>
 
     // C++ type aliases matching HLSL
+    // Skip if CUDA vector_types.h already defines these (avoid redefinition)
+    #ifndef __VECTOR_TYPES_H__
     struct float2 { float x, y; };
     struct float3 { float x, y, z; };
     struct float4 { float x, y, z, w; };
     struct int2 { int x, y; };
     struct int4 { int x, y, z, w; };
+    #endif // __VECTOR_TYPES_H__
 
     #define CONSTANT_BUFFER_BEGIN(name) struct alignas(16) name {
     #define CONSTANT_BUFFER_END };

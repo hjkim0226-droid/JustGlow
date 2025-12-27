@@ -4,6 +4,14 @@
  * Main plugin implementation file.
  */
 
+// IMPORTANT: CUDA headers MUST be included before JustGlowParams.h
+// to avoid type redefinition conflicts (float2, int2, etc.)
+#if HAS_CUDA
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include "JustGlowCUDARenderer.h"
+#endif
+
 #include "JustGlow.h"
 #include "JustGlowParams.h"
 #include <AE_Macros.h>
@@ -12,11 +20,6 @@
 
 #if HAS_DIRECTX
 #include "JustGlowGPURenderer.h"
-#endif
-
-#if HAS_CUDA
-#include "JustGlowCUDARenderer.h"
-#include <cuda.h>
 #endif
 
 #if HAS_DIRECTX || HAS_CUDA

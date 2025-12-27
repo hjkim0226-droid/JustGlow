@@ -12,9 +12,11 @@
 
 #ifdef _WIN32
 
-#include "JustGlowInterop.h"
+// IMPORTANT: CUDA headers MUST be included before JustGlowInterop.h
+// to avoid forward declaration conflicts
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "JustGlowInterop.h"
 #include <fstream>
 #include <ctime>
 #include <sstream>

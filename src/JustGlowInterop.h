@@ -20,16 +20,18 @@
 #include <wrl/client.h>
 
 // Forward declare CUDA types to avoid header conflicts with DirectX
-// Actual CUDA headers are included only in .cpp files
-typedef struct CUctx_st* CUcontext;
-typedef struct CUstream_st* CUstream;
-typedef void* cudaExternalMemory_t;
-typedef void* cudaExternalSemaphore_t;
-typedef struct cudaMipmappedArray* cudaMipmappedArray_t;
-typedef struct cudaArray* cudaArray_t;
-typedef unsigned long long cudaSurfaceObject_t;
-typedef unsigned long long cudaTextureObject_t;
-typedef int cudaError_t;  // Actually enum, but int works for forward declaration
+// Only define if CUDA headers haven't been included yet
+#ifndef __DRIVER_TYPES_H__
+    typedef struct CUctx_st* CUcontext;
+    typedef struct CUstream_st* CUstream;
+    typedef void* cudaExternalMemory_t;
+    typedef void* cudaExternalSemaphore_t;
+    typedef struct cudaMipmappedArray* cudaMipmappedArray_t;
+    typedef struct cudaArray* cudaArray_t;
+    typedef unsigned long long cudaSurfaceObject_t;
+    typedef unsigned long long cudaTextureObject_t;
+    typedef int cudaError_t;  // Actually enum, but int works for forward declaration
+#endif // __DRIVER_TYPES_H__
 
 using Microsoft::WRL::ComPtr;
 

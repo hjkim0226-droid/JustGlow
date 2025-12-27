@@ -9,9 +9,11 @@
 #ifndef JUSTGLOW_CUDA_RENDERER_H
 #define JUSTGLOW_CUDA_RENDERER_H
 
-#include "JustGlowParams.h"
+// IMPORTANT: CUDA headers MUST be included before JustGlowParams.h
+// to avoid type redefinition conflicts (float2, int2, etc.)
 #include <cuda.h>  // Driver API
 #include <cuda_runtime.h>  // For cudaSurfaceObject_t
+#include "JustGlowParams.h"
 #include <vector>
 
 // Forward declarations for Interop
