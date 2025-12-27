@@ -382,6 +382,49 @@ void JustGlowCUDARenderer::Shutdown() {
 }
 
 // ============================================================================
+// Initialize/Destroy Parallel Streams
+// ============================================================================
+
+bool JustGlowCUDARenderer::InitializeStreams() {
+    if (m_streamsInitialized) {
+        return true;
+    }
+
+    for (int i = 0; i < MAX_PARALLEL_STREAMS; i++) {
+        CUresult err = cuStreamCreate(&m_preblurStreams[i], CU_STREAM_NON_BLOCKING);
+        if (err != CUDA_SUCCESS) {
+            // Clean up already created streams
+            for (int j = 0; j < i; j++) {
+                cuStreamDestroy(m_preblurStreams[j]);
+                m_preblurStreams[j] = nullptr;
+            }
+            CUDA_LOG("ERROR: Failed to create stream %d", i);
+            return false;
+        }
+    }
+
+    m_streamsInitialized = true;
+    CUDA_LOG("Parallel streams initialized (%d streams)", MAX_PARALLEL_STREAMS);
+    return true;
+}
+
+void JustGlowCUDARenderer::DestroyStreams() {
+    if (!m_streamsInitialized) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_PARALLEL_STREAMS; i++) {
+        if (m_preblurStreams[i]) {
+            cuStreamDestroy(m_preblurStreams[i]);
+            m_preblurStreams[i] = nullptr;
+        }
+    }
+
+    m_streamsInitialized = false;
+    CUDA_LOG("Parallel streams destroyed");
+}
+
+// ============================================================================
 // Allocate MIP Chain
 // ============================================================================
 
