@@ -29,6 +29,7 @@ typedef struct cudaMipmappedArray* cudaMipmappedArray_t;
 typedef struct cudaArray* cudaArray_t;
 typedef unsigned long long cudaSurfaceObject_t;
 typedef unsigned long long cudaTextureObject_t;
+typedef int cudaError_t;  // Actually enum, but int works for forward declaration
 
 using Microsoft::WRL::ComPtr;
 
@@ -71,16 +72,8 @@ struct InteropTexture {
         return d3d12Resource != nullptr && cudaSurface != 0;
     }
 
-    void reset() {
-        d3d12Resource.Reset();
-        if (sharedHandle) { CloseHandle(sharedHandle); sharedHandle = nullptr; }
-        if (cudaTexture) { cudaDestroyTextureObject(cudaTexture); cudaTexture = 0; }
-        if (cudaSurface) { cudaDestroySurfaceObject(cudaSurface); cudaSurface = 0; }
-        if (cudaMipArray) { cudaFreeMipmappedArray(cudaMipArray); cudaMipArray = nullptr; }
-        if (cudaExtMem) { cudaDestroyExternalMemory(cudaExtMem); cudaExtMem = nullptr; }
-        width = height = 0;
-        sizeBytes = 0;
-    }
+    // Note: reset() is implemented in JustGlowInterop.cpp to avoid CUDA header dependency
+    void reset();
 };
 
 // ============================================================================
@@ -109,12 +102,8 @@ struct InteropFence {
         return d3d12Fence != nullptr && cudaSemaphore != nullptr;
     }
 
-    void reset() {
-        d3d12Fence.Reset();
-        if (sharedHandle) { CloseHandle(sharedHandle); sharedHandle = nullptr; }
-        if (cudaSemaphore) { cudaDestroyExternalSemaphore(cudaSemaphore); cudaSemaphore = nullptr; }
-        fenceValue = 0;
-    }
+    // Note: reset() is implemented in JustGlowInterop.cpp to avoid CUDA header dependency
+    void reset();
 };
 
 // ============================================================================

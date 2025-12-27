@@ -13,6 +13,8 @@
 #ifdef _WIN32
 
 #include "JustGlowInterop.h"
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include <fstream>
 #include <ctime>
 #include <sstream>
@@ -531,6 +533,30 @@ void JustGlowInterop::TransitionFromCUDAAccess(
 
     cmdList->ResourceBarrier(1, &barrier);
     INTEROP_LOG("Transition from COMMON to state %d", targetState);
+}
+
+// ============================================================================
+// InteropTexture::reset() and InteropFence::reset() implementations
+// These are here to avoid CUDA header dependency in the header file
+// ============================================================================
+
+void InteropTexture::reset() {
+    d3d12Resource.Reset();
+    if (sharedHandle) { CloseHandle(sharedHandle); sharedHandle = nullptr; }
+    if (cudaTexture) { cudaDestroyTextureObject(cudaTexture); cudaTexture = 0; }
+    if (cudaSurface) { cudaDestroySurfaceObject(cudaSurface); cudaSurface = 0; }
+    if (cudaMipArray) { cudaFreeMipmappedArray(cudaMipArray); cudaMipArray = nullptr; }
+    if (cudaExtMem) { cudaDestroyExternalMemory(cudaExtMem); cudaExtMem = nullptr; }
+    cudaArray = nullptr;
+    width = height = 0;
+    sizeBytes = 0;
+}
+
+void InteropFence::reset() {
+    d3d12Fence.Reset();
+    if (sharedHandle) { CloseHandle(sharedHandle); sharedHandle = nullptr; }
+    if (cudaSemaphore) { cudaDestroyExternalSemaphore(cudaSemaphore); cudaSemaphore = nullptr; }
+    fenceValue = 0;
 }
 
 #endif // _WIN32
