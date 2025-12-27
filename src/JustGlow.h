@@ -344,6 +344,11 @@ struct JustGlowGPUData {
     void* renderer;             // Pointer to renderer (DirectX or CUDA)
     GPUFrameworkType framework;
     bool initialized;
+
+    // For DX12-CUDA Interop hybrid mode (DirectX + CUDA)
+    void* interopCudaContext;   // CUcontext for Interop (nullptr if not using Interop)
+    void* interopCudaStream;    // CUstream for Interop (nullptr if not using Interop)
+    bool interopEnabled;        // true if Interop is active
 };
 
 // Pre-render data passed to SmartRender

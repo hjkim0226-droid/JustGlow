@@ -157,6 +157,9 @@ private:
     // Root signature for Refine shaders (needs additional UAVs)
     ComPtr<ID3D12RootSignature> m_refineRootSignature;
 
+    // Root signature for ScreenBlend shader (needs t2-t7 for blurred levels)
+    ComPtr<ID3D12RootSignature> m_screenBlendRootSignature;
+
     // Flag to enable/disable DispatchIndirect optimization
     bool m_useDispatchIndirect = true;
 
@@ -222,6 +225,7 @@ private:
     bool CreateConstantBuffers();
     bool CreateRootSignature(ComPtr<ID3D12RootSignature>& rootSig);
     bool CreateRefineRootSignature();      // Root sig for Refine shaders (extra UAVs)
+    bool CreateScreenBlendRootSignature(); // Root sig for ScreenBlend (t2-t7 blurred levels)
     bool CreateDispatchIndirectResources(); // IndirectArgs, bounds buffers
     bool CreateCommandSignature();          // For ExecuteIndirect
     bool LoadShaders();

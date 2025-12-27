@@ -566,6 +566,124 @@ bool JustGlowGPURenderer::CreateRefineRootSignature() {
 }
 
 // ============================================================================
+// Create ScreenBlend Root Signature (for DX12-CUDA Interop hybrid mode)
+// ============================================================================
+
+bool JustGlowGPURenderer::CreateScreenBlendRootSignature() {
+    // Root parameters for ScreenBlend shader:
+    // [0] CBV - GlowParams (b0)
+    // [1] CBV - BlurPassParams (b1)
+    // [2] CBV - ScreenBlendParams (b2)
+    // [3] Descriptor Table - SRVs t2-t7 (6 blurred level textures)
+    // [4] Descriptor Table - UAV u0 (output)
+
+    D3D12_ROOT_PARAMETER rootParams[5] = {};
+
+    // CBV for GlowParams (b0)
+    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[0].Descriptor.ShaderRegister = 0;
+    rootParams[0].Descriptor.RegisterSpace = 0;
+    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // CBV for BlurPassParams (b1)
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[1].Descriptor.ShaderRegister = 1;
+    rootParams[1].Descriptor.RegisterSpace = 0;
+    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // CBV for ScreenBlendParams (b2)
+    rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[2].Descriptor.ShaderRegister = 2;
+    rootParams[2].Descriptor.RegisterSpace = 0;
+    rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // SRV descriptor table (t2-t7) - 6 blurred level textures
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 6;  // t2, t3, t4, t5, t6, t7
+    srvRange.BaseShaderRegister = 2;  // Start at t2
+    srvRange.RegisterSpace = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[3].DescriptorTable.pDescriptorRanges = &srvRange;
+    rootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // UAV descriptor table (u0)
+    D3D12_DESCRIPTOR_RANGE uavRange = {};
+    uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    uavRange.NumDescriptors = 1;
+    uavRange.BaseShaderRegister = 0;
+    uavRange.RegisterSpace = 0;
+    uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[4].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[4].DescriptorTable.pDescriptorRanges = &uavRange;
+    rootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Static samplers
+    D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+
+    // Linear sampler (s0)
+    staticSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].MipLODBias = 0;
+    staticSamplers[0].MaxAnisotropy = 1;
+    staticSamplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    staticSamplers[0].BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    staticSamplers[0].MinLOD = 0;
+    staticSamplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    staticSamplers[0].ShaderRegister = 0;
+    staticSamplers[0].RegisterSpace = 0;
+    staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Point sampler (s1)
+    staticSamplers[1] = staticSamplers[0];
+    staticSamplers[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSamplers[1].ShaderRegister = 1;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+    rootSigDesc.NumParameters = 5;
+    rootSigDesc.pParameters = rootParams;
+    rootSigDesc.NumStaticSamplers = 2;
+    rootSigDesc.pStaticSamplers = staticSamplers;
+    rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+    ComPtr<ID3DBlob> serializedRootSig;
+    ComPtr<ID3DBlob> errorBlob;
+
+    HRESULT hr = D3D12SerializeRootSignature(
+        &rootSigDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        &serializedRootSig,
+        &errorBlob);
+    if (FAILED(hr)) {
+        if (errorBlob) {
+            LOG("ERROR: Root signature serialization failed: %s",
+                (const char*)errorBlob->GetBufferPointer());
+        }
+        return false;
+    }
+
+    hr = m_device->CreateRootSignature(
+        0,
+        serializedRootSig->GetBufferPointer(),
+        serializedRootSig->GetBufferSize(),
+        IID_PPV_ARGS(&m_screenBlendRootSignature));
+    if (FAILED(hr)) {
+        LOG("ERROR: Failed to create ScreenBlend root signature, HR=0x%08X", hr);
+        return false;
+    }
+
+    LOG("ScreenBlend root signature created");
+    return true;
+}
+
+// ============================================================================
 // Create DispatchIndirect Resources
 // ============================================================================
 
@@ -736,10 +854,17 @@ bool JustGlowGPURenderer::LoadShaders() {
     success &= LoadShader(ShaderType::CalcIndirectArgs, GetShaderPath(ShaderType::CalcIndirectArgs), m_refineRootSignature);
     success &= LoadShader(ShaderType::ResetBounds, GetShaderPath(ShaderType::ResetBounds), m_refineRootSignature);
 
-    // Load ScreenBlend shaders (for hybrid Interop mode)
+    // Create ScreenBlend root signature (for hybrid Interop mode - needs t2-t7)
+    if (!CreateScreenBlendRootSignature()) {
+        LOG("WARNING: ScreenBlend root signature creation failed, Interop mode will be unavailable");
+    }
+
+    // Load ScreenBlend shaders with ScreenBlend root signature (t2-t7 for blurred levels)
     // These are optional - hybrid mode only works if CUDA is available
-    LoadShader(ShaderType::ScreenBlend, GetShaderPath(ShaderType::ScreenBlend), sharedRootSig);
-    LoadShader(ShaderType::ScreenBlendDirect, GetShaderPath(ShaderType::ScreenBlendDirect), sharedRootSig);
+    if (m_screenBlendRootSignature) {
+        LoadShader(ShaderType::ScreenBlend, GetShaderPath(ShaderType::ScreenBlend), m_screenBlendRootSignature);
+        LoadShader(ShaderType::ScreenBlendDirect, GetShaderPath(ShaderType::ScreenBlendDirect), m_screenBlendRootSignature);
+    }
 
     return success;
 }
@@ -2201,22 +2326,55 @@ void JustGlowGPURenderer::ExecuteScreenBlend(const RenderParams& params) {
     m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
     m_commandList->SetPipelineState(shader.pipelineState.Get());
 
+    // ScreenBlend Root Signature layout:
+    // [0] CBV - GlowParams (b0)
+    // [1] CBV - BlurPassParams (b1)
+    // [2] CBV - ScreenBlendParams (b2)
+    // [3] Descriptor Table - SRVs t2-t7 (6 blurred level textures)
+    // [4] Descriptor Table - UAV u0 (output)
+
     // Set constant buffers
     m_commandList->SetComputeRootConstantBufferView(0, m_constantBuffer->GetGPUVirtualAddress());
     m_commandList->SetComputeRootConstantBufferView(1, m_blurPassBuffer->GetGPUVirtualAddress());
+    m_commandList->SetComputeRootConstantBufferView(2, m_screenBlendBuffer->GetGPUVirtualAddress());
+
+    // Transition blurred textures to PIXEL_SHADER_RESOURCE for reading
+    for (int i = 0; i < numLevels && i < MAX_INTEROP_LEVELS; i++) {
+        if (m_interopBlurred[i] && m_interopBlurred[i]->d3d12Resource) {
+            TransitionResource(m_interopBlurred[i]->d3d12Resource.Get(),
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+    }
 
     // Bind blurred textures as SRVs (t2-t7)
-    // Note: ScreenBlend.hlsl expects these in t2-t7, need to create descriptor table
-    // For now, we skip this as it requires additional root signature setup
+    // SRVs are at descriptor indices INTEROP_BLURRED_SRV_START + i
+    // The descriptor table expects 6 consecutive SRVs starting at t2
+    D3D12_GPU_DESCRIPTOR_HANDLE srvTableStart = GetGPUDescriptorHandle(INTEROP_BLURRED_SRV_START);
+    m_commandList->SetComputeRootDescriptorTable(3, srvTableStart);
 
-    // TODO: Proper descriptor table binding for blurred levels
+    // Bind output UAV (u0) - use mipChain[0] as output target
+    if (m_mipChain.size() > 0) {
+        D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = GetGPUDescriptorHandle(m_mipChain[0].uavIndex);
+        m_commandList->SetComputeRootDescriptorTable(4, uavHandle);
+    }
 
     // Dispatch
     UINT groupsX = (params.width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
     UINT groupsY = (params.height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
 
-    LOG("ScreenBlend Dispatch: %u x %u groups", groupsX, groupsY);
+    LOG("ScreenBlend Dispatch: %u x %u groups, SRV table at index %u",
+        groupsX, groupsY, INTEROP_BLURRED_SRV_START);
     m_commandList->Dispatch(groupsX, groupsY, 1);
+
+    // Transition blurred textures back to COMMON for CUDA access
+    for (int i = 0; i < numLevels && i < MAX_INTEROP_LEVELS; i++) {
+        if (m_interopBlurred[i] && m_interopBlurred[i]->d3d12Resource) {
+            TransitionResource(m_interopBlurred[i]->d3d12Resource.Get(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_COMMON);
+        }
+    }
 
     // UAV barrier
     if (m_mipChain.size() > 0) {
