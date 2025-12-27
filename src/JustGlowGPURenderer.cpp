@@ -2320,8 +2320,22 @@ void JustGlowGPURenderer::ExecuteScreenBlend(const RenderParams& params) {
 
     memcpy(m_screenBlendBufferPtr, &sbParams, sizeof(sbParams));
 
-    LOG("ScreenBlend: %d levels, intensity=%.2f, falloff=%.2f",
-        numLevels, params.level1Weight, sbParams.falloff);
+    // Update BlurPassParams with output dimensions (required for g_dstWidth/Height)
+    BlurPassParams bpParams = {};
+    bpParams.srcWidth = params.width;
+    bpParams.srcHeight = params.height;
+    bpParams.dstWidth = params.width;    // Output is full resolution
+    bpParams.dstHeight = params.height;
+    bpParams.srcPitch = params.width;
+    bpParams.dstPitch = params.width;
+    bpParams.srcTexelX = 1.0f / params.width;
+    bpParams.srcTexelY = 1.0f / params.height;
+    bpParams.dstTexelX = 1.0f / params.width;
+    bpParams.dstTexelY = 1.0f / params.height;
+    memcpy(m_blurPassBufferPtr, &bpParams, sizeof(bpParams));
+
+    LOG("ScreenBlend: %d levels, intensity=%.2f, falloff=%.2f, output=%dx%d",
+        numLevels, params.level1Weight, sbParams.falloff, params.width, params.height);
 
     m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
     m_commandList->SetPipelineState(shader.pipelineState.Get());
