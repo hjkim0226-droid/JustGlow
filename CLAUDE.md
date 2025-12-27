@@ -171,6 +171,13 @@ cmake --install build
 
 ## 알려진 이슈
 
+**해결됨 (v1.5.4):**
+1. ~~**CUDA ExecuteRefine 버퍼 오버런**~~ → `params.inputWidth/inputHeight` 사용 (입력 버퍼 크기)
+   - 원인: `params.width/height` (출력 크기)로 입력 버퍼 접근 → CUDA_ERROR_ILLEGAL_ADDRESS
+   - 수정: `JustGlowCUDARenderer.cpp:685`
+2. ~~**HDR Mode 미사용**~~ → UI에서 숨김 처리 (`PF_PUI_INVISIBLE`)
+   - Karis Average v1.4.0에서 제거됨 (아티팩트 발생)
+
 **해결됨 (v1.5.3):**
 1. ~~**Pitch 모호성**~~ → `pitchBytes`로 명시적 명명 (`JustGlowCUDARenderer.h`)
 2. ~~**CPU Fallback 미구현**~~ → GPU 미지원 시 에러 메시지 표시 (`JustGlow.cpp:1259`)
@@ -178,6 +185,27 @@ cmake --install build
 
 **Medium:**
 - 임시 버퍼 과다 할당 (성능 영향 미미)
+
+## 최적화된 디폴트 값 (v1.5.4)
+
+| 파라미터 | 값 | 이유 |
+|----------|-----|------|
+| Exposure | 1.5 | 첫 적용시 글로우가 바로 보임 |
+| Threshold | 50% | 밝은 영역만 잡아서 깔끔한 글로우 |
+| SoftKnee | 50% | 균형잡힌 트랜지션 |
+| Quality | 9 | 약간 더 좋은 품질 |
+| Desaturation | 30% | 더 컬러풀한 글로우 |
+| HDRMode | false | 제거된 기능 |
+| Dither | 30% | 미세한 밴딩 방지 |
+
+## Git 브랜치 구조
+
+```
+main            ← 안정 버전 (기존 Dev-New-Architecture)
+develop         ← 개발용
+main-legacy     ← 기존 프로토타입 백업
+develop-legacy  ← 기존 develop 백업
+```
 
 상세 내용: `docs/CODE_REVIEW_REPORT.md`
 
