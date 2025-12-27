@@ -7,6 +7,11 @@
 
 #ifdef _WIN32
 
+// Prevent Windows.h from defining min/max macros (conflicts with std::min/max)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 // IMPORTANT: CUDA headers MUST be included first to define vector types
 // before JustGlowParams.h (which is included by JustGlowGPURenderer.h)
 #if HAS_CUDA
@@ -2176,22 +2181,22 @@ void JustGlowGPURenderer::ExecuteScreenBlend(const RenderParams& params) {
 
     ScreenBlendParams sbParams = {};
     sbParams.numLevels = numLevels;
-    sbParams.baseWeight = params.intensity;
-    sbParams.falloff = params.falloff;
+    sbParams.baseWeight = params.level1Weight;
+    sbParams.falloff = params.decayK / 100.0f;  // decayK is 0-100, normalize to 0-1
 
     // Calculate level weights: weight = baseWeight * pow(falloff, level)
-    float decayRate = 1.0f - (params.falloff - 0.5f);
+    float decayRate = 1.0f - (sbParams.falloff - 0.5f);
     for (int i = 0; i < 4 && i < numLevels; i++) {
-        sbParams.levelWeights[i] = params.intensity * powf(decayRate, static_cast<float>(i + 1));
+        sbParams.levelWeights[i] = params.level1Weight * powf(decayRate, static_cast<float>(i + 1));
     }
     for (int i = 0; i < 2 && (i + 4) < numLevels; i++) {
-        sbParams.levelWeights56[i] = params.intensity * powf(decayRate, static_cast<float>(i + 5));
+        sbParams.levelWeights56[i] = params.level1Weight * powf(decayRate, static_cast<float>(i + 5));
     }
 
     memcpy(m_screenBlendBufferPtr, &sbParams, sizeof(sbParams));
 
     LOG("ScreenBlend: %d levels, intensity=%.2f, falloff=%.2f",
-        numLevels, params.intensity, params.falloff);
+        numLevels, params.level1Weight, sbParams.falloff);
 
     m_commandList->SetComputeRootSignature(shader.rootSignature.Get());
     m_commandList->SetPipelineState(shader.pipelineState.Get());

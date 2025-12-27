@@ -1076,10 +1076,10 @@ bool JustGlowCUDARenderer::ExecuteDownsampleChain(const RenderParams& params) {
         int dstBoundMaxY = (srcBounds.maxY + 1) / 2;
 
         // Clamp to destination dimensions
-        dstBoundMinX = max(0, min(dstBoundMinX, dstMip.width - 1));
-        dstBoundMinY = max(0, min(dstBoundMinY, dstMip.height - 1));
-        dstBoundMaxX = max(0, min(dstBoundMaxX, dstMip.width - 1));
-        dstBoundMaxY = max(0, min(dstBoundMaxY, dstMip.height - 1));
+        dstBoundMinX = std::max(0, std::min(dstBoundMinX, dstMip.width - 1));
+        dstBoundMinY = std::max(0, std::min(dstBoundMinY, dstMip.height - 1));
+        dstBoundMaxX = std::max(0, std::min(dstBoundMaxX, dstMip.width - 1));
+        dstBoundMaxY = std::max(0, std::min(dstBoundMaxY, dstMip.height - 1));
 
         int boundWidth = dstBoundMaxX - dstBoundMinX + 1;
         int boundHeight = dstBoundMaxY - dstBoundMinY + 1;
@@ -1175,10 +1175,10 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         int boundHeight = bounds.height();
 
         // Clamp to destination dimensions
-        boundMinX = max(0, min(boundMinX, dstUpsample.width - 1));
-        boundMinY = max(0, min(boundMinY, dstUpsample.height - 1));
-        int boundMaxX = min(boundMinX + boundWidth - 1, dstUpsample.width - 1);
-        int boundMaxY = min(boundMinY + boundHeight - 1, dstUpsample.height - 1);
+        boundMinX = std::max(0, std::min(boundMinX, dstUpsample.width - 1));
+        boundMinY = std::max(0, std::min(boundMinY, dstUpsample.height - 1));
+        int boundMaxX = std::min(boundMinX + boundWidth - 1, dstUpsample.width - 1);
+        int boundMaxY = std::min(boundMinY + boundHeight - 1, dstUpsample.height - 1);
         boundWidth = boundMaxX - boundMinX + 1;
         boundHeight = boundMaxY - boundMinY + 1;
 
