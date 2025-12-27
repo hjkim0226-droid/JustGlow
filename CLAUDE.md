@@ -56,19 +56,27 @@ cmake --install build
 ## CUDA 렌더러
 
 **파일:**
-- `src/JustGlowCUDARenderer.h/cpp` - CUDA Driver API 기반 렌더러
-- `src/JustGlowKernels.cu` - CUDA 커널 구현 (1060줄)
+- `src/JustGlowCUDARenderer.h/cpp` - CUDA Driver API 기반 렌더러 (~1600줄)
+- `src/JustGlowKernels.cu` - CUDA 커널 구현 (~1900줄)
 
 **커널 목록:**
 - `PrefilterKernel` - 13-tap + Soft Threshold + ZeroPad
 - `Gaussian2DDownsampleKernel` - 9-tap 2D Gaussian + ZeroPad (all levels)
 - `UpsampleKernel` - 9-tap Tent + Falloff
 - `DebugOutputKernel` - 디버그 뷰 및 최종 합성
-- `DownsampleKernel` - (미사용, Kawase 5-tap - flickering 이슈로 제거됨)
+- `DesaturationKernel` - Glow 채도 조절
+- `RefineKernel` - BoundingBox 계산 (atomicMin/Max)
+- `PreblurGaussianH/VKernel` - 병렬 Pre-blur (Separable Gaussian)
 
 **버퍼 구조:**
 - `m_mipChain[]` - 다운샘플 결과 저장
 - `m_upsampleChain[]` - 업샘플 결과 저장 (별도 버퍼로 race condition 방지)
+- `m_preblurResults[]` - Pre-blur 결과 (레벨별 병렬 처리용)
+- `m_preblurTemp[]` - Pre-blur H-pass 임시 버퍼
+
+**병렬 스트림:**
+- `m_preblurStreams[6]` - 6개 CUDA 스트림으로 레벨별 Pre-blur 병렬 실행
+- 각 레벨 독립적 처리: `streamIdx = (level - 1) % 6`
 
 ## Critical Implementation Details
 
@@ -216,3 +224,4 @@ develop-legacy  ← 기존 develop 백업
 - `docs/AE_GPU_SDK_REFERENCE.md` - AE GPU SDK 참조
 - `docs/AE_GPU_CUDA_TROUBLESHOOTING.md` - CUDA 트러블슈팅
 - `ARCHITECTURE.md` - 전체 아키텍처 문서
+- `archive/` - DX12-CUDA Interop 레퍼런스 코드 (향후 참조용)

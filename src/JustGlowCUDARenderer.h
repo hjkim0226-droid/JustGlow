@@ -12,13 +12,8 @@
 // IMPORTANT: CUDA headers MUST be included before JustGlowParams.h
 // to avoid type redefinition conflicts (float2, int2, etc.)
 #include <cuda.h>  // Driver API
-#include <cuda_runtime.h>  // For cudaSurfaceObject_t
 #include "JustGlowParams.h"
 #include <vector>
-
-// Forward declarations for Interop
-struct InteropTexture;
-struct InteropFence;
 
 // ============================================================================
 // MIP Buffer Structure for CUDA
@@ -81,29 +76,8 @@ public:
         CUdeviceptr inputBuffer,
         CUdeviceptr outputBuffer);
 
-    // ========================================
-    // Interop Rendering (Hybrid DX12-CUDA)
-    // ========================================
-
-    /**
-     * Render with DX12-CUDA Interop textures
-     *
-     * Pipeline:
-     * 1. Read from input InteropTexture (shared with DX12)
-     * 2. Unmult → Prefilter → Downsample → Log-Transmittance Pre-blur
-     * 3. Write results to blurred InteropTextures (shared with DX12)
-     *
-     * @param params Render parameters
-     * @param input Input texture (AE buffer copied by DX12)
-     * @param blurredOutputs Array of 6 output textures for blurred MIP levels
-     * @param numLevels Number of MIP levels to process (1-6)
-     * @return true if successful
-     */
-    bool RenderWithInterop(
-        const RenderParams& params,
-        InteropTexture* input,
-        InteropTexture** blurredOutputs,
-        int numLevels);
+    // Benchmark - get timing results from last render
+    const BenchmarkResult& GetLastBenchmark() const { return m_lastBenchmark; }
 
 private:
     // CUDA objects from AE
@@ -121,30 +95,18 @@ private:
     CUfunction m_prefilterSep5VKernel;
     CUfunction m_prefilterSep9HKernel;
     CUfunction m_prefilterSep9VKernel;
-    CUfunction m_downsampleKernel;
     CUfunction m_upsampleKernel;
-    CUfunction m_compositeKernel;
-    CUfunction m_horizontalBlurKernel;
     // Gaussian downsample kernels
     CUfunction m_gaussian2DDownsampleKernel;  // 9-tap 2D + ZeroPad (primary)
-    CUfunction m_gaussianDownsampleHKernel;   // [deprecated] kept for fallback
-    CUfunction m_gaussianDownsampleVKernel;   // [deprecated] kept for fallback
     // Debug output kernel
     CUfunction m_debugOutputKernel;
     // Desaturation kernel (runs after Prefilter, before Downsample)
     CUfunction m_desaturationKernel;
     // Refine kernel (BoundingBox calculation)
     CUfunction m_refineKernel;
-
-    // ========================================
-    // Interop kernels (Surface-based)
-    // ========================================
-    CUfunction m_unmultSurfaceKernel;          // Unmult with √max formula (surface I/O)
-    CUfunction m_prefilterSurfaceKernel;       // Prefilter (surface I/O)
-    CUfunction m_downsampleSurfaceKernel;      // Downsample (surface I/O)
-    CUfunction m_logTransPreblurHKernel;       // Log-Transmittance H-blur (separable)
-    CUfunction m_logTransPreblurVKernel;       // Log-Transmittance V-blur (separable)
-    CUfunction m_clearSurfaceKernel;           // Clear surface to zero
+    // Pre-blur kernels (Separable Gaussian for parallel execution)
+    CUfunction m_preblurGaussianHKernel;  // Horizontal Gaussian blur
+    CUfunction m_preblurGaussianVKernel;  // Vertical Gaussian blur
 
     // ========================================
     // CUDA Streams for parallel Pre-blur
@@ -163,6 +125,10 @@ private:
     CUDAMipBuffer m_gaussianDownsampleTemp;
     // Temp buffer for separable prefilter H-pass
     CUDAMipBuffer m_prefilterSepTemp;
+    // Pre-blur result buffers (one per MIP level for parallel execution)
+    std::vector<CUDAMipBuffer> m_preblurResults;
+    // Temp buffer for Pre-blur H-pass (per-level temp during separable blur)
+    std::vector<CUDAMipBuffer> m_preblurTemp;
     int m_currentMipLevels;
     int m_currentWidth;
     int m_currentHeight;
@@ -173,6 +139,11 @@ private:
 
     // State
     bool m_initialized;
+
+    // Benchmark timing
+    BenchmarkResult m_lastBenchmark;
+    CUevent m_timerStart;
+    CUevent m_timerStop;
 
     // Resource management
     bool AllocateMipChain(int width, int height, int levels);
@@ -185,53 +156,14 @@ private:
     bool ExecutePrefilter(const RenderParams& params, CUdeviceptr input);
     bool ExecuteDownsampleChain(const RenderParams& params);
     bool ExecuteUpsampleChain(const RenderParams& params);
+    bool ExecutePreblurParallel(const RenderParams& params);  // NEW: Parallel Pre-blur
     bool ExecuteComposite(const RenderParams& params, CUdeviceptr original, CUdeviceptr output);
+
+    // Helper for Pre-blur parallel execution
+    void SyncAllPreblurStreams();
 
     // Error handling
     bool CheckCUDAError(CUresult err, const char* context);
-
-    // ========================================
-    // Interop rendering helpers (Surface + BoundingBox)
-    // ========================================
-
-    // Execute Unmult on input texture (√max formula)
-    bool ExecuteUnmultInterop(
-        cudaSurfaceObject_t input,
-        cudaSurfaceObject_t output,
-        int width, int height,
-        const BoundingBox* bounds = nullptr);  // Optional BoundingBox
-
-    // Execute Prefilter on unmulted input (threshold + 13-tap blur)
-    bool ExecutePrefilterInterop(
-        const RenderParams& params,
-        cudaSurfaceObject_t input,
-        cudaSurfaceObject_t output,
-        int width, int height,
-        const BoundingBox* bounds = nullptr);
-
-    // Execute Downsample chain with surface objects
-    bool ExecuteDownsampleChainInterop(
-        const RenderParams& params,
-        cudaSurfaceObject_t* mipSurfaces,
-        int* mipWidths, int* mipHeights,
-        int numLevels,
-        BoundingBox* mipBounds = nullptr);  // Output: BoundingBox per level
-
-    // Execute Log-Transmittance Pre-blur (separable Gaussian) - parallel with streams
-    bool ExecuteLogTransPreblurInterop(
-        cudaSurfaceObject_t input,
-        cudaSurfaceObject_t tempBuffer,
-        cudaSurfaceObject_t output,
-        int width, int height,
-        int level,
-        float baseSigma,
-        const BoundingBox* bounds = nullptr,
-        CUstream stream = nullptr);  // Optional stream for parallel execution
-
-    // Clear surface to zero (for initialization)
-    bool ExecuteClearSurface(
-        cudaSurfaceObject_t surface,
-        int width, int height);
 
     // Initialize/Destroy parallel streams
     bool InitializeStreams();

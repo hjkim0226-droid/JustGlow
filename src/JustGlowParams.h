@@ -244,6 +244,27 @@ struct RenderParams {
 
     // Computed
     int     mipLevels;
+
+    // Benchmark mode
+    bool    benchmarkMode;      // Enable timing measurement
+};
+
+// Benchmark timing results (in milliseconds)
+struct BenchmarkResult {
+    float refine;
+    float prefilter;
+    float downsample;
+    float upsample;
+    float composite;
+    float total;
+    int   mipLevels;
+    int   width;
+    int   height;
+
+    void reset() {
+        refine = prefilter = downsample = upsample = composite = total = 0.0f;
+        mipLevels = width = height = 0;
+    }
 };
 
 // Fill GlowParams constant buffer from RenderParams

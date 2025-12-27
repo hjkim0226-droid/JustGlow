@@ -118,6 +118,7 @@ enum ParamID {
     PARAM_GLOW_OPACITY,         // Glow opacity (0-200%)
     PARAM_PADDING_THRESHOLD,    // Padding clipping threshold (0-10%)
     PARAM_UNPREMULTIPLY,        // Unpremultiply in composite (checkbox)
+    PARAM_BENCHMARK,            // Benchmark button - shows render timing popup
 
     PARAM_COUNT
 };
@@ -157,7 +158,8 @@ enum ParamDiskID {
     DISK_ID_SOURCE_OPACITY,
     DISK_ID_GLOW_OPACITY,
     DISK_ID_PADDING_THRESHOLD,
-    DISK_ID_UNPREMULTIPLY
+    DISK_ID_UNPREMULTIPLY,
+    DISK_ID_BENCHMARK
 };
 
 // ============================================================================

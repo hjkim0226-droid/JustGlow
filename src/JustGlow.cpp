@@ -77,6 +77,20 @@ static void LogMsg(const char* format, ...) {
 // Plugin Data Entry
 // ============================================================================
 
+// ============================================================================
+// Forward Declarations
+// ============================================================================
+
+PF_Err UserChangedParam(
+    PF_InData*              in_data,
+    PF_OutData*             out_data,
+    PF_ParamDef*            params[],
+    PF_UserChangedParamExtra*   extra);
+
+// ============================================================================
+// Plugin Data Entry Function
+// ============================================================================
+
 PF_Err PluginDataEntryFunction(
     PF_PluginDataPtr        inPtr,
     PF_PluginDataCB         inPluginDataCallBackPtr,
@@ -152,6 +166,11 @@ PF_Err EffectMain(
             case PF_Cmd_SMART_RENDER_GPU:
                 err = SmartRender(in_data, out_data,
                     reinterpret_cast<PF_SmartRenderExtra*>(extra), true);
+                break;
+
+            case PF_Cmd_USER_CHANGED_PARAM:
+                err = UserChangedParam(in_data, out_data, params,
+                    reinterpret_cast<PF_UserChangedParamExtra*>(extra));
                 break;
 
             default:
@@ -690,9 +709,77 @@ PF_Err ParamsSetup(
         0,
         DISK_ID_UNPREMULTIPLY);
 
+    // Benchmark Button
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_BUTTON(
+        "Benchmark",
+        "Run Benchmark",
+        0,
+        PF_ParamFlag_SUPERVISE,
+        DISK_ID_BENCHMARK);
+
     out_data->num_params = PARAM_COUNT;
 
     return err;
+}
+
+// ============================================================================
+// User Changed Param - Handle button clicks
+// ============================================================================
+
+// Global benchmark state
+static bool g_benchmarkRequested = false;
+static BenchmarkResult g_lastBenchmark = {};
+
+PF_Err UserChangedParam(
+    PF_InData*                  in_data,
+    PF_OutData*                 out_data,
+    PF_ParamDef*                params[],
+    PF_UserChangedParamExtra*   extra)
+{
+    PF_Err err = PF_Err_NONE;
+
+    if (extra->param_index == PARAM_BENCHMARK) {
+        PLUGIN_LOG("Benchmark button clicked!");
+
+        // Set flag to trigger benchmark on next render
+        g_benchmarkRequested = true;
+
+        // Force a render refresh to trigger the benchmark
+        out_data->out_flags |= PF_OutFlag_FORCE_RERENDER;
+    }
+
+    return err;
+}
+
+// Show benchmark results popup
+static void ShowBenchmarkPopup(PF_InData* in_data, const BenchmarkResult& result) {
+    char message[512];
+    float fps = (result.total > 0) ? 1000.0f / result.total : 0.0f;
+
+    snprintf(message, sizeof(message),
+        "=== JustGlow Benchmark ===\n\n"
+        "Resolution: %dx%d\n"
+        "MIP Levels: %d\n\n"
+        "Refine:     %.2f ms\n"
+        "Prefilter:  %.2f ms\n"
+        "Downsample: %.2f ms\n"
+        "Upsample:   %.2f ms\n"
+        "Composite:  %.2f ms\n"
+        "─────────────────────\n"
+        "Total:      %.2f ms (%.0f fps)",
+        result.width, result.height, result.mipLevels,
+        result.refine, result.prefilter, result.downsample,
+        result.upsample, result.composite,
+        result.total, fps);
+
+    // Use platform message box
+    #ifdef _WIN32
+    MessageBoxA(NULL, message, "JustGlow Benchmark", MB_OK | MB_ICONINFORMATION);
+    #else
+    // macOS - use simple log for now
+    PLUGIN_LOG("%s", message);
+    #endif
 }
 
 // ============================================================================
