@@ -222,10 +222,6 @@ bool JustGlowGPURenderer::Initialize(
 void JustGlowGPURenderer::Shutdown() {
     WaitForGPU();
 
-#if HAS_CUDA
-    ShutdownInterop();
-#endif
-
     ReleaseMipChain();
 
     if (m_constantBufferPtr) {

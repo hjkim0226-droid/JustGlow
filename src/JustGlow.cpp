@@ -877,51 +877,6 @@ PF_Err GPUDeviceSetup(
                     gpuData->framework = GPUFrameworkType::DirectX;
                     gpuData->initialized = true;
                     PLUGIN_LOG("DirectX Renderer initialized successfully!");
-
-#if HAS_CUDA
-                    // Try to enable DX12-CUDA Interop for hybrid rendering
-                    // This creates a separate CUDA context for Interop operations
-                    PLUGIN_LOG("Attempting to enable DX12-CUDA Interop...");
-
-                    CUresult cuErr = cuInit(0);
-                    if (cuErr == CUDA_SUCCESS) {
-                        CUdevice cuDevice;
-                        cuErr = cuDeviceGet(&cuDevice, 0);
-
-                        if (cuErr == CUDA_SUCCESS) {
-                            CUcontext cuContext;
-                            cuErr = cuCtxCreate(&cuContext, 0, cuDevice);
-
-                            if (cuErr == CUDA_SUCCESS) {
-                                CUstream cuStream;
-                                cuErr = cuStreamCreate(&cuStream, 0);
-
-                                if (cuErr == CUDA_SUCCESS) {
-                                    // Enable Interop on the DirectX renderer
-                                    if (renderer->EnableInterop(cuContext, cuStream)) {
-                                        gpuData->interopCudaContext = cuContext;
-                                        gpuData->interopCudaStream = cuStream;
-                                        gpuData->interopEnabled = true;
-                                        PLUGIN_LOG("DX12-CUDA Interop enabled successfully!");
-                                    } else {
-                                        PLUGIN_LOG("WARNING: EnableInterop failed, using DX12 only");
-                                        cuStreamDestroy(cuStream);
-                                        cuCtxDestroy(cuContext);
-                                    }
-                                } else {
-                                    PLUGIN_LOG("WARNING: cuStreamCreate failed (%d), using DX12 only", cuErr);
-                                    cuCtxDestroy(cuContext);
-                                }
-                            } else {
-                                PLUGIN_LOG("WARNING: cuCtxCreate failed (%d), using DX12 only", cuErr);
-                            }
-                        } else {
-                            PLUGIN_LOG("WARNING: cuDeviceGet failed (%d), using DX12 only", cuErr);
-                        }
-                    } else {
-                        PLUGIN_LOG("WARNING: cuInit failed (%d), using DX12 only", cuErr);
-                    }
-#endif
                 }
                 else {
                     PLUGIN_LOG("ERROR: DirectX Renderer initialization failed!");
