@@ -232,7 +232,7 @@ enum class DebugViewMode : int {
 namespace Defaults {
     // Core Parameters (New Order)
     constexpr float Intensity       = 75.0f;    // 75% = balanced core vs spread
-    constexpr float Exposure        = 1.0f;     // 1x brightness multiplier
+    constexpr float Exposure        = 1.5f;     // 1.5x = visible glow on first apply (was 1.0)
     constexpr float Radius          = 75.0f;    // 75% = balanced glow reach
     constexpr float SpreadDown      = 1.0f;     // 1.0 = minimal blur offset
     constexpr float SpreadUp        = 1.0f;     // 1.0 = minimal blur offset
@@ -241,34 +241,34 @@ namespace Defaults {
     constexpr float OffsetPrefilter = 1.0f;     // 1.0 = standard prefilter offset
     constexpr int   PrefilterQuality = static_cast<int>(::PrefilterQuality::Star13);  // Fast default
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
-    constexpr float Threshold       = 25.0f;    // 25% - lower threshold for more glow
-    constexpr float SoftKnee        = 75.0f;    // 75% - softer threshold transition
+    constexpr float Threshold       = 50.0f;    // 50% = clean, catches only bright areas (was 25%)
+    constexpr float SoftKnee        = 50.0f;    // 50% = balanced transition (was 75%)
 
     // Blur Options
-    constexpr int   Quality         = 8;  // MIP levels (6-12), 8 = balanced default
+    constexpr int   Quality         = 9;  // MIP levels (6-12), 9 = better quality (was 8)
     constexpr int   FalloffType     = static_cast<int>(::FalloffType::Exponential);
     constexpr int   BlurMode        = static_cast<int>(::BlurMode::Gaussian3x3);  // Fast default
 
     // Color
     constexpr float ColorTemp       = 0.0f;     // Neutral
     constexpr float PreserveColor   = 100.0f;   // 100%
-    constexpr float Desaturation    = 45.0f;    // 45% (Deep Glow match)
+    constexpr float Desaturation    = 30.0f;    // 30% = more colorful glow (was 45%)
 
     // Advanced
     constexpr float Anamorphic      = 0.0f;     // Disabled
     constexpr float AnamorphicAngle = 0.0f;     // Horizontal
     constexpr float ChromaticAberration = 0.0f; // Disabled
     constexpr int   CompositeMode   = static_cast<int>(::CompositeMode::Screen);
-    constexpr bool  HDRMode         = true;
-    constexpr bool  Linearize       = false;  // OFF by default (simpler, no alpha issues)
+    constexpr bool  HDRMode         = false;    // Disabled - Karis Average removed in v1.4.0
+    constexpr bool  Linearize       = false;    // OFF by default (simpler, no alpha issues)
     constexpr int   InputProfile    = static_cast<int>(::InputProfile::sRGB);
-    constexpr float Dither          = 50.0f;  // 50% dithering for banding prevention
+    constexpr float Dither          = 30.0f;    // 30% = subtle banding prevention (was 50%)
 
     // Debug
     constexpr int   DebugView       = static_cast<int>(DebugViewMode::Final);
     constexpr float SourceOpacity   = 100.0f;   // 100% = full source visibility
     constexpr float GlowOpacity     = 100.0f;   // 100% = normal glow, up to 200%
-    constexpr float PaddingThreshold = 0.3f;    // 0.3% = clip very dark values for padding optimization
+    constexpr float PaddingThreshold = 0.5f;    // 0.5% = better padding optimization (was 0.3%)
 }
 
 namespace Ranges {

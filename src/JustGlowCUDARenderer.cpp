@@ -677,9 +677,12 @@ bool JustGlowCUDARenderer::Render(
 
     // Step 0: Refine - Calculate BoundingBox for input
     // Use offsetPrefilter as blur radius margin
+    // NOTE: inputBuffer is the original input size (params.inputWidth x inputHeight),
+    //       NOT the expanded output size (params.width x height).
+    //       Prefilter will transform the bounds to output coordinates.
     int blurRadiusForPrefilter = static_cast<int>(params.offsetPrefilter * 10.0f + 0.5f);
     CUDA_LOG("--- Refine (Input) ---");
-    if (!ExecuteRefine(inputBuffer, params.width, params.height, params.width,
+    if (!ExecuteRefine(inputBuffer, params.inputWidth, params.inputHeight, params.srcPitch,
                        params.threshold, blurRadiusForPrefilter, 0)) {
         success = false;
     }

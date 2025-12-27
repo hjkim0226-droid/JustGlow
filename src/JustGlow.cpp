@@ -588,8 +588,9 @@ PF_Err ParamsSetup(
         "Add|Screen|Overlay",
         DISK_ID_COMPOSITE_MODE);
 
-    // HDR Mode
+    // HDR Mode (HIDDEN - Karis Average removed in v1.4.0, caused artifacts)
     AEFX_CLR_STRUCT(def);
+    def.ui_flags = PF_PUI_INVISIBLE;
     PF_ADD_CHECKBOX(
         "HDR Mode",
         "Anti-firefly (Karis Average)",
