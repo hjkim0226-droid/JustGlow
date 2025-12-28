@@ -236,11 +236,11 @@ namespace Defaults {
     constexpr float Intensity       = 75.0f;    // 75% = balanced core vs spread
     constexpr float Exposure        = 1.5f;     // 1.5x = visible glow on first apply (was 1.0)
     constexpr float Radius          = 75.0f;    // 75% = balanced glow reach
-    constexpr float SpreadDown      = 1.0f;     // 1.0 = minimal blur offset
-    constexpr float SpreadUp        = 1.0f;     // 1.0 = minimal blur offset
-    constexpr float OffsetDown      = 1.0f;     // 1.0 = standard base offset
-    constexpr float OffsetUp        = 1.0f;     // 1.0 = standard base offset
-    constexpr float OffsetPrefilter = 1.0f;     // 1.0 = standard prefilter offset
+    constexpr float SpreadDown      = 0.0f;     // 0.0 = no per-level spread increase
+    constexpr float SpreadUp        = 0.0f;     // 0.0 = no per-level spread increase
+    constexpr float OffsetDown      = 0.5f;     // 0.5 = optimal bilinear 2x downsample (center of 2x2 block)
+    constexpr float OffsetUp        = 0.5f;     // 0.5 = optimal bilinear upsample
+    constexpr float OffsetPrefilter = 1.5f;     // 1.5 = optimal for 13-tap star (inner=1.5, outer=3.0)
     constexpr int   PrefilterQuality = static_cast<int>(::PrefilterQuality::Star13);  // Fast default
     constexpr float Falloff         = 50.0f;    // 50% = neutral (0%=boost outer, 100%=decay)
     constexpr float Threshold       = 50.0f;    // 50% = clean, catches only bright areas (was 25%)

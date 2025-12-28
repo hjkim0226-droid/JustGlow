@@ -742,6 +742,36 @@ bool JustGlowCUDARenderer::Render(
         m_lastBenchmark.refine = elapsed;
     }
 
+    // ========================================
+    // Calculate effective MIP levels based on BoundingBox
+    // Optimization: Don't process more levels than the bright area needs
+    // ========================================
+    RenderParams effectiveParams = params;  // Copy params for modification
+    if (success && m_mipBounds[0].valid()) {
+        int boundW = m_mipBounds[0].width();
+        int boundH = m_mipBounds[0].height();
+        int minDim = std::min(boundW, boundH);
+
+        // Calculate max useful levels: stop when minDim < 16
+        int calculatedLevels = 1;
+        int dim = minDim;
+        while (dim > 16 && calculatedLevels < params.mipLevels) {
+            dim = (dim + 1) / 2;
+            calculatedLevels++;
+        }
+
+        // Use the smaller of requested and calculated levels
+        int effectiveLevels = std::min(params.mipLevels, calculatedLevels);
+
+        if (effectiveLevels < params.mipLevels) {
+            CUDA_LOG("MIP optimization: BBox %dx%d -> %d levels (was %d, saved %d)",
+                boundW, boundH, effectiveLevels, params.mipLevels,
+                params.mipLevels - effectiveLevels);
+            effectiveParams.mipLevels = effectiveLevels;
+            m_lastBenchmark.mipLevels = effectiveLevels;  // Update benchmark
+        }
+    }
+
     // Step 0.5: Unmult - Remove black layer from input
     // Runs before Prefilter to prepare input with corrected alpha
     CUdeviceptr prefilterInput = inputBuffer;  // Default: use original input
@@ -777,7 +807,7 @@ bool JustGlowCUDARenderer::Render(
     if (success) {
         CUDA_LOG("--- Downsample Chain ---");
         if (doBenchmark) cuEventRecord(m_timerStart, m_stream);
-        if (!ExecuteDownsampleChain(params)) {
+        if (!ExecuteDownsampleChain(effectiveParams)) {
             success = false;
         }
         if (doBenchmark && success) {
@@ -804,7 +834,7 @@ bool JustGlowCUDARenderer::Render(
     if (success) {
         CUDA_LOG("--- Pre-blur Parallel ---");
         if (doBenchmark) cuEventRecord(m_timerStart, m_stream);
-        if (!ExecutePreblurParallel(params)) {
+        if (!ExecutePreblurParallel(effectiveParams)) {
             // Non-fatal for now - just log warning
             CUDA_LOG("WARNING: Pre-blur parallel failed, continuing with Upsample");
         }
@@ -820,7 +850,7 @@ bool JustGlowCUDARenderer::Render(
     if (success) {
         CUDA_LOG("--- Upsample Chain ---");
         if (doBenchmark) cuEventRecord(m_timerStart, m_stream);
-        if (!ExecuteUpsampleChain(params)) {
+        if (!ExecuteUpsampleChain(effectiveParams)) {
             success = false;
         }
         if (doBenchmark && success) {
@@ -840,7 +870,7 @@ bool JustGlowCUDARenderer::Render(
     if (success) {
         CUDA_LOG("--- Composite ---");
         if (doBenchmark) cuEventRecord(m_timerStart, m_stream);
-        if (!ExecuteComposite(params, inputBuffer, outputBuffer)) {
+        if (!ExecuteComposite(effectiveParams, inputBuffer, outputBuffer)) {
             success = false;
         }
         if (doBenchmark && success) {
@@ -1509,13 +1539,25 @@ bool JustGlowCUDARenderer::ExecuteUpsampleChain(const RenderParams& params) {
         // m_mipBounds[i+1] was calculated on m_mipChain[i] during downsample
         // For level 0, use m_mipBounds[1] (calculated on MIP[0])
         // For deeper levels, use m_mipBounds[i+1]
-        int boundIdx = (i + 1 < MAX_MIP_LEVELS) ? (i + 1) : i;
-        const auto& bounds = m_mipBounds[boundIdx];
+        // IMPORTANT: For deepest level (i == mipLevels-1), m_mipBounds[i+1] is NOT set!
+        //            Use full destination size instead.
+        int boundMinX, boundMinY, boundWidth, boundHeight;
 
-        int boundMinX = bounds.minX;
-        int boundMinY = bounds.minY;
-        int boundWidth = bounds.width();
-        int boundHeight = bounds.height();
+        if (i == params.mipLevels - 1) {
+            // Deepest level: no bounds calculated, use full size
+            boundMinX = 0;
+            boundMinY = 0;
+            boundWidth = dstUpsample.width;
+            boundHeight = dstUpsample.height;
+        } else {
+            // Use calculated bounds from downsample chain
+            int boundIdx = i + 1;
+            const auto& bounds = m_mipBounds[boundIdx];
+            boundMinX = bounds.minX;
+            boundMinY = bounds.minY;
+            boundWidth = bounds.width();
+            boundHeight = bounds.height();
+        }
 
         // Clamp to destination dimensions
         boundMinX = std::max(0, std::min(boundMinX, dstUpsample.width - 1));
