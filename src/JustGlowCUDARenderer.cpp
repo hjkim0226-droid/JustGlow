@@ -980,8 +980,8 @@ bool JustGlowCUDARenderer::ExecuteUnmult(const RenderParams& params, CUdeviceptr
     int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
     int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
 
-    // Pitch in pixels (not bytes)
-    int srcPitch = params.inputPitchBytes / (4 * sizeof(float));
+    // Pitch in pixels (srcPitch is already in pixels, not bytes)
+    int srcPitch = params.srcPitch;
     int dstPitch = srcPitch;  // Same size buffer
 
     // Kernel parameters
