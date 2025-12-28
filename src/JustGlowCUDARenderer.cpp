@@ -743,34 +743,13 @@ bool JustGlowCUDARenderer::Render(
     }
 
     // ========================================
-    // Calculate effective MIP levels based on BoundingBox
-    // Optimization: Don't process more levels than the bright area needs
+    // Effective MIP levels = requested levels (no optimization)
+    // NOTE: BBox-based level reduction was removed because it limits glow spread.
+    //       The glow needs to spread FAR from the bright area, which requires
+    //       deep MIP levels regardless of source size.
+    //       BoundingBox optimization is still used per-level for pixel processing.
     // ========================================
-    RenderParams effectiveParams = params;  // Copy params for modification
-    if (success && m_mipBounds[0].valid()) {
-        int boundW = m_mipBounds[0].width();
-        int boundH = m_mipBounds[0].height();
-        int minDim = std::min(boundW, boundH);
-
-        // Calculate max useful levels: stop when minDim < 16
-        int calculatedLevels = 1;
-        int dim = minDim;
-        while (dim > 16 && calculatedLevels < params.mipLevels) {
-            dim = (dim + 1) / 2;
-            calculatedLevels++;
-        }
-
-        // Use the smaller of requested and calculated levels
-        int effectiveLevels = std::min(params.mipLevels, calculatedLevels);
-
-        if (effectiveLevels < params.mipLevels) {
-            CUDA_LOG("MIP optimization: BBox %dx%d -> %d levels (was %d, saved %d)",
-                boundW, boundH, effectiveLevels, params.mipLevels,
-                params.mipLevels - effectiveLevels);
-            effectiveParams.mipLevels = effectiveLevels;
-            m_lastBenchmark.mipLevels = effectiveLevels;  // Update benchmark
-        }
-    }
+    RenderParams effectiveParams = params;  // Use params as-is
 
     // Step 0.5: Unmult - Remove black layer from input
     // Runs before Prefilter to prepare input with corrected alpha
