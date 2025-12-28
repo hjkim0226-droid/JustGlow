@@ -1369,7 +1369,10 @@ bool JustGlowCUDARenderer::ExecutePreblurParallel(const RenderParams& params) {
     float baseSigma = 1.5f;  // Start with moderate blur
 
     // Process each level in parallel using different streams
-    for (int level = 1; level <= params.mipLevels; level++) {
+    // NOTE: level 1 to mipLevels-1 (0-indexed: 0 to mipLevels-2)
+    // Level 0 is the prefiltered source, we skip it
+    // Last valid index is mipLevels-1, so we stop at level < mipLevels
+    for (int level = 1; level < params.mipLevels; level++) {
         int levelIdx = level - 1;  // 0-indexed for buffers
 
         // Bounds check
