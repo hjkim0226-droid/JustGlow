@@ -1605,6 +1605,7 @@ PF_Err SmartRender(
                     rp.glowOpacity = preRenderData->glowOpacity / 100.0f;      // 0-2
                     rp.paddingThreshold = preRenderData->paddingThreshold;     // Already 0-0.01
                     rp.unpremultiply = preRenderData->unpremultiply;           // Unmult in composite
+                    rp.unmultMode = 0;  // 0=Max (default), 1=SqrtMax, 2=Disabled
 
                     // Image info
                     rp.width = output_worldP->width;

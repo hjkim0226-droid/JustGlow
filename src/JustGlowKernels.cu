@@ -346,6 +346,95 @@ __device__ void softThreshold(
 }
 
 // ============================================================================
+// Unmult Kernel (Premultiplied to Estimated Premultiplied)
+// Removes "black layer" by adjusting alpha based on RGB content
+//
+// Mode 0 (Max): estA = max(R,G,B)
+//   - RGB unchanged, Over Black gives identical result
+//   - Formula: (R, G, B, A) -> (R, G, B, max(R,G,B))
+//
+// Mode 1 (SqrtMax): estA = sqrt(max(R,G,B))
+//   - RGB divided by sqrt(max), then re-premultiplied
+//   - Formula: (R, G, B, A) -> (R/√max, G/√max, B/√max, √max) * √max
+//   - Softer falloff, may affect brightness
+//
+// Mode 2 (Disabled): Pass through unchanged
+// ============================================================================
+
+extern "C" __global__ void UnmultKernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int width, int height,
+    int srcPitch, int dstPitch,
+    int boundMinX, int boundMinY,
+    int boundWidth, int boundHeight,
+    int unmultMode)  // 0=Max, 1=SqrtMax, 2=Disabled
+{
+    int localX = blockIdx.x * blockDim.x + threadIdx.x;
+    int localY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (localX >= boundWidth || localY >= boundHeight)
+        return;
+
+    int x = localX + boundMinX;
+    int y = localY + boundMinY;
+
+    if (x >= width || y >= height)
+        return;
+
+    // Read premultiplied RGBA
+    int srcIdx = (y * srcPitch + x) * 4;
+    float r = input[srcIdx + 0];
+    float g = input[srcIdx + 1];
+    float b = input[srcIdx + 2];
+    float a = input[srcIdx + 3];
+
+    float outR = r, outG = g, outB = b, outA = a;
+
+    if (unmultMode == 2) {
+        // Disabled: pass through unchanged
+        // outR, outG, outB, outA already set
+    }
+    else {
+        float maxRGB = fmaxf(fmaxf(r, g), b);
+
+        if (maxRGB < EPSILON) {
+            // Nearly black: keep original alpha
+            outA = a;
+        }
+        else if (unmultMode == 0) {
+            // Mode 0: Max formula
+            // RGB unchanged, alpha = max(RGB)
+            // Over Black: (R, G, B) unchanged
+            outA = fminf(maxRGB, a);
+        }
+        else if (unmultMode == 1) {
+            // Mode 1: SqrtMax formula (original Interop method)
+            // estA = sqrt(max), RGB divided by estA
+            // This "expands" the color values
+            float estA = sqrtf(maxRGB);
+            float invEstA = 1.0f / estA;
+
+            // Unpremultiply with sqrt(max), then store as new premultiplied
+            // result: (R/√max, G/√max, B/√max, √max)
+            // When composited, gives: R/√max * √max = R (original visible)
+            // BUT internally the values are different!
+            outR = fminf(r * invEstA, 1.0f);
+            outG = fminf(g * invEstA, 1.0f);
+            outB = fminf(b * invEstA, 1.0f);
+            outA = fminf(estA, a);
+        }
+    }
+
+    // Write output
+    int dstIdx = (y * dstPitch + x) * 4;
+    output[dstIdx + 0] = outR;
+    output[dstIdx + 1] = outG;
+    output[dstIdx + 2] = outB;
+    output[dstIdx + 3] = outA;
+}
+
+// ============================================================================
 // Desaturation Kernel (Max-based, in-place)
 // Runs before Prefilter to desaturate input toward max channel
 // This simulates natural highlight blowout to white

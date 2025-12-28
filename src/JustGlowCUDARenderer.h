@@ -104,6 +104,8 @@ private:
     CUfunction m_desaturationKernel;
     // Refine kernel (BoundingBox calculation)
     CUfunction m_refineKernel;
+    // Unmult kernel (removes black layer: A -> max(RGB))
+    CUfunction m_unmultKernel;
     // Pre-blur kernels (Separable Gaussian for parallel execution)
     CUfunction m_preblurGaussianHKernel;  // Horizontal Gaussian blur
     CUfunction m_preblurGaussianVKernel;  // Vertical Gaussian blur
@@ -125,6 +127,8 @@ private:
     CUDAMipBuffer m_gaussianDownsampleTemp;
     // Temp buffer for separable prefilter H-pass
     CUDAMipBuffer m_prefilterSepTemp;
+    // Unmult buffer (input size, for Unmult output before Prefilter)
+    CUDAMipBuffer m_unmultBuffer;
     // Pre-blur result buffers (one per MIP level for parallel execution)
     std::vector<CUDAMipBuffer> m_preblurResults;
     // Temp buffer for Pre-blur H-pass (per-level temp during separable blur)
@@ -153,6 +157,7 @@ private:
     // Rendering stages
     bool ExecuteRefine(CUdeviceptr input, int width, int height, int pitchPixels,
                        float threshold, int blurRadius, int mipLevel);
+    bool ExecuteUnmult(const RenderParams& params, CUdeviceptr input, CUdeviceptr output);
     bool ExecutePrefilter(const RenderParams& params, CUdeviceptr input);
     bool ExecuteDownsampleChain(const RenderParams& params);
     bool ExecuteUpsampleChain(const RenderParams& params);

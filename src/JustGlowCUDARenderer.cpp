@@ -305,6 +305,12 @@ bool JustGlowCUDARenderer::LoadKernels() {
     }
     CUDA_LOG("RefineKernel loaded");
 
+    err = cuModuleGetFunction(&m_unmultKernel, m_module, "UnmultKernel");
+    if (!CheckCUDAError(err, "cuModuleGetFunction(UnmultKernel)")) {
+        return false;
+    }
+    CUDA_LOG("UnmultKernel loaded");
+
     // ========================================
     // Load Pre-blur kernels (Parallel Gaussian blur)
     // ========================================
@@ -619,6 +625,13 @@ void JustGlowCUDARenderer::ReleaseMipChain() {
         m_prefilterSepTemp.devicePtr = 0;
     }
 
+    // Free Unmult buffer
+    if (m_unmultBuffer.devicePtr) {
+        cuMemFree(m_unmultBuffer.devicePtr);
+        m_unmultBuffer.devicePtr = 0;
+        m_unmultBuffer.sizeBytes = 0;
+    }
+
     // Free Pre-blur result buffers
     for (auto& preblur : m_preblurResults) {
         if (preblur.devicePtr) {
@@ -681,6 +694,32 @@ bool JustGlowCUDARenderer::Render(
         return false;
     }
 
+    // Allocate Unmult buffer (input size, not padded size)
+    // Reuse if same size, otherwise reallocate
+    bool useUnmult = (params.unmultMode != 2);  // 0=Max, 1=SqrtMax, 2=Disabled
+    if (useUnmult) {
+        size_t unmultSize = params.inputWidth * params.inputHeight * 4 * sizeof(float);
+        if (m_unmultBuffer.sizeBytes != unmultSize) {
+            if (m_unmultBuffer.devicePtr) {
+                cuMemFree(m_unmultBuffer.devicePtr);
+                m_unmultBuffer.devicePtr = 0;
+            }
+            m_unmultBuffer.width = params.inputWidth;
+            m_unmultBuffer.height = params.inputHeight;
+            m_unmultBuffer.pitchBytes = params.inputWidth * 4 * sizeof(float);
+            m_unmultBuffer.sizeBytes = unmultSize;
+
+            CUresult allocErr = cuMemAlloc(&m_unmultBuffer.devicePtr, unmultSize);
+            if (!CheckCUDAError(allocErr, "cuMemAlloc for UnmultBuffer")) {
+                CUDA_LOG("ERROR: Failed to allocate UnmultBuffer");
+                cuCtxPopCurrent(nullptr);
+                return false;
+            }
+            CUDA_LOG("UnmultBuffer allocated: %dx%d, %zu bytes",
+                params.inputWidth, params.inputHeight, unmultSize);
+        }
+    }
+
     // Execute pipeline
 
     // Step 0: Refine - Calculate BoundingBox for input
@@ -703,9 +742,29 @@ bool JustGlowCUDARenderer::Render(
         m_lastBenchmark.refine = elapsed;
     }
 
+    // Step 0.5: Unmult - Remove black layer from input
+    // Runs before Prefilter to prepare input with corrected alpha
+    CUdeviceptr prefilterInput = inputBuffer;  // Default: use original input
+    if (success && useUnmult) {
+        CUDA_LOG("--- Unmult (Mode=%d) ---", params.unmultMode);
+        if (doBenchmark) cuEventRecord(m_timerStart, m_stream);
+        if (!ExecuteUnmult(params, inputBuffer, m_unmultBuffer.devicePtr)) {
+            CUDA_LOG("WARNING: Unmult failed, using original input");
+            // Fall back to original input
+        } else {
+            prefilterInput = m_unmultBuffer.devicePtr;  // Use unmult output
+        }
+        if (doBenchmark) {
+            cuEventRecord(m_timerStop, m_stream);
+            cuEventSynchronize(m_timerStop);
+            cuEventElapsedTime(&elapsed, m_timerStart, m_timerStop);
+            CUDA_LOG("Unmult timing: %.2fms", elapsed);
+        }
+    }
+
     CUDA_LOG("--- Prefilter ---");
     if (doBenchmark) cuEventRecord(m_timerStart, m_stream);
-    if (success && !ExecutePrefilter(params, inputBuffer)) {
+    if (success && !ExecutePrefilter(params, prefilterInput)) {
         success = false;
     }
     if (doBenchmark && success) {
@@ -894,6 +953,66 @@ bool JustGlowCUDARenderer::ExecuteRefine(
             100.0f * m_mipBounds[mipLevel].width() * m_mipBounds[mipLevel].height() / (width * height),
             width, height);
     }
+
+    return true;
+}
+
+// ============================================================================
+// Execute Unmult (removes black layer: A -> max(RGB))
+// Runs before Prefilter to prepare input for correct alpha handling
+// ============================================================================
+
+bool JustGlowCUDARenderer::ExecuteUnmult(const RenderParams& params, CUdeviceptr input, CUdeviceptr output) {
+    // Use BoundingBox from Refine (m_mipBounds[0])
+    const auto& bounds = m_mipBounds[0];
+    int boundMinX = bounds.minX;
+    int boundMinY = bounds.minY;
+    int boundWidth = bounds.width();
+    int boundHeight = bounds.height();
+
+    // If bounds are empty, nothing to do
+    if (boundWidth <= 0 || boundHeight <= 0) {
+        CUDA_LOG("ExecuteUnmult: Empty bounds, skipping");
+        return true;
+    }
+
+    // Grid size based on BoundingBox
+    int gridX = (boundWidth + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+    int gridY = (boundHeight + THREAD_BLOCK_SIZE - 1) / THREAD_BLOCK_SIZE;
+
+    // Pitch in pixels (not bytes)
+    int srcPitch = params.inputPitchBytes / (4 * sizeof(float));
+    int dstPitch = srcPitch;  // Same size buffer
+
+    // Kernel parameters
+    int width = params.inputWidth;
+    int height = params.inputHeight;
+    int unmultMode = params.unmultMode;  // 0=Max, 1=SqrtMax, 2=Disabled
+
+    void* args[] = {
+        const_cast<CUdeviceptr*>(&input),
+        const_cast<CUdeviceptr*>(&output),
+        &width, &height,
+        &srcPitch, &dstPitch,
+        &boundMinX, &boundMinY, &boundWidth, &boundHeight,
+        &unmultMode
+    };
+
+    // Launch kernel
+    CUresult err = cuLaunchKernel(
+        m_unmultKernel,
+        gridX, gridY, 1,
+        THREAD_BLOCK_SIZE, THREAD_BLOCK_SIZE, 1,
+        0, m_stream,
+        args, nullptr);
+
+    if (!CheckCUDAError(err, "cuLaunchKernel(UnmultKernel)")) {
+        return false;
+    }
+
+    CUDA_LOG("ExecuteUnmult: Processed %dx%d pixels (BBox [%d,%d]-[%d,%d])",
+        boundWidth, boundHeight, boundMinX, boundMinY,
+        boundMinX + boundWidth - 1, boundMinY + boundHeight - 1);
 
     return true;
 }

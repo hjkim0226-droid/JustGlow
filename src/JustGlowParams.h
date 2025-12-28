@@ -231,6 +231,7 @@ struct RenderParams {
     float   glowOpacity;        // 0-2 (from 0-200%)
     float   paddingThreshold;   // 0-0.1: clip dark values for padding optimization (0-10%)
     bool    unpremultiply;      // Enable unpremultiply in composite
+    int     unmultMode;         // 0=Max (default), 1=SqrtMax, 2=Disabled
 
     // Image info (output dimensions - may be expanded for glow)
     int     width;
