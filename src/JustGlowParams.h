@@ -127,9 +127,9 @@ struct MipChainConfig {
 };
 
 // Calculate dynamic MIP levels based on resolution
-// Goes until minimum dimension reaches minSize (default 16px for Deep Glow-like depth)
+// Goes until minimum dimension reaches minSize (default 4px for stability)
 // maxLevels can limit the depth for performance (0 = no limit)
-inline int CalculateDynamicMipLevels(int width, int height, int minSize = 16, int maxLevels = 0) {
+inline int CalculateDynamicMipLevels(int width, int height, int minSize = 4, int maxLevels = 0) {
     int levels = 1;  // Start with level 0 (original size)
     int w = width;
     int h = height;

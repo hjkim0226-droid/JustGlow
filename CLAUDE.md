@@ -14,7 +14,7 @@ JustGlow is a GPU-accelerated glow effect plugin for Adobe After Effects.
 - 13-tap prefilter with ZeroPad (HDR firefly prevention)
 - 9-tap 2D Gaussian downsample (all levels, ZeroPad)
 - 9-tap tent upsample with falloff-based blending (physical light decay)
-- Dynamic MIP levels (up to 12, until min dimension < 16px)
+- Dynamic MIP levels (up to 12, minimum 4px for stability)
 
 ## Build Commands
 
@@ -197,7 +197,7 @@ cmake --install build
 **Medium:**
 - 임시 버퍼 과다 할당 (성능 영향 미미)
 
-## 최적화된 디폴트 값 (v1.5.4)
+## 최적화된 디폴트 값 (v1.7.0)
 
 | 파라미터 | 값 | 이유 |
 |----------|-----|------|
@@ -205,9 +205,11 @@ cmake --install build
 | Threshold | 50% | 밝은 영역만 잡아서 깔끔한 글로우 |
 | SoftKnee | 50% | 균형잡힌 트랜지션 |
 | Quality | 9 | 약간 더 좋은 품질 |
+| OffsetDown/Up | 0.5 | Bilinear 최적화 (halfpixel) |
+| OffsetPrefilter | 0.5 | Bilinear 최적화 (inner=0.5, outer=1.0) |
+| SpreadDown/Up | 0.0 | Dual Kawase 표준 (레벨별 변화 없음) |
 | Desaturation | 30% | 더 컬러풀한 글로우 |
-| HDRMode | false | 제거된 기능 |
-| Dither | 30% | 미세한 밴딩 방지 |
+| Min MIP Size | 4px | 안정성 (기존 16px에서 변경) |
 
 ## Git 브랜치 구조
 

@@ -489,11 +489,11 @@ bool JustGlowCUDARenderer::AllocateMipChain(int width, int height, int levels) {
         }
         CUDA_LOG("Upsample[%d] allocated: %dx%d, %zu bytes", i, w, h, upsample.sizeBytes);
 
-        // Next level is half size
+        // Next level is half size (minimum 4px for stability)
         w = (w + 1) / 2;
         h = (h + 1) / 2;
-        if (w < 1) w = 1;
-        if (h < 1) h = 1;
+        if (w < 4) w = 4;
+        if (h < 4) h = 4;
     }
 
     // Allocate horizontal temp buffer for separable Gaussian blur during upsample
